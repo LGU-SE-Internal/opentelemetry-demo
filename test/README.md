@@ -17,7 +17,7 @@ docker compose run traceBasedTests
 ```
 
 To run tests for specific services, pass the name of the service as a
-parameter (using the folder names located [here](./tracetesting/)):
+parameter (using the folder names located [in the tracetesting directory](./tracetesting/)):
 
 ```sh
 make run-tracetesting SERVICES_TO_TEST="service-1 service-2 ..."
@@ -25,9 +25,9 @@ make run-tracetesting SERVICES_TO_TEST="service-1 service-2 ..."
 docker compose run traceBasedTests "service-1 service-2 ..."
 ```
 
-For instance, if you need to run the tests for `ad-service` and
-`payment-service`, you can run them with:
+For instance, if you need to run the tests for `ad` and `payment`, you can run
+them with:
 
 ```sh
-make run-tracetesting SERVICES_TO_TEST="ad-service payment-service"
+make run-tracetesting SERVICES_TO_TEST="ad payment"
 ```
