@@ -32,13 +32,10 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 Workload (Pod) labels
 */}}
 {{- define "otel-demo.workloadLabels" -}}
-app.kubernetes.io/instance: {{ .Release.Name }}
 {{- if .name }}
 app.kubernetes.io/component: {{ .name}}
-app.kubernetes.io/name: {{ include "otel-demo.name" . }}-{{ .name }}
+app.kubernetes.io/name: {{ .name }}
 app: {{ .name}}
-{{- else }}
-app.kubernetes.io/name: {{ include "otel-demo.name" . }}
 {{- end }}
 {{- end }}
 
@@ -50,9 +47,7 @@ Selector labels
 */}}
 {{- define "otel-demo.selectorLabels" -}}
 {{- if .name }}
-opentelemetry.io/name: {{ include "otel-demo.name" . }}-{{ .name }}
-{{- else }}
-opentelemetry.io/name: {{ include "otel-demo.name" . }}
+opentelemetry.io/name: {{ .name }}
 {{- end }}
 {{- end }}
 

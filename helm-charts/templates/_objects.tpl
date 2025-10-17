@@ -6,7 +6,7 @@ Demo component Deployment template
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "otel-demo.name" . }}-{{ .name }}
+  name: {{ .name }}
   labels:
     {{- include "otel-demo.labels" . | nindent 4 }}
 spec:
@@ -49,18 +49,18 @@ spec:
       {{- end}}
       containers:
         - name: {{ .name }}
-          image: '{{ ((.imageOverride).repository) | default .defaultValues.image.repository }}:{{ ((.imageOverride).tag) | default (printf "%s-%s" (default .Chart.AppVersion .defaultValues.image.tag) (replace "-" "" .name)) }}'
+          image: '{{ ((.imageOverride).repository) | default .defaultValues.image.repository }}:{{ ((.imageOverride).tag) | default (printf "%s-%s" (default .Chart.AppVersion .defaultValues.image.tag) .name) }}'
           imagePullPolicy: {{ ((.imageOverride).pullPolicy) | default .defaultValues.image.pullPolicy }}
           {{- if .command }}
           command:
-            {{- .command | toYaml | nindent 10 -}}
+            {{- .command | toYaml | nindent 12 -}}
           {{- end }}
           {{- if or .ports .service}}
           ports:
-            {{- include "otel-demo.pod.ports" . | nindent 10 }}
+            {{- include "otel-demo.pod.ports" . | nindent 12 }}
           {{- end }}
           env:
-            {{- include "otel-demo.pod.env" . | nindent 10 }}
+            {{- include "otel-demo.pod.env" . | nindent 12 }}
           resources:
             {{- .resources | toYaml | nindent 12 }}
           {{- if or .defaultValues.securityContext .securityContext }}
@@ -72,6 +72,9 @@ spec:
             {{- .livenessProbe | toYaml | nindent 12 }}
           {{- end }}
           volumeMounts:
+            {{- if .additionalVolumeMounts }}
+            {{- tpl (toYaml .additionalVolumeMounts) . | nindent 12 }}
+            {{- end }}
           {{- range .mountedConfigMaps }}
             - name: {{ .name | lower }}
               mountPath: {{ .mountPath }}
@@ -79,6 +82,52 @@ spec:
               subPath: {{ .subPath }}
               {{- end }}
           {{- end }}
+          {{- range .mountedEmptyDirs }}
+            - name: {{ .name | lower }}
+              mountPath: {{ .mountPath }}
+              {{- if .subPath }}
+              subPath: {{ .subPath }}
+              {{- end }}
+          {{- end }}
+        {{- range .sidecarContainers }}
+        {{- $sidecar := set . "name" (.name | lower)}}
+        {{- $sidecar := set . "Chart" $.Chart }}
+        {{- $sidecar := set . "Release" $.Release }}
+        {{- $sidecar := set . "defaultValues" $.defaultValues }}
+        - name: {{ .name   }}
+          image: '{{ ((.imageOverride).repository) | default .defaultValues.image.repository }}:{{ ((.imageOverride).tag) | default (printf "%s-%s" (default .Chart.AppVersion .defaultValues.image.tag) .name) }}'
+          imagePullPolicy: {{ ((.imageOverride).pullPolicy) | default .defaultValues.image.pullPolicy }}
+          {{- if .command }}
+          command:
+            {{- .command | toYaml | nindent 12 -}}
+          {{- end }}
+          {{- if or .ports .service }}
+          ports:
+            {{- include "otel-demo.pod.ports" . | nindent 12 }}
+          {{- end }}
+          env:
+            {{- include "otel-demo.pod.env" . | nindent 12 }}
+          {{- if .resources }}
+          resources:
+            {{- .resources | toYaml | nindent 12 }}
+          {{- end }}
+          {{- if or .defaultValues.securityContext .securityContext }}
+          securityContext:
+            {{- .securityContext | default .defaultValues.securityContext | toYaml | nindent 12 }}
+          {{- end}}
+          {{- if .livenessProbe }}
+          livenessProbe:
+            {{- .livenessProbe | toYaml | nindent 12 }}
+          {{- end }}
+          {{- if .volumeMounts }}
+          volumeMounts:
+            {{- .volumeMounts | toYaml | nindent 12 }}
+          {{- end }}
+        {{- end }}
+      {{- if .initContainers }}
+      initContainers:
+        {{- tpl (toYaml .initContainers) . | nindent 8 }}
+      {{- end}}
       volumes:
         {{- range .mountedConfigMaps }}
         - name: {{ .name | lower}}
@@ -86,13 +135,16 @@ spec:
             {{- if .existingConfigMap }}
             name: {{ tpl .existingConfigMap $ }}
             {{- else }}
-            name: {{ include "otel-demo.name" $ }}-{{ $.name }}-{{ .name | lower }}
+            name: {{ $.name }}-{{ .name | lower }}
             {{- end }}
         {{- end }}
-      {{- if .initContainers }}
-      initContainers:
-        {{- tpl (toYaml .initContainers) . | nindent 8 }}
-      {{- end}}
+        {{- range .mountedEmptyDirs }}
+        - name: {{ .name | lower}}
+          emptyDir: {}
+        {{- end }}
+        {{- if .additionalVolumes }}
+        {{- tpl (toYaml .additionalVolumes) . | nindent 8 }}
+        {{- end }}
 {{- end }}
 
 {{/*
@@ -105,7 +157,7 @@ Demo component Service template
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "otel-demo.name" . }}-{{ .name }}
+  name: {{ .name }}
   labels:
     {{- include "otel-demo.labels" . | nindent 4 }}
   {{- with $service.annotations }}
@@ -116,20 +168,39 @@ spec:
   type: {{ $service.type | default "ClusterIP" }}
   ports:
     {{- if .ports }}
-    {{- range $port := .ports }}
-    - port: {{ $port.value }}
-      name: {{ $port.name}}
-      targetPort: {{ $port.value }}
+    {{- range .ports }}
+    - port: {{ .value }}
+      name: {{ .name}}
+      targetPort: {{ .value }}
     {{- end }}
     {{- end }}
 
-    {{- if $service.port }}
-    - port: {{ $service.port}}
+    {{- if and .service .service.port }}
+    - port: {{ .service.port}}
       name: tcp-service
-      targetPort: {{ $service.port }}
-      {{- if $service.nodePort }}
-      nodePort: {{ $service.nodePort }}
-      {{- end }}
+      targetPort: {{ .service.port }}
+    {{- if .service.nodePort }}
+      nodePort: {{ .service.nodePort }}
+    {{- end }}
+    {{- end }}
+
+    {{- range $i, $sidecar := .sidecarContainers }}
+    {{- if .ports }}
+    {{- range .ports }}
+    - port: {{ .value }}
+      name: {{ .name}}
+      targetPort: {{ .value }}
+    {{- end }}
+    {{- end }}
+
+    {{- if and .service .service.port }}
+    - port: {{ .service.port}}
+      name: tcp-service-{{ $i }}
+      targetPort: {{ .service.port }}
+    {{- if .service.nodePort }}
+      nodePort: {{ .service.nodePort }}
+    {{- end }}
+    {{- end }}
     {{- end }}
   selector:
     {{- include "otel-demo.selectorLabels" . | nindent 4 }}
@@ -146,7 +217,7 @@ Demo component ConfigMap template
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "otel-demo.name" $ }}-{{ $.name }}-{{ .name | lower }}
+  name: {{ $.name }}-{{ .name | lower }}
   labels:
         {{- include "otel-demo.labels" $ | nindent 4 }}
 data:
@@ -182,9 +253,9 @@ apiVersion: "networking.k8s.io/v1"
 kind: Ingress
 metadata:
   {{- if .name }}
-  name: {{include "otel-demo.name" $ }}-{{ $.name }}-{{ .name | lower }}
+  name: {{ $.name }}-{{ .name | lower }}
   {{- else }}
-  name: {{include "otel-demo.name" $ }}-{{ $.name }}
+  name: {{ $.name }}
   {{- end }}
   labels:
     {{- include "otel-demo.labels" $ | nindent 4 }}
@@ -218,7 +289,7 @@ spec:
             pathType: {{ .pathType }}
             backend:
               service:
-                name: {{ include "otel-demo.name" $ }}-{{ $.name }}
+                name: {{ $.name }}
                 port:
                   number: {{ .port }}
           {{- end }}
