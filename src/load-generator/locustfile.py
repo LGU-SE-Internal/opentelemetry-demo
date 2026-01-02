@@ -79,10 +79,12 @@ base_url = f"http://{os.environ.get('FLAGD_HOST', 'localhost')}:{os.environ.get(
 api.set_provider(OFREPProvider(base_url=base_url))
 api.add_hooks([TracingHook()])
 
+
 def get_flagd_value(FlagName):
     # Initialize OpenFeature
     client = api.get_client()
     return client.get_integer_value(FlagName, 0)
+
 
 categories = [
     "binoculars",
@@ -107,8 +109,9 @@ products = [
     "HQTGWGPNH4",
 ]
 
-people_file = open('people.json')
+people_file = open("people.json")
 people = json.load(people_file)
+
 
 class WebsiteUser(HttpUser):
     wait_time = between(1, 10)
@@ -126,14 +129,20 @@ class WebsiteUser(HttpUser):
     @task(10)
     def browse_product(self):
         product = random.choice(products)
-        with self.tracer.start_as_current_span("user_browse_product", context=Context(), attributes={"product.id": product}):
+        with self.tracer.start_as_current_span(
+            "user_browse_product", context=Context(), attributes={"product.id": product}
+        ):
             logging.info(f"User browsing product: {product}")
             self.client.get("/api/products/" + product)
 
     @task(3)
     def get_recommendations(self):
         product = random.choice(products)
-        with self.tracer.start_as_current_span("user_get_recommendations", context=Context(), attributes={"product.id": product}):
+        with self.tracer.start_as_current_span(
+            "user_get_recommendations",
+            context=Context(),
+            attributes={"product.id": product},
+        ):
             logging.info(f"User getting recommendations for product: {product}")
             params = {
                 "productIds": [product],
@@ -143,25 +152,35 @@ class WebsiteUser(HttpUser):
     @task(2)
     def get_product_reviews(self):
         product = random.choice(products)
-        with self.tracer.start_as_current_span("user_get_product_reviews", context=Context(), attributes={"product.id": product}):
+        with self.tracer.start_as_current_span(
+            "user_get_product_reviews",
+            context=Context(),
+            attributes={"product.id": product},
+        ):
             logging.info(f"User getting product reviews for product: {product}")
             self.client.get("/api/product-reviews/" + product)
 
     @task(1)
     def ask_product_ai_assistant(self):
         product = random.choice(products)
-        question = 'Can you summarize the product reviews?'
-        with self.tracer.start_as_current_span("user_ask_product_ai_assistant", context=Context(), attributes={"product.id": product, "question": question}):
-            logging.info(f"Asking the AI Assistant a question for: {product} {question}")
-            question = {
-                "question": question
-            }
+        question = "Can you summarize the product reviews?"
+        with self.tracer.start_as_current_span(
+            "user_ask_product_ai_assistant",
+            context=Context(),
+            attributes={"product.id": product, "question": question},
+        ):
+            logging.info(
+                f"Asking the AI Assistant a question for: {product} {question}"
+            )
+            question = {"question": question}
             self.client.post("/api/product-ask-ai-assistant/" + product, json=question)
 
     @task(3)
     def get_ads(self):
         category = random.choice(categories)
-        with self.tracer.start_as_current_span("user_get_ads", context=Context(), attributes={"category": str(category)}):
+        with self.tracer.start_as_current_span(
+            "user_get_ads", context=Context(), attributes={"category": str(category)}
+        ):
             logging.info(f"User getting ads for category: {category}")
             params = {
                 "contextKeys": [category],
@@ -180,7 +199,11 @@ class WebsiteUser(HttpUser):
             user = str(uuid.uuid1())
         product = random.choice(products)
         quantity = random.choice([1, 2, 3, 4, 5, 10])
-        with self.tracer.start_as_current_span("user_add_to_cart", context=Context(), attributes={"user.id": user, "product.id": product, "quantity": quantity}):
+        with self.tracer.start_as_current_span(
+            "user_add_to_cart",
+            context=Context(),
+            attributes={"user.id": user, "product.id": product, "quantity": quantity},
+        ):
             logging.info(f"User {user} adding {quantity} of product {product} to cart")
             self.client.get("/api/products/" + product)
             cart_item = {
@@ -195,7 +218,9 @@ class WebsiteUser(HttpUser):
     @task(1)
     def checkout(self):
         user = str(uuid.uuid1())
-        with self.tracer.start_as_current_span("user_checkout_single", context=Context(), attributes={"user.id": user}):
+        with self.tracer.start_as_current_span(
+            "user_checkout_single", context=Context(), attributes={"user.id": user}
+        ):
             self.add_to_cart(user=user)
             checkout_person = random.choice(people)
             checkout_person["userId"] = user
@@ -206,8 +231,11 @@ class WebsiteUser(HttpUser):
     def checkout_multi(self):
         user = str(uuid.uuid1())
         item_count = random.choice([2, 3, 4])
-        with self.tracer.start_as_current_span("user_checkout_multi", context=Context(),
-                                            attributes={"user.id": user, "item.count": item_count}):
+        with self.tracer.start_as_current_span(
+            "user_checkout_multi",
+            context=Context(),
+            attributes={"user.id": user, "item.count": item_count},
+        ):
             for i in range(item_count):
                 self.add_to_cart(user=user)
             checkout_person = random.choice(people)
@@ -219,7 +247,11 @@ class WebsiteUser(HttpUser):
     def flood_home(self):
         flood_count = get_flagd_value("loadGeneratorFloodHomepage")
         if flood_count > 0:
-            with self.tracer.start_as_current_span("user_flood_home",  context=Context(), attributes={"flood.count": flood_count}):
+            with self.tracer.start_as_current_span(
+                "user_flood_home",
+                context=Context(),
+                attributes={"flood.count": flood_count},
+            ):
                 logging.info(f"User flooding homepage {flood_count} times")
                 for _ in range(0, flood_count):
                     self.client.get("/")
@@ -234,26 +266,38 @@ class WebsiteUser(HttpUser):
             self.index()
 
 
-browser_traffic_enabled = os.environ.get("LOCUST_BROWSER_TRAFFIC_ENABLED", "").lower() in ("true", "yes", "on")
+browser_traffic_enabled = os.environ.get(
+    "LOCUST_BROWSER_TRAFFIC_ENABLED", ""
+).lower() in ("true", "yes", "on")
 
 if browser_traffic_enabled:
+
     class WebsiteBrowserUser(PlaywrightUser):
         headless = True  # to use a headless browser, without a GUI
 
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
-            self.tracer = trace.get_tracer(__name__)
+
+        def _get_tracer(self):
+            """Safely get tracer, initializing if needed"""
+            if not hasattr(self, "tracer") or self.tracer is None:
+                self.tracer = trace.get_tracer(__name__)
+            return self.tracer
 
         @task
         @pw
         async def open_cart_page_and_change_currency(self, page: PageWithRetry):
-            with self.tracer.start_as_current_span("browser_change_currency", context=Context()):
+            with self._get_tracer().start_as_current_span(
+                "browser_change_currency", context=Context()
+            ):
                 try:
                     page.on("console", lambda msg: print(msg.text))
-                    await page.route('**/*', add_baggage_header)
+                    await page.route("**/*", add_baggage_header)
                     await page.goto("/cart", wait_until="domcontentloaded")
-                    await page.select_option('[name="currency_code"]', 'CHF')
-                    await page.wait_for_timeout(2000)  # giving the browser time to export the traces
+                    await page.select_option('[name="currency_code"]', "CHF")
+                    await page.wait_for_timeout(
+                        2000
+                    )  # giving the browser time to export the traces
                     logging.info("Currency changed to CHF")
                 except Exception as e:
                     logging.error(f"Error in change currency task: {str(e)}")
@@ -261,24 +305,31 @@ if browser_traffic_enabled:
         @task
         @pw
         async def add_product_to_cart(self, page: PageWithRetry):
-            with self.tracer.start_as_current_span("browser_add_to_cart", context=Context()):
+            with self._get_tracer().start_as_current_span(
+                "browser_add_to_cart", context=Context()
+            ):
                 try:
                     page.on("console", lambda msg: print(msg.text))
-                    await page.route('**/*', add_baggage_header)
+                    await page.route("**/*", add_baggage_header)
                     await page.goto("/", wait_until="domcontentloaded")
                     await page.click('p:has-text("Roof Binoculars")')
                     await page.wait_for_load_state("domcontentloaded")
                     await page.click('button:has-text("Add To Cart")')
                     await page.wait_for_load_state("domcontentloaded")
-                    await page.wait_for_timeout(2000)  # giving the browser time to export the traces
+                    await page.wait_for_timeout(
+                        2000
+                    )  # giving the browser time to export the traces
                     logging.info("Product added to cart successfully")
                 except Exception as e:
                     logging.error(f"Error in add to cart task: {str(e)}")
 
+
 async def add_baggage_header(route: Route, request: Request):
-    existing_baggage = request.headers.get('baggage', '')
+    existing_baggage = request.headers.get("baggage", "")
     headers = {
         **request.headers,
-        'baggage': ', '.join(filter(None, (existing_baggage, 'synthetic_request=true')))
+        "baggage": ", ".join(
+            filter(None, (existing_baggage, "synthetic_request=true"))
+        ),
     }
     await route.continue_(headers=headers)
