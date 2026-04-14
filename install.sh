@@ -6,4 +6,4 @@ helm repo add opensearch https://opensearch-project.github.io/helm-charts
 helm dependency build helm-charts
 helm install otel-demo helm-charts -n otel-demo  --create-namespace
 
-helm upgrade otel-demo helm-charts -n otel-demo
+helm upgrade --install otel-demo helm-charts -n otel-demo --create-namespace

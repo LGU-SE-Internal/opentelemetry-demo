@@ -8,7 +8,7 @@ default:
           apiVersion: v1
           fieldPath: "metadata.labels['app.kubernetes.io/component']"
     - name: OTEL_COLLECTOR_NAME
-      value: opentelemetry-kube-stack-deployment-collector.monitoring
+      value: otel-collector
     - name: OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE
       value: cumulative
     - name: POD_NAME
@@ -751,7 +751,7 @@ components:
       runAsNonRoot: true
 
 opentelemetry-collector:
-  enabled: false
+  enabled: true
   image:
     repository: "otel/opentelemetry-collector-contrib"
   fullnameOverride: otel-collector
@@ -821,11 +821,6 @@ opentelemetry-collector:
         endpoint: jaeger-collector:4317
         tls:
           insecure: true
-      # Create an exporter to Prometheus (metrics)
-      otlphttp/prometheus:
-        endpoint: http://prometheus-stack-kube-prom-prometheus.monitoring:9090/api/v1/otlp
-        tls:
-          insecure: true
       opensearch:
         logs_index: otel-logs
         logs_index_time_format: "yyyy-MM-dd"
@@ -860,11 +855,21 @@ opentelemetry-collector:
       transform:
         error_mode: ignore
         trace_statements:
+          # Sanitize spans to prevent span metrics cardinality explosion
+          # caused by non-compliant high cardinality span names:
+          # 1. Define missing http.route on key HTTP operations for meaningful operation names
+          # 2. Then normalize span names; http server spans lacking http.route default to operations "GET", "POST", etc.
           - context: span
+            # FRONTEND SERVICE
+            conditions:
+              - span.kind == SPAN_KIND_SERVER and resource.attributes["service.name"] == "frontend" and span.attributes["http.route"] == nil
             statements:
-              # could be removed when https://github.com/vercel/next.js/pull/64852 is fixed upstream
-              - replace_pattern(name, "\\?.*", "")
-              - replace_match(name, "GET /api/products/*", "GET /api/products/{productId}")
+              # Workaround for Next.js high cardinality span name issue: https://github.com/vercel/next.js/issues/54694
+              - set(span.attributes["http.route"], "/api/cart") where IsMatch(span.attributes["http.target"], "\\/api\\/cart")  # e.g. # /api/cart
+              - set(span.attributes["http.route"], "/api/checkout") where IsMatch(span.attributes["http.target"], "\\/api\\/checkout")  # e.g. # /api/checkout
+              - set(span.attributes["http.route"], "/api/products/{productId}") where IsMatch(span.attributes["http.target"], "\\/api\\/products\\/.*")  # e.g. /api/products/1YMWWN1N4O
+              - set(span.attributes["http.route"], "/api/recommendations") where IsMatch(span.attributes["http.target"], "\\/api\\/recommendations")  # e.g. # /api/recommendations?productIds=...
+              - set(span.attributes["http.route"], "/api/data") where IsMatch(span.attributes["http.target"], "\\/api\\/data.*")  # e.g. # " /api/data?contextKeys=telescopes" or /api/data/?contextKeys=cameras
       resource:
         attributes:
         - key: service.instance.id
@@ -882,7 +887,7 @@ opentelemetry-collector:
         metrics:
           receivers: [httpcheck/frontend-proxy, nginx, otlp, postgresql, redis, spanmetrics]
           processors: [memory_limiter, resourcedetection, resource, batch]
-          exporters: [otlphttp/prometheus, debug, clickhouse]
+          exporters: [debug, clickhouse]
         logs:
           processors: [memory_limiter, resourcedetection, resource, batch]
           exporters: [opensearch, debug, clickhouse]
@@ -896,7 +901,8 @@ opentelemetry-collector:
                 exporter:
                   otlp:
                     protocol: http/protobuf
-                    endpoint: opentelemetry-kube-stack-deployment-collector.monitoring:4318
+                    endpoint: http://otel-collector:4318
+                    insecure: true
 
 jaeger:
   enabled: false
