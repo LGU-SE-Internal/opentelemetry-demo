@@ -333,3 +333,177 @@ async def add_baggage_header(route: Route, request: Request):
         ),
     }
     await route.continue_(headers=headers)
+            checkout_person["userId"] = user
+            self.client.post("/api/checkout", json=checkout_person)
+            logging.info(f"Multi-item checkout completed for user {user}")
+
+    @task(5)
+    def flood_home(self):
+        flood_count = get_flagd_value("loadGeneratorFloodHomepage")
+        if flood_count > 0:
+            with self.tracer.start_as_current_span(
+                "user_flood_home",
+                context=Context(),
+                attributes={"flood.count": flood_count},
+            ):
+                logging.info(f"User flooding homepage {flood_count} times")
+                for _ in range(0, flood_count):
+                    self.client.get("/")
+
+    @task(1)
+    def buy_invalid_product(self):
+        with self.tracer.start_as_current_span("user_buy_invalid_product", context=Context()):
+            user = str(uuid.uuid1())
+            invalid_sku = "INVALID-SKU-404"
+            cart_item = {
+                "item": {
+                    "productId": invalid_sku,
+                    "quantity": 1,
+                },
+                "userId": user,
+            }
+            response = self.client.post("/api/cart", json=cart_item)
+            logging.warning(f"Invalid product purchase attempt returned status: {response.status_code}")
+
+    @task(1)
+    def checkout_empty_cart(self):
+        with self.tracer.start_as_current_span("user_checkout_empty_cart", context=Context()):
+            user = str(uuid.uuid1())
+            checkout_person = random.choice(people)
+            checkout_person["userId"] = user
+            response = self.client.post("/api/checkout", json=checkout_person)
+            logging.warning(f"Empty cart checkout attempt returned status: {response.status_code}")
+
+    @task(1)
+    def browse_nonexistent(self):
+        with self.tracer.start_as_current_span("user_browse_nonexistent_product", context=Context()):
+            invalid_product_id = "DOES-NOT-EXIST-789"
+            response = self.client.get(f"/api/products/{invalid_product_id}")
+            logging.warning(f"Nonexistent product browse returned status: {response.status_code}")
+
+    @task(2)
+    def purchase_funnel(self):
+        with self.tracer.start_as_current_span("user_purchase_funnel", context=Context()) as parent_span:
+            user = str(uuid.uuid1())
+            logging.info("Starting purchase funnel session")
+            
+            # Step 1: Browse index page
+            with self.tracer.start_as_current_span("funnel_index", context=Context(), attributes={"funnel.stage": "index"}):
+                self.client.get("/")
+            
+            # Step 2: View 2-3 random products
+            num_products = random.randint(2, 3)
+            viewed_products = random.sample(products, num_products)
+            for product in viewed_products:
+                with self.tracer.start_as_current_span("funnel_view_product", context=Context(), attributes={"funnel.stage": "view_product", "product.id": product}):
+                    self.client.get(f"/api/products/{product}")
+            
+            last_product = viewed_products[-1]
+            # Step 3: Get recommendations for last viewed product
+            with self.tracer.start_as_current_span("funnel_get_recommendations", context=Context(), attributes={"funnel.stage": "get_recommendations", "product.id": last_product}):
+                params = {"productIds": [last_product]}
+                self.client.get("/api/recommendations", params=params)
+            
+            # Step4: Add one viewed product to cart
+            product_to_add = random.choice(viewed_products)
+            quantity = random.randint(1, 3)
+            with self.tracer.start_as_current_span("funnel_add_to_cart", context=Context(), attributes={"funnel.stage": "add_to_cart", "product.id": product_to_add, "quantity": quantity}):
+                cart_item = {
+                    "item": {
+                        "productId": product_to_add,
+                        "quantity": quantity,
+                    },
+                    "userId": user,
+                }
+                self.client.post("/api/cart", json=cart_item)
+            
+            # Step5: 50% chance checkout, else abandon
+            if random.random() < 0.5:
+                with self.tracer.start_as_current_span("funnel_checkout", context=Context(), attributes={"funnel.stage": "checkout", "user.id": user}):
+                    checkout_person = random.choice(people)
+                    checkout_person["userId"] = user
+                    self.client.post("/api/checkout", json=checkout_person)
+                    parent_span.set_attribute("funnel.completed", True)
+                    logging.info("Purchase funnel completed successfully")
+            else:
+                parent_span.set_attribute("funnel.abandoned", True)
+                logging.info("Purchase funnel abandoned before checkout")
+
+    def on_start(self):
+        with self.tracer.start_as_current_span("user_session_start", context=Context()):
+            session_id = str(uuid.uuid4())
+            logging.info(f"Starting user session: {session_id}")
+            ctx = baggage.set_baggage("session.id", session_id)
+            ctx = baggage.set_baggage("synthetic_request", "true", context=ctx)
+            context.attach(ctx)
+            self.index()
+
+
+browser_traffic_enabled = os.environ.get(
+    "LOCUST_BROWSER_TRAFFIC_ENABLED", ""
+).lower() in ("true", "yes", "on")
+
+if browser_traffic_enabled:
+
+    class WebsiteBrowserUser(PlaywrightUser):
+        headless = True  # to use a headless browser, without a GUI
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.tracer = trace.get_tracer(__name__)
+
+        def _get_tracer(self):
+            """Safely get tracer, initializing if needed"""
+            if not hasattr(self, "tracer") or self.tracer is None:
+                self.tracer = trace.get_tracer(__name__)
+            return self.tracer
+
+        @task
+        @pw
+        async def open_cart_page_and_change_currency(self, page: PageWithRetry):
+            with self._get_tracer().start_as_current_span(
+                "browser_change_currency", context=Context()
+            ):
+                try:
+                    page.on("console", lambda msg: print(msg.text))
+                    await page.route("**/*", add_baggage_header)
+                    await page.goto("/cart", wait_until="domcontentloaded")
+                    await page.select_option('[name="currency_code"]', "CHF")
+                    await page.wait_for_timeout(
+                        2000
+                    )  # giving the browser time to export the traces
+                    logging.info("Currency changed to CHF")
+                except Exception as e:
+                    logging.error(f"Error in change currency task: {str(e)}")
+
+        @task
+        @pw
+        async def add_product_to_cart(self, page: PageWithRetry):
+            with self._get_tracer().start_as_current_span(
+                "browser_add_to_cart", context=Context()
+            ):
+                try:
+                    page.on("console", lambda msg: print(msg.text))
+                    await page.route("**/*", add_baggage_header)
+                    await page.goto("/", wait_until="domcontentloaded")
+                    await page.click('p:has-text("Roof Binoculars")')
+                    await page.wait_for_load_state("domcontentloaded")
+                    await page.click('button:has-text("Add To Cart")')
+                    await page.wait_for_load_state("domcontentloaded")
+                    await page.wait_for_timeout(
+                        2000
+                    )  # giving the browser time to export the traces
+                    logging.info("Product added to cart successfully")
+                except Exception as e:
+                    logging.error(f"Error in add to cart task: {str(e)}")
+
+
+async def add_baggage_header(route: Route, request: Request):
+    existing_baggage = request.headers.get("baggage", "")
+    headers = {
+        **request.headers,
+        "baggage": ", ".join(
+            filter(None, (existing_baggage, "synthetic_request=true"))
+        ),
+    }
+    await route.continue_(headers=headers)
