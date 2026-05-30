@@ -14,4 +14,4 @@ opentelemetry-semantic-conventions==0.59b0
 opentelemetry-instrumentation-logging==0.59b0
 
 pytest==8.2.1
-flask==3.0.3
+pytest-cov==5.0.0
