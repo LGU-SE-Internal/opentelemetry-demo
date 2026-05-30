@@ -37,6 +37,11 @@ from openfeature.contrib.provider.ofrep import OFREPProvider
 from openfeature.contrib.hook.opentelemetry import TracingHook
 
 from playwright.async_api import Route, Request
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.4; rv:125.0) Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
+]
 
 # Configure tracer provider first (needed for trace context in logs)
 tracer_provider = TracerProvider()
@@ -122,6 +127,9 @@ class WebsiteUser(HttpUser):
         super().__init__(*args, **kwargs)
         self.tracer = trace.get_tracer(__name__)
         self.client.timeout = int(REQUEST_TIMEOUT)
+    def on_start(self):
+        self.client.headers["User-Agent"] = random.choice(USER_AGENTS)
+
 
     @task(1)
     def index(self):
