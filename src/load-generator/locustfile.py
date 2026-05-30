@@ -8,6 +8,7 @@ import os
 import random
 import uuid
 import logging
+from pythonjsonlogger import jsonlogger
 
 from locust import HttpUser, task, between
 from locust_plugins.users.playwright import PlaywrightUser, pw, PageWithRetry, event
@@ -55,7 +56,7 @@ logger_provider.add_log_record_processor(BatchLogRecordProcessor(log_exporter))
 handler = LoggingHandler(level=logging.INFO, logger_provider=logger_provider)
 
 # Use JSON formatter for structured logging
-json_formatter = JsonFormatter(
+json_formatter = jsonlogger.JsonFormatter(
     "%(asctime)s %(levelname)s %(message)s %(user_id)s %(path)s %(status_code)s %(event_type)s",
     rename_fields={"levelname": "level", "asctime": "timestamp"},
     defaults={
@@ -236,12 +237,4 @@ class WebsiteUser(HttpUser):
         if user == "":
             user = str(uuid.uuid1())
         product = random.choice(products)
-        quantity = random.choice([1, 2, 3, 4, 5, 10])
-        with self.tracer.start_as_current_span(
-            "user_add_to_cart",
-            context=Context(),
-            attributes={"user.id": user, "product.id": product, "quantity": quantity},
-        ):
-            logging.info(f"User {user} adding {quantity} of product {product} to cart")
-            self.client.get("/api/products/" + product)
-            cart_item =
+        quantity = random.choice([1,
