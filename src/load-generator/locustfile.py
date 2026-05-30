@@ -74,10 +74,40 @@ URLLib3Instrumentor().instrument()
 
 logging.info("Instrumentation complete - logs will now include trace context")
 
+# Environment variable configuration and validation
+"""
+Environment Variables:
+- REQUEST_TIMEOUT: Timeout in seconds for HTTP requests. Must be a positive integer >= 1. Default: 10.
+- FLAGD_HOST: Hostname or IP address of the Flagd service. Must be a non-empty string. Default: localhost.
+- FLAGD_OFREP_PORT: Port number for the Flagd OFREP endpoint. Must be an integer between 1 and 65535. Default: 8016.
+"""
+
+# Validate REQUEST_TIMEOUT
 REQUEST_TIMEOUT = os.environ.get("REQUEST_TIMEOUT", "10")
+try:
+    request_timeout_int = int(REQUEST_TIMEOUT)
+    if request_timeout_int <= 0:
+        raise ValueError(f"REQUEST_TIMEOUT must be a positive integer, got {REQUEST_TIMEOUT}")
+except ValueError as e:
+    raise ValueError(f"Invalid REQUEST_TIMEOUT value: {REQUEST_TIMEOUT}. Must be a positive integer >= 1.") from e
+
+# Validate FLAGD_HOST
+FLAGD_HOST = os.environ.get('FLAGD_HOST', 'localhost')
+if not FLAGD_HOST or not isinstance(FLAGD_HOST, str) or len(FLAGD_HOST.strip()) == 0:
+    raise ValueError(f"Invalid FLAGD_HOST value: {FLAGD_HOST}. Must be a non-empty hostname or IP address.")
+FLAGD_HOST = FLAGD_HOST.strip()
+
+# Validate FLAGD_OFREP_PORT
+FLAGD_OFREP_PORT = os.environ.get('FLAGD_OFREP_PORT', 8016)
+try:
+    flagd_port_int = int(FLAGD_OFREP_PORT)
+    if not (1 <= flagd_port_int <= 65535):
+        raise ValueError(f"FLAGD_OFREP_PORT must be between 1 and 65535, got {FLAGD_OFREP_PORT}")
+except ValueError as e:
+    raise ValueError(f"Invalid FLAGD_OFREP_PORT value: {FLAGD_OFREP_PORT}. Must be an integer between 1 and 65535.") from e
 
 # Initialize Flagd provider
-base_url = f"http://{os.environ.get('FLAGD_HOST', 'localhost')}:{os.environ.get('FLAGD_OFREP_PORT', 8016)}"
+base_url = f"http://{FLAGD_HOST}:{flagd_port_int}"
 api.set_provider(OFREPProvider(base_url=base_url))
 api.add_hooks([TracingHook()])
 
@@ -121,7 +151,7 @@ class WebsiteUser(HttpUser):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.tracer = trace.get_tracer(__name__)
-        self.client.timeout = int(REQUEST_TIMEOUT)
+        self.client.timeout = request_timeout_int
 
     @task(1)
     def index(self):
@@ -192,45 +222,4 @@ class WebsiteUser(HttpUser):
 
     @task(3)
     def view_cart(self):
-        with self.tracer.start_as_current_span("user_view_cart", context=Context()):
-            logging.info("User viewing cart")
-            self.client.get("/api/cart")
-
-    @task(2)
-    def add_to_cart(self, user=""):
-        if user == "":
-            user = str(uuid.uuid1())
-        product = random.choice(products)
-        quantity = random.choice([1, 2, 3, 4, 5, 10])
-        with self.tracer.start_as_current_span(
-            "user_add_to_cart",
-            context=Context(),
-            attributes={"user.id": user, "product.id": product, "quantity": quantity},
-        ):
-            logging.info(f"User {user} adding {quantity} of product {product} to cart")
-            self.client.get("/api/products/" + product)
-            cart_item = {
-                "item": {
-                    "productId": product,
-                    "quantity": quantity,
-                },
-                "userId": user,
-            }
-            self.client.post("/api/cart", json=cart_item)
-
-    @task(1)
-    def checkout(self):
-        user = str(uuid.uuid1())
-        with self.tracer.start_as_current_span(
-            "user_checkout_single", context=Context(), attributes={"user.id": user}
-        ):
-            self.add_to_cart(user=user)
-            checkout_person = random.choice(people)
-            checkout_person["userId"] = user
-            self.client.post("/api/checkout", json=checkout_person)
-            logging.info(f"Checkout completed for user {user}")
-
-    @task(1)
-    def checkout_multi(self):
-        user = str(uuid.uuid1())
-        
+        with self.tracer.start_as_current_span("user_view_cart", context=Con
