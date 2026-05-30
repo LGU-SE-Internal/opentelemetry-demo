@@ -54,6 +54,19 @@ logger_provider.add_log_record_processor(BatchLogRecordProcessor(log_exporter))
 # Create logging handler that will include trace context
 handler = LoggingHandler(level=logging.INFO, logger_provider=logger_provider)
 
+# Use JSON formatter for structured logging
+json_formatter = JsonFormatter(
+    "%(asctime)s %(levelname)s %(message)s %(user_id)s %(path)s %(status_code)s %(event_type)s",
+    rename_fields={"levelname": "level", "asctime": "timestamp"},
+    defaults={
+        "user_id": None,
+        "path": None,
+        "status_code": None,
+        "event_type": None
+    }
+)
+handler.setFormatter(json_formatter)
+
 # Configure root logger
 root_logger = logging.getLogger()
 root_logger.addHandler(handler)
@@ -125,18 +138,40 @@ class WebsiteUser(HttpUser):
 
     @task(1)
     def index(self):
+        user_id = str(uuid.uuid1())
+        path = "/"
+        event_type = "page_access"
         with self.tracer.start_as_current_span("user_index", context=Context()):
-            logging.info("User accessing index page")
-            self.client.get("/")
+            response = self.client.get("/")
+            logging.info(
+                "User accessing index page",
+                extra={
+                    "user_id": user_id,
+                    "path": path,
+                    "event_type": event_type,
+                    "status_code": response.status_code
+                }
+            )
 
     @task(10)
     def browse_product(self):
         product = random.choice(products)
+        user_id = str(uuid.uuid1())
+        path = f"/api/products/{product}"
+        event_type = "product_browse"
         with self.tracer.start_as_current_span(
             "user_browse_product", context=Context(), attributes={"product.id": product}
         ):
-            logging.info(f"User browsing product: {product}")
-            self.client.get("/api/products/" + product)
+            response = self.client.get(path)
+            logging.info(
+                f"User browsing product: {product}",
+                extra={
+                    "user_id": user_id,
+                    "path": path,
+                    "event_type": event_type,
+                    "status_code": response.status_code
+                }
+            )
 
     @task(3)
     def get_recommendations(self):
@@ -209,28 +244,4 @@ class WebsiteUser(HttpUser):
         ):
             logging.info(f"User {user} adding {quantity} of product {product} to cart")
             self.client.get("/api/products/" + product)
-            cart_item = {
-                "item": {
-                    "productId": product,
-                    "quantity": quantity,
-                },
-                "userId": user,
-            }
-            self.client.post("/api/cart", json=cart_item)
-
-    @task(1)
-    def checkout(self):
-        user = str(uuid.uuid1())
-        with self.tracer.start_as_current_span(
-            "user_checkout_single", context=Context(), attributes={"user.id": user}
-        ):
-            self.add_to_cart(user=user)
-            checkout_person = random.choice(people)
-            checkout_person["userId"] = user
-            self.client.post("/api/checkout", json=checkout_person)
-            logging.info(f"Checkout completed for user {user}")
-
-    @task(1)
-    def checkout_multi(self):
-        user = str(uuid.uuid1())
-        
+            cart_item =
