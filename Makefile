@@ -250,3 +250,8 @@ endif
 .PHONY: build-react-native-android
 build-react-native-android:
 	docker build -f src/react-native-app/android.Dockerfile --platform=linux/amd64 --output=. src/react-native-app
+
+# Load Generator tests
+.PHONY: test-load-generator
+test-load-generator:
+	cd test/load-generator && python -m pytest test_locustfile.py -v
