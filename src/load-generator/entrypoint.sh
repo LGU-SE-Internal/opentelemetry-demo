@@ -11,5 +11,15 @@ if [[ -n "${LOCUST_RUN_TIME:-}" ]]; then
     fi
 fi
 
+# Validate LOCUST_HOST environment variable if set
+if [[ -n "${LOCUST_HOST:-}" ]]; then
+    # Must start with http:// or https://
+    if ! [[ "$LOCUST_HOST" =~ ^https?:// ]]; then
+        echo "ERROR: Invalid LOCUST_HOST value: '$LOCUST_HOST'" >&2
+        echo "Expected URL starting with http:// or https://" >&2
+        exit 1
+    fi
+fi
+
 # Execute the original locust command with all passed arguments
 exec locust --skip-log-setup "$@"
