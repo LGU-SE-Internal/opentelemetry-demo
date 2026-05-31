@@ -71,7 +71,7 @@ markdownlint: ## Run markdown lint on all documentation files
 	done
 
 .PHONY: install-yamllint
-install-yamllint:
+install-yamllint: ## Install yamllint tool for YAML linting
     # Using a venv is recommended
 	yamllint --version >/dev/null 2>&1 || pip install -U yamllint~=$(YAMLLINT_VERSION)
 
@@ -116,29 +116,29 @@ addlicense:	$(ADDLICENSE) ## Add license headers to files missing them
 		.
 
 .PHONY: checklinks
-checklinks:
+checklinks: ## Check all markdown links for validity
 	@echo "Checking links..."
 	lychee --config .lychee.toml --cache .
 
 # Run all checks in order of speed / likely failure.
 .PHONY: check
-check: misspell markdownlint checklicense checklinks
+check: misspell markdownlint checklicense checklinks ## Run all quality checks (spell, markdown, license, links)
 	@echo "All checks complete"
 
 # Attempt to fix issues / regenerate tables.
 .PHONY: fix
-fix: misspell-correction
+fix: misspell-correction ## Auto-fix all fixable issues (spelling, etc.)
 	@echo "All autofixes complete"
 
 .PHONY: install-tools
-install-tools: $(MISSPELL) $(ADDLICENSE)
+install-tools: $(MISSPELL) $(ADDLICENSE) ## Install required development tools
 	npm install
 	@echo "All tools installed"
 
 # Use to build all services, or a single service component
 # Example: make build service=frontend
 .PHONY: build
-build:
+build: ## Build all services, or single service if service= is specified
 ifneq ($(strip $(service)),)
 	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) build $(service)
 else
