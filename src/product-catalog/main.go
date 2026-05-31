@@ -59,17 +59,27 @@ var (
 	envCount int
 )
 
+func mustMapEnv(target *string, key string, expectedType string, allowedValues []string) {
+	value := os.Getenv(key)
+	if value == "" {
+		errorMsg := fmt.Sprintf("Invalid environment variable configuration:\n  Variable name: %s\n  Invalid value: <not set>\n  Expected: Required %s value", key, expectedType)
+		if len(allowedValues) > 0 {
+			errorMsg += fmt.Sprintf(", allowed values: %s", strings.Join(allowedValues, ", "))
+		}
+		fmt.Fprintln(os.Stderr, errorMsg)
+		os.Exit(1)
+	}
+	*target = value
+	envCount++
+}
+
 func init() {
 	logger = otelslog.NewLogger("product-catalog")
 }
 
 func initDatabase() error {
-	connStr := os.Getenv("DB_CONNECTION_STRING")
-	if connStr == "" {
-		return fmt.Errorf("DB_CONNECTION_STRING environment variable not set")
-	}
-	envCount++
-
+	var connStr string
+	mustMapEnv(&connStr, "DB_CONNECTION_STRING", "PostgreSQL connection string", []string{})
 	dbAttrs := otelsql.WithAttributes(
 		append(otelsql.AttributesFromDSN(connStr), semconv.DBSystemNamePostgreSQL)...,
 	)
@@ -162,7 +172,7 @@ func main() {
 
 	svc := &productCatalog{}
 		var port string
-	mustMapEnv(&port, "PRODUCT_CATALOG_PORT")
+	mustMapEnv(&port, "PRODUCT_CATALOG_PORT", "TCP port number", []string{})
 
 	logger.Info("All required environment variables validated successfully",
 		slog.Int("validated_env_vars", envCount),

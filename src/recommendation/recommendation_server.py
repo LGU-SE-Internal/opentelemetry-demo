@@ -113,10 +113,18 @@ def get_product_list(request_product_ids):
         return prod_list
 
 
-def must_map_env(key: str):
+def must_map_env(key: str, expected_type: str = "string", allowed_values: list = None):
+    import sys
     value = os.environ.get(key)
     if value is None:
-        raise Exception(f'{key} environment variable must be set')
+        error_msg = f"Invalid environment variable configuration:\n"
+        error_msg += f"  Variable name: {key}\n"
+        error_msg += f"  Invalid value: <not set>\n"
+        error_msg += f"  Expected: Required {expected_type} value"
+        if allowed_values is not None:
+            error_msg += f", allowed values: {', '.join(allowed_values)}"
+        print(error_msg, file=sys.stderr)
+        sys.exit(1)
     return value
 
 

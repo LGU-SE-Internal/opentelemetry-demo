@@ -46,12 +46,22 @@ server.addService(otelDemoPackage.oteldemo.PaymentService.service, { charge: cha
 
 let ip = "0.0.0.0";
 
-const requiredEnvVars = ['PAYMENT_PORT'];
+const envVarSpecs = [
+  { name: 'PAYMENT_PORT', type: 'TCP port number', allowedValues: [] }
+];
 let validatedEnvCount = 0;
 
-requiredEnvVars.forEach(envVar => {
-  if (!process.env[envVar]) {
-    logger.error(`Missing required environment variable: ${envVar}`);
+envVarSpecs.forEach(spec => {
+  const value = process.env[spec.name];
+  if (!value) {
+    let errorMsg = "Invalid environment variable configuration:\n";
+    errorMsg += `  Variable name: ${spec.name}\n`;
+    errorMsg += `  Invalid value: <not set>\n`;
+    errorMsg += `  Expected: Required ${spec.type} value`;
+    if (spec.allowedValues.length > 0) {
+      errorMsg += `, allowed values: ${spec.allowedValues.join(', ')}`;
+    }
+    console.error(errorMsg);
     process.exit(1);
   }
   validatedEnvCount++;
