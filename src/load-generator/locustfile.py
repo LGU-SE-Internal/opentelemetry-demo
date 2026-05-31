@@ -107,8 +107,8 @@ products = [
     "HQTGWGPNH4",
 ]
 
-people_file = open('people.json')
-people = json.load(people_file)
+with open('people.json') as people_file:
+    people = json.load(people_file)
 
 class WebsiteUser(HttpUser):
     wait_time = between(1, 10)
@@ -210,79 +210,4 @@ class WebsiteUser(HttpUser):
                                             attributes={"user.id": user, "item.count": item_count}):
             for i in range(item_count):
                 self.add_to_cart(user=user)
-            checkout_person = random.choice(people)
-            checkout_person["userId"] = user
-            self.client.post("/api/checkout", json=checkout_person)
-            logging.info(f"Multi-item checkout completed for user {user}")
-
-    @task(5)
-    def flood_home(self):
-        flood_count = get_flagd_value("loadGeneratorFloodHomepage")
-        if flood_count > 0:
-            with self.tracer.start_as_current_span("user_flood_home",  context=Context(), attributes={"flood.count": flood_count}):
-                logging.info(f"User flooding homepage {flood_count} times")
-                for _ in range(0, flood_count):
-                    self.client.get("/")
-
-    def on_start(self):
-        with self.tracer.start_as_current_span("user_session_start", context=Context()):
-            session_id = str(uuid.uuid4())
-            logging.info(f"Starting user session: {session_id}")
-            ctx = baggage.set_baggage("session.id", session_id)
-            ctx = baggage.set_baggage("synthetic_request", "true", context=ctx)
-            context.attach(ctx)
-            self.index()
-
-
-browser_traffic_enabled = os.environ.get("LOCUST_BROWSER_TRAFFIC_ENABLED", "").lower() in ("true", "yes", "on")
-
-if browser_traffic_enabled:
-    class WebsiteBrowserUser(PlaywrightUser):
-        headless = True  # to use a headless browser, without a GUI
-
-        @task
-        @pw
-        async def open_cart_page_and_change_currency(self, page: PageWithRetry):
-            tracer = trace.get_tracer(__name__)
-            with tracer.start_as_current_span("browser_change_currency", context=Context()):
-                try:
-                    page.on("console", lambda msg: print(msg.text))
-                    await page.route('**/*', add_baggage_header)
-                    await page.goto("/cart", wait_until="domcontentloaded")
-                    await page.select_option('[name="currency_code"]', 'CHF')
-                    await page.wait_for_timeout(2000)  # giving the browser time to export the traces
-                    logging.info("Currency changed to CHF")
-                except Exception as e:
-                    logging.error(f"Error in change currency task: {str(e)}")
-
-        @task
-        @pw
-        async def add_product_to_cart(self, page: PageWithRetry):
-            tracer = trace.get_tracer(__name__)
-            with tracer.start_as_current_span("browser_add_to_cart", context=Context()):
-                try:
-                    page.on("console", lambda msg: print(msg.text))
-                    await page.route('**/*', add_baggage_header)
-                    await page.goto("/", wait_until="domcontentloaded")
-                    # Wait for Roof Binoculars image to load (awaiting successful XHR response in less than 15 seconds)
-                    await page.wait_for_event(
-                        "response",
-                        predicate=lambda r: '/images/products/RoofBinoculars.jpg' in r.url and r.status == 200,
-                        timeout=15000
-                    )
-                    await page.click('p:has-text("Roof Binoculars")')
-                    await page.wait_for_load_state("domcontentloaded")
-                    await page.click('button:has-text("Add To Cart")')
-                    await page.wait_for_load_state("domcontentloaded")
-                    await page.wait_for_timeout(2000)  # giving the browser time to export the traces
-                    logging.info("Product added to cart successfully")
-                except Exception as e:
-                    logging.error(f"Error in add to cart task: {str(e)}")
-
-async def add_baggage_header(route: Route, request: Request):
-    existing_baggage = request.headers.get('baggage', '')
-    headers = {
-        **request.headers,
-        'baggage': ', '.join(filter(None, (existing_baggage, 'synthetic_request=true')))
-    }
-    await route.continue_(headers=headers)
+    
