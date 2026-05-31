@@ -1,0 +1,2 @@
+ERROR: Invalid LOCUST_RUN_TIME value: 'invalid'
+Expected duration format using units s (seconds), m (minutes), h (hours). Examples: 300s, 20m, 1h, 1h30m

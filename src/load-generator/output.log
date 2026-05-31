@@ -1,0 +1,2 @@
+ERROR: LOCUST_LOCUSTFILE points to non-existent file: 'nonexistent.py'
+Please ensure the path is correct and the file exists
