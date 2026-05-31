@@ -78,6 +78,7 @@ logging.info("Instrumentation complete - logs will now include trace context")
 base_url = f"http://{os.environ.get('FLAGD_HOST', 'localhost')}:{os.environ.get('FLAGD_OFREP_PORT', 8016)}"
 api.set_provider(OFREPProvider(base_url=base_url))
 api.add_hooks([TracingHook()])
+logging.info(f"OpenFeature OFREP provider successfully initialized with endpoint: {base_url}")
 
 def get_flagd_value(FlagName):
     # Initialize OpenFeature
@@ -209,5 +210,4 @@ class WebsiteUser(HttpUser):
         with self.tracer.start_as_current_span("user_checkout_multi", context=Context(),
                                             attributes={"user.id": user, "item.count": item_count}):
             for i in range(item_count):
-                self.add_to_cart(user=user)
-    
+                self.add_to_cart(user
