@@ -10,12 +10,12 @@ import random
 import uuid
 import logging
 
-from locust import HttpUser, task, between
+from locust import HttpUser, task, between, events
 from locust_plugins.users.playwright import PlaywrightUser, pw, PageWithRetry, event
 
 from opentelemetry import context, baggage, trace
 from opentelemetry.context import Context
-from opentelemetry.metrics import set_meter_provider
+from opentelemetry.metrics import set_meter_provider, get_meter
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.trace import TracerProvider
@@ -66,6 +66,19 @@ root_logger.setLevel(logging.INFO)
 metric_exporter = OTLPMetricExporter(insecure=True)
 set_meter_provider(MeterProvider([PeriodicExportingMetricReader(metric_exporter)]))
 
+# Initialize metrics for locust task runs
+meter = get_meter("locust-load-generator", SERVICE_VERSION)
+successful_task_runs = meter.create_counter(
+    name="locust.task.success.count",
+    description="Number of successful locust task runs",
+    unit="1"
+)
+failed_task_runs = meter.create_counter(
+    name="locust.task.failure.count",
+    description="Number of failed locust task runs",
+    unit="1"
+)
+
 # Instrument logging to automatically inject trace context
 LoggingInstrumentor().instrument(set_logging_format=True)
 
@@ -77,6 +90,21 @@ URLLib3Instrumentor().instrument()
 
 logging.info("Instrumentation complete - logs will now include trace context")
 logging.info(f"Load generator v{SERVICE_VERSION} starting")
+
+# Event listener for successful task runs
+@events.task_success.add_listener
+def on_task_success(task_instance, **kwargs):
+    task_name = task_instance.__name__ if hasattr(task_instance, '__name__') else str(task_instance)
+    successful_task_runs.add(1, attributes={"task.name": task_name})
+
+# Event listener for failed task runs
+@events.task_failure.add_listener
+def on_task_failure(task_instance, exception, **kwargs):
+    task_name = task_instance.__name__ if hasattr(task_instance, '__name__') else str(task_instance)
+    error_type = type(exception).__name__ if exception else "UnknownError"
+    failed_task_runs.add(1, attributes={"task.name": task_name, "error.type": error_type})
+
+
 
 # Initialize Flagd provider
 ofrep_endpoint = os.environ.get("OFREP_PROVIDER_ENDPOINT")
