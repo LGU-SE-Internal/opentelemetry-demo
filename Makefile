@@ -251,7 +251,7 @@ test-locustfile:
 	@echo "Running unit tests for locustfile.py..."
 	# Build and run load generator tests with pytest and coverage
 	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) $(DOCKER_COMPOSE_FILES_TESTS) run --rm \
-		--entrypoint="" loadgenerator \
+		--entrypoint="" load-generator \
 		bash -c "pip install pytest coverage pytest-cov && \
 		cd /loadgen && \
 		pytest locustfile.py -v --cov=. --cov-report=term --cov-report=lcov:/tmp/locustfile.lcov && \
