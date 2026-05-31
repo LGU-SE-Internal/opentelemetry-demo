@@ -1,6 +1,12 @@
 #!/bin/bash
 set -euo pipefail
-
+# Enable verbose mode if VERBOSE environment variable is set to 1/true/yes
+if [[ "${VERBOSE:-}" =~ ^(1|true|yes)$ ]]; then
+    set -x
+    echo "DEBUG: VERBOSE mode enabled in entrypoint.sh" >&2
+    echo "DEBUG: LOCUST_RUN_TIME: ${LOCUST_RUN_TIME:-<unset>}" >&2
+    echo "DEBUG: Command arguments: $*" >&2
+fi
 # Validate LOCUST_RUN_TIME environment variable if set
 if [[ -n "${LOCUST_RUN_TIME:-}" ]]; then
     # Valid format: sequence of numbers followed by s/m/h units, e.g. 300s, 20m, 1h, 1h30m
