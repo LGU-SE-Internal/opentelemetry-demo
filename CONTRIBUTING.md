@@ -26,6 +26,17 @@ For edit access, ask in our
 
 Before contributing, sign the [CLA](https://identity.linuxfoundation.org/projects/cncf)
 
+### AI Contribution Rules
+
+We have the following rules for AI-assisted contributions:
+- No AI-generated comments on issues or PRs. Discussions on OpenTelemetry repositories are for Users/Humans only.
+- If you use AI tools to assist with your contributions, disclose this in your commit messages using an `Assisted-by:` trailer:
+  ```markdown
+  Assisted-by: ChatGPT 5.5
+  Assisted-by: Claude Sonnet 4.6
+  ```
+- Do NOT use a `Co-authored-by:` trailer for AI contributions. Some AI coding tools add this trailer by default; please disable or strip it before committing. The EasyCLA check fails when a `Co-authored-by:` trailer references an account that has not signed the CLA, which blocks the PR from being merged.
+
 ### Find a Mentor (Buddy System)
 
 New to OpenTelemetry? We encourage you to find a mentor who can guide you
@@ -280,101 +291,4 @@ Open a pull request against the main `opentelemetry-demo` repo.
 A PR is considered to be **ready to merge** when:
 
 - It has received approval from
-  [Approvers](https://github.com/open-telemetry/community/blob/main/guides/contributor/membership.md#approver)
-  /
-  [Maintainers](https://github.com/open-telemetry/community/blob/main/guides/contributor/membership.md#maintainer).
-- Major feedbacks are resolved.
-- It has been open for review for at least one working day. This gives people
-  reasonable time to review.
-- The [documentation][docs] and [Changelog](./CHANGELOG.md) have been updated
-  to reflect the new changes.
-- Trivial changes (typo, cosmetic, doc, etc.) don't have to wait for one day.
-
-Any Maintainer can merge the PR once it is **ready to merge**. Note, that some
-PRs may not be merged immediately if the repo is in the process of a release and
-the maintainers decided to defer the PR to the next release train.
-
-If a PR has been stuck (e.g. there are lots of debates and people couldn't agree
-on each other), the owner should try to get people aligned by:
-
-- Consolidating the perspectives and putting a summary in the PR. It is
-  recommended to add a link into the PR description, which points to a comment
-  with a summary in the PR conversation.
-- Tagging subdomain experts (by looking at the change history) in the PR asking
-  for suggestion.
-- Reaching out to more people on the [CNCF OpenTelemetry Community Demo Slack
-  channel](https://app.slack.com/client/T08PSQ7BQ/C03B4CWV4DA).
-- Stepping back to see if it makes sense to narrow down the scope of the PR or
-  split it up.
-- If none of the above worked and the PR has been stuck for more than 2 weeks,
-  the owner should bring it to the OpenTelemetry Community Demo SIG
-  [meeting](README.md#contributing).
-
-## Multi-platform Builds
-
-Creating multi-platform builds requires docker buildx to be installed. This
-is part of Docker Desktop for macOS, or can be installed using
-`apt install docker-buildx` on Ubuntu.
-
-To build and load the multi-platform images locally you will need to configure
-docker to use `containerd`. This can be done in Docker Desktop settings on MacOS
-or Windows. Please follow
-[these instructions](https://docs.docker.com/engine/storage/containerd/#enable-containerd-image-store-on-docker-engine)
-to configure Docker Engine on Linux/Ubuntu.
-
-You will need a multi-platform capable builder with a limiter set on parallelism
-to avoid errors while building the images. It is recommended to limit the
-parallelism to 4. This can be done by specifying a configuration file when
-creating the builder. The `buildkitd.toml` file in this repository can be used
-as the builder configuration file.
-
-To create a multi-platform builder with a parallelism limit of 4, use the
-following command:
-
-```shell
-make create-multiplatform-builder
-```
-
-A builder will be created and set as the active builder. You can check the
-builder status with `docker buildx inspect`. To build multi-platform images for
-linux/amd64 and linux/arm64, use the following command:
-
-```shell
-make build-multiplatform
-```
-
-To build and push multi-platform images to a registry, ensure to set
-`IMAGE_NAME` to the name of the registry and image repository to use in the
-`.env.override` file and run:
-
-```shell
-make build-multiplatform-and-push
-```
-
-## Making a new release
-
-Maintainers can create a new release when desired by following these steps.
-
-1. Create a Pull Request that updates the `IMAGE_VERSION` environment variable
-   in `.env` to the _new_ version number based on the format `x.x.x` and merge
-   it.
-2. [Create a new
-   release](https://github.com/open-telemetry/opentelemetry-demo/releases/new),
-   creating a new tag for the _new_ version number based on main. Automatically
-   generate release notes. Prepend a summary of the major changes to the release
-   notes.
-3. After images for the new release are built and published, create a new Pull
-   Request that updates the `CHANGELOG.md` with the new version leaving the
-   `Unreleased` section for the next release. Merge the Pull Request.
-4. Create a new Pull Request to update the deployment of the demo in the
-   [OpenTelemetry Helm
-   Charts](https://github.com/open-telemetry/opentelemetry-helm-charts) repo.
-   Merge the Pull Request.
-5. After the Helm chart is released, create a new Pull Request which updates the
-   Demo's Kubernetes manifest by running `make generate-kubernetes-manifests`.
-   Merge the Pull Request.
-
-[docs]: https://opentelemetry.io/docs/demo/
-
-By following this guide, you'll have a smoother onboarding experience as a
-contributor. Happy coding!
+  [Approvers](https://github.com/
