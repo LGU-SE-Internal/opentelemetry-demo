@@ -79,6 +79,15 @@ install-yamllint:
 yamllint: install-yamllint
 	yamllint .
 
+.PHONY: install-shellcheck
+install-shellcheck:
+	# Install shellcheck if not present
+	shellcheck --version >/dev/null 2>&1 || (apt-get update && apt-get install -y shellcheck || brew install shellcheck || (echo "ERROR: Please install shellcheck manually" && exit 1))
+
+.PHONY: shellcheck
+shellcheck: install-shellcheck
+	shellcheck src/load-generator/entrypoint.sh
+
 .PHONY: checklicense
 checklicense:	$(ADDLICENSE)
 	@echo "Checking license headers..."
@@ -122,7 +131,7 @@ checklinks:
 
 # Run all checks in order of speed / likely failure.
 .PHONY: check
-check: misspell markdownlint checklicense checklinks
+check: misspell markdownlint shellcheck checklicense checklinks
 	@echo "All checks complete"
 
 # Attempt to fix issues / regenerate tables.
