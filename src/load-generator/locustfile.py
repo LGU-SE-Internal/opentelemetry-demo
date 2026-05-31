@@ -109,10 +109,12 @@ products = [
 ]
 
 try:
-    with open('people.json') as people_file:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    people_path = os.path.join(script_dir, 'people.json')
+    with open(people_path) as people_file:
         people = json.load(people_file)
 except FileNotFoundError:
-    logging.error("Failed to load people.json: file not found. Please ensure the people.json file exists in the working directory.")
+    logging.error("Failed to load people.json: file not found. Please ensure the people.json file exists in the load generator source directory alongside locustfile.py.")
     sys.exit(1)
 except json.JSONDecodeError as e:
     logging.error(f"Failed to parse people.json: invalid JSON format. Error: {str(e)}")
@@ -211,13 +213,4 @@ class WebsiteUser(HttpUser):
             checkout_person = random.choice(people)
             checkout_person["userId"] = user
             self.client.post("/api/checkout", json=checkout_person)
-            logging.info(f"Checkout completed for user {user}")
-
-    @task(1)
-    def checkout_multi(self):
-        user = str(uuid.uuid1())
-        item_count = random.choice([2, 3, 4])
-        with self.tracer.start_as_current_span("user_checkout_multi", context=Context(),
-                                            attributes={"user.id": user, "item.count": item_count}):
-            for i in range(item_count):
-                self.add_t
+         
