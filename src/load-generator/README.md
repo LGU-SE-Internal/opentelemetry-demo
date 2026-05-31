@@ -26,6 +26,30 @@ The load generator supports the following environment variables for configuratio
 | `OTEL_SERVICE_NAME` | Service name for OpenTelemetry telemetry | No | `load-generator` |
 | `PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION` | Protocol buffers implementation to use | No | `python` |
 
+## Running Locally for Development
+
+To run the load generator locally during development:
+
+1. First install the required dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+### Headless Mode Example
+Run for 1 minute with 10 concurrent users (pointing to a local frontend running at http://localhost:8080):
+```bash
+locust --headless --users 10 --spawn-rate 1 --run-time 1m --host http://localhost:8080
+```
+
+### Web UI Mode Example
+Run with the Locust web UI enabled for manual testing and configuration:
+```bash
+locust --web-host 0.0.0.0 --host http://localhost:8080
+```
+Then open http://localhost:8089 in your browser to start and configure load tests interactively.
+
+For more details on Locust usage, see the [official Locust documentation](https://docs.locust.io/en/stable/).
+
 ## Examples
 
 ### Example 1: Run in headless mode with 50 users for 10 minutes
