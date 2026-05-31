@@ -1,71 +1,85 @@
 #!/bin/bash
 set -euo pipefail
 
-# Path to the entrypoint script we are testing
-ENTRYPOINT_SCRIPT="./entrypoint.sh"
-PASSED=0
-FAILED=0
+echo "Running entrypoint.sh validation tests..."
 
-# Helper function to run a test case
+PASS=0
+FAIL=0
+
+# Test helper function
 run_test() {
     local test_name="$1"
-    local expected_exit_code="$2"
-    local env_vars="$3"
-    local command="$4"
-
-    echo -n "Running test: $test_name... "
+    local env_vars="$2"
+    local expect_success="$3"
     
-    # Run the entrypoint script with the given environment variables, capture output and exit code
-    { output=$(env -i PATH=".:$PATH" $env_vars bash "$ENTRYPOINT_SCRIPT" $command 2>&1); exit_code=$?; } || true
-
-    if [ $exit_code -eq $expected_exit_code ]; then
-        echo "PASSED"
-        PASSED=$((PASSED + 1))
+    echo -n "Test: $test_name... "
+    
+    # Run entrypoint with the given env vars, capture output and exit code
+    # We pass --help as the command so locust just exits 0 without running tests
+    output=$(eval "$env_vars" bash entrypoint.sh --help 2>&1)
+    exit_code=$?
+    
+    if [[ "$expect_success" == "true" ]]; then
+        if [[ $exit_code -eq 0 ]]; then
+            echo "PASS"
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL (expected success, got exit code $exit_code, output: $output)"
+            FAIL=$((FAIL + 1))
+        fi
     else
-        echo "FAILED (Expected exit code $expected_exit_code, got $exit_code)"
-        echo "Output: $output"
-        FAILED=$((FAILED + 1))
+        if [[ $exit_code -ne 0 ]]; then
+            echo "PASS"
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL (expected failure, got exit code $exit_code, output: $output)"
+            FAIL=$((FAIL + 1))
+        fi
     fi
 }
 
-# Test AC-1: Invalid LOCUST_RUN_TIME values cause exit with error
-run_test "Invalid LOCUST_RUN_TIME (123)" 1 "LOCUST_RUN_TIME=123" "--version"
-run_test "Invalid LOCUST_RUN_TIME (abc)" 1 "LOCUST_RUN_TIME=abc" "--version"
-run_test "Invalid LOCUST_RUN_TIME (1h30x)" 1 "LOCUST_RUN_TIME=1h30x" "--version"
-run_test "Invalid LOCUST_RUN_TIME (1.5h)" 1 "LOCUST_RUN_TIME=1.5h" "--version"
+# AC-1: Invalid LOCUST_RUN_TIME values cause error
+run_test "Invalid LOCUST_RUN_TIME: 123 (no unit)" "LOCUST_RUN_TIME=123" "false"
+run_test "Invalid LOCUST_RUN_TIME: abc (non numeric)" "LOCUST_RUN_TIME=abc" "false"
+run_test "Invalid LOCUST_RUN_TIME: 1d (invalid unit)" "LOCUST_RUN_TIME=1d" "false"
+run_test "Invalid LOCUST_RUN_TIME: 1h30 (missing unit on second part)" "LOCUST_RUN_TIME=1h30" "false"
+run_test "Invalid LOCUST_RUN_TIME: empty string" "LOCUST_RUN_TIME=''" "true" # Should pass since empty is allowed
 
-# Test AC-2: Valid LOCUST_RUN_TIME values pass validation
-run_test "Valid LOCUST_RUN_TIME (300s)" 0 "LOCUST_RUN_TIME=300s" "--version"
-run_test "Valid LOCUST_RUN_TIME (20m)" 0 "LOCUST_RUN_TIME=20m" "--version"
-run_test "Valid LOCUST_RUN_TIME (1h)" 0 "LOCUST_RUN_TIME=1h" "--version"
-run_test "Valid LOCUST_RUN_TIME (1h30m)" 0 "LOCUST_RUN_TIME=1h30m" "--version"
-run_test "Valid LOCUST_RUN_TIME (1h30m10s)" 0 "LOCUST_RUN_TIME=1h30m10s" "--version"
+# AC-2: Valid LOCUST_RUN_TIME values pass
+run_test "Valid LOCUST_RUN_TIME: 300s" "LOCUST_RUN_TIME=300s" "true"
+run_test "Valid LOCUST_RUN_TIME: 20m" "LOCUST_RUN_TIME=20m" "true"
+run_test "Valid LOCUST_RUN_TIME: 1h" "LOCUST_RUN_TIME=1h" "true"
+run_test "Valid LOCUST_RUN_TIME: 1h30m" "LOCUST_RUN_TIME=1h30m" "true"
+run_test "Valid LOCUST_RUN_TIME: 1h30m10s" "LOCUST_RUN_TIME=1h30m10s" "true"
+run_test "LOCUST_RUN_TIME not set" "" "true"
 
-# Test AC-3: Invalid LOCUST_SPAWN_RATE values cause exit with error
-run_test "Invalid LOCUST_SPAWN_RATE (abc)" 1 "LOCUST_SPAWN_RATE=abc" "--version"
-run_test "Invalid LOCUST_SPAWN_RATE (10x)" 1 "LOCUST_SPAWN_RATE=10x" "--version"
-run_test "Invalid LOCUST_SPAWN_RATE (-1)" 1 "LOCUST_SPAWN_RATE=-1" "--version"
-run_test "Invalid LOCUST_SPAWN_RATE (1.2.3)" 1 "LOCUST_SPAWN_RATE=1.2.3" "--version"
+# AC-3: Invalid LOCUST_SPAWN_RATE values cause error
+run_test "Invalid LOCUST_SPAWN_RATE: abc" "LOCUST_SPAWN_RATE=abc" "false"
+run_test "Invalid LOCUST_SPAWN_RATE: 1.2.3" "LOCUST_SPAWN_RATE=1.2.3" "false"
+run_test "Invalid LOCUST_SPAWN_RATE: -1" "LOCUST_SPAWN_RATE=-1" "false"
+run_test "Invalid LOCUST_SPAWN_RATE: 1,5 (comma instead of dot)" "LOCUST_SPAWN_RATE=1,5" "false"
+run_test "Invalid LOCUST_SPAWN_RATE: empty string" "LOCUST_SPAWN_RATE=''" "true" # Should pass since empty is allowed
 
-# Test AC-4: Valid LOCUST_SPAWN_RATE values pass validation
-run_test "Valid LOCUST_SPAWN_RATE (1)" 0 "LOCUST_SPAWN_RATE=1" "--version"
-run_test "Valid LOCUST_SPAWN_RATE (10)" 0 "LOCUST_SPAWN_RATE=10" "--version"
-run_test "Valid LOCUST_SPAWN_RATE (0.5)" 0 "LOCUST_SPAWN_RATE=0.5" "--version"
-run_test "Valid LOCUST_SPAWN_RATE (100.25)" 0 "LOCUST_SPAWN_RATE=100.25" "--version"
+# AC-4: Valid LOCUST_SPAWN_RATE values pass
+run_test "Valid LOCUST_SPAWN_RATE: 1 (integer)" "LOCUST_SPAWN_RATE=1" "true"
+run_test "Valid LOCUST_SPAWN_RATE: 10 (integer)" "LOCUST_SPAWN_RATE=10" "true"
+run_test "Valid LOCUST_SPAWN_RATE: 0.5 (float)" "LOCUST_SPAWN_RATE=0.5" "true"
+run_test "Valid LOCUST_SPAWN_RATE: 100.25 (float)" "LOCUST_SPAWN_RATE=100.25" "true"
+run_test "Valid LOCUST_SPAWN_RATE: 123456.789 (large float)" "LOCUST_SPAWN_RATE=123456.789" "true"
+run_test "LOCUST_SPAWN_RATE not set" "" "true"
 
-# Test that no env vars set works fine
-run_test "No LOCUST_* env vars set" 0 "" "--version"
+# Test both variables set valid
+run_test "Both variables valid: LOCUST_RUN_TIME=1h LOCUST_SPAWN_RATE=2.5" "LOCUST_RUN_TIME=1h LOCUST_SPAWN_RATE=2.5" "true"
 
-# Summary
-echo -e "\nTest Summary:"
-echo "Total tests: $((PASSED + FAILED))"
-echo "Passed: $PASSED"
-echo "Failed: $FAILED"
+# Test both variables invalid
+run_test "Both variables invalid: LOCUST_RUN_TIME=abc LOCUST_SPAWN_RATE=def" "LOCUST_RUN_TIME=abc LOCUST_SPAWN_RATE=def" "false"
 
-if [ $FAILED -gt 0 ]; then
-    echo "Some tests failed!"
+echo
+echo "Test results: $PASS passed, $FAIL failed"
+
+if [[ $FAIL -gt 0 ]]; then
     exit 1
 else
-    echo "All tests passed successfully!"
+    echo "All tests passed!"
     exit 0
 fi
