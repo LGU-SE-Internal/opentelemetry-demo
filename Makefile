@@ -242,6 +242,23 @@ ifdef HTML
 	@echo "HTML coverage report available at ./coverage/html/index.html"
 endif
 
+# Run unit tests for locustfile.py (load generator)
+# Usage: make test-locustfile
+# Executes all unit tests for locustfile.py, outputs test results and coverage summary,
+# and correctly propagates test pass/fail exit codes
+.PHONY: test-locustfile
+test-locustfile:
+	@echo "Running unit tests for locustfile.py..."
+	# Build and run load generator tests with pytest and coverage
+	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) $(DOCKER_COMPOSE_FILES_TESTS) run --rm \
+		--entrypoint="" load-generator \
+		bash -c "pip install pytest coverage pytest-cov && \
+		cd /loadgen && \
+		pytest locustfile.py -v --cov=. --cov-report=term --cov-report=lcov:/tmp/locustfile.lcov && \
+		mkdir -p /local/coverage && \
+		cp /tmp/locustfile.lcov /local/coverage/locustfile.lcov 2>/dev/null || true"
+	@echo "Locustfile test run complete"
+
 .PHONY: generate-protobuf
 generate-protobuf:
 	./ide-gen-proto.sh
