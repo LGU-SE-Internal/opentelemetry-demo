@@ -72,9 +72,10 @@ markdownlint:
 
 .PHONY: install-yamllint
 install-yamllint:
-    # Using a venv is recommended
+	# Using a venv is recommended
 	yamllint --version >/dev/null 2>&1 || pip install -U yamllint~=$(YAMLLINT_VERSION)
 
+# Run yamllint on all YAML files in the repository respecting .yamllint config and .yamlignore
 .PHONY: yamllint
 yamllint: install-yamllint
 	yamllint .
@@ -122,7 +123,7 @@ checklinks:
 
 # Run all checks in order of speed / likely failure.
 .PHONY: check
-check: misspell markdownlint checklicense checklinks
+check: misspell markdownlint yamllint checklicense checklinks
 	@echo "All checks complete"
 
 # Attempt to fix issues / regenerate tables.
