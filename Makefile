@@ -192,6 +192,56 @@ run-tests:
 run-tracetesting:
 	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) $(DOCKER_COMPOSE_FILES_TESTS) run traceBasedTests ${SERVICES_TO_TEST}
 
+.PHONY: coverage
+coverage:
+	@echo "Running all unit tests with coverage enabled..."
+	# Run all service unit test containers that produce coverage reports
+	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) $(DOCKER_COMPOSE_FILES_TESTS) run --rm frontendTests
+	# Add additional service test runs here as coverage is enabled for them
+	@echo "Aggregating coverage reports..."
+	mkdir -p ./coverage
+	@echo "Generating coverage summary..."
+	# Output human-readable summary to console
+	@for file in ./coverage/*.out ./coverage/*.xml ./coverage/*.json ./coverage/*.lcov; do \
+		if [ -f "$$file" ]; then \
+			echo "$$(basename $$file) coverage:"; \
+			# Handle go coverage files
+			if [[ $$file == *.out ]]; then \
+				go tool cover -func=$$file 2>/dev/null | tail -1 || echo "  Summary not available for $$file"; \
+			# Handle lcov coverage files (JS/TS, Python, etc.)
+			elif [[ $$file == *.lcov ]]; then \
+				if command -v lcov >/dev/null 2>&1; then \
+					lcov --summary $$file 2>/dev/null | grep -E '(Total|lines|functions|branches)' || echo "  Summary not available for $$file"; \
+				else \
+					echo "  lcov not installed, cannot show summary for $$file"; \
+				fi; \
+			else \
+				echo "  Format not supported for automatic summary"; \
+			fi; \
+		fi; \
+	done
+	@echo ""
+	@echo "Coverage summary complete"
+	# Generate HTML coverage report if HTML=1 is specified
+ifdef HTML
+	@echo ""
+	@echo "Generating HTML coverage report in ./coverage/html..."
+	mkdir -p ./coverage/html
+	# Handle go coverage HTML
+	if [ -f ./coverage/merged.out ]; then \
+		go tool cover -html=./coverage/merged.out -o ./coverage/html/index.html; \
+	fi
+	# Handle lcov HTML
+	if [ -f ./coverage/merged.lcov ]; then \
+		if command -v genhtml >/dev/null 2>&1; then \
+			genhtml -o ./coverage/html ./coverage/merged.lcov >/dev/null 2>&1; \
+		else \
+			echo "genhtml not installed, cannot generate HTML report for lcov files"; \
+		fi; \
+	fi
+	@echo "HTML coverage report available at ./coverage/html/index.html"
+endif
+
 .PHONY: generate-protobuf
 generate-protobuf:
 	./ide-gen-proto.sh
@@ -232,81 +282,4 @@ start:
 start-minimal:
 	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES_CORE) $(DOCKER_COMPOSE_FILES_OBSERVABILITY) $(DOCKER_COMPOSE_FILES_EXTRAS) up --force-recreate --remove-orphans --detach
 	@echo ""
-	@echo "OpenTelemetry Demo in minimal mode is running."
-	@echo "Go to http://localhost:8080 for the demo UI."
-	@echo "Go to http://localhost:8080/jaeger/ui for the Jaeger UI."
-	@echo "Go to http://localhost:8080/grafana/ for the Grafana UI."
-	@echo "Go to http://localhost:8080/loadgen/ for the Load Generator UI."
-	@echo "Go to http://localhost:8080/feature/ to change feature flags."
-	@echo "Go to http://localhost:8080/telemetry/ for the Weaver generated telemetry documentation."
-
-.PHONY: start-no-o11y
-start-no-o11y:
-	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES_FULL) $(DOCKER_COMPOSE_FILES_EXTRAS) up --force-recreate --remove-orphans --detach
-	@echo ""
-	@echo "OpenTelemetry Demo is running (no observability stack)."
-	@echo "Go to http://localhost:8080 for the demo UI."
-	@echo "Go to http://localhost:8080/loadgen/ for the Load Generator UI."
-	@echo "Go to http://localhost:8080/feature/ to change feature flags."
-	@echo "Go to http://localhost:8080/telemetry/ for the Weaver generated telemetry documentation."
-
-.PHONY: start-minimal-no-o11y
-start-minimal-no-o11y:
-	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES_CORE) $(DOCKER_COMPOSE_FILES_EXTRAS) up --force-recreate --remove-orphans --detach
-	@echo ""
-	@echo "OpenTelemetry Demo in minimal mode is running (no observability stack)."
-	@echo "Go to http://localhost:8080 for the demo UI."
-	@echo "Go to http://localhost:8080/loadgen/ for the Load Generator UI."
-	@echo "Go to http://localhost:8080/feature/ to change feature flags."
-	@echo "Go to http://localhost:8080/telemetry/ for the Weaver generated telemetry documentation."
-
-.PHONY: start-profiling
-start-profiling:
-	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES_FULL) $(DOCKER_COMPOSE_FILES_OBSERVABILITY) $(DOCKER_COMPOSE_FILES_PROFILING) $(DOCKER_COMPOSE_FILES_EXTRAS) up --force-recreate --remove-orphans --detach
-	@echo ""
-	@echo "OpenTelemetry Demo in profiling mode is running."
-	@echo "Go to http://localhost:8080 for the demo UI."
-	@echo "Go to http://localhost:8080/jaeger/ui for the Jaeger UI."
-	@echo "Go to http://localhost:8080/grafana/ for the Grafana UI."
-	@echo "Go to http://localhost:8080/loadgen/ for the Load Generator UI."
-	@echo "Go to http://localhost:8080/profiles/ for the Firepit UI."
-	@echo "Go to http://localhost:8080/telemetry/ for the Weaver generated telemetry documentation."
-
-.PHONY: stop
-stop:
-	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) down --remove-orphans --volumes
-	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) $(DOCKER_COMPOSE_FILES_PROFILING) down --remove-orphans --volumes
-	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) $(DOCKER_COMPOSE_FILES_TESTS) down --remove-orphans --volumes
-	@echo ""
-	@echo "OpenTelemetry Demo is stopped."
-
-# Use to restart a single service component
-# Example: make restart service=frontend
-.PHONY: restart
-restart:
-ifneq ($(strip $(service)),)
-	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) stop $(service)
-	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) rm --force $(service)
-	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) create $(service)
-	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) start $(service)
-else
-	@echo "Please provide a service name using 'service=<name>' or 'SERVICE=<name>'"
-endif
-
-# Use to rebuild and restart (redeploy) a single service component
-# Example: make redeploy service=frontend
-.PHONY: redeploy
-redeploy:
-ifneq ($(strip $(service)),)
-	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) build $(service)
-	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) stop $(service)
-	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) rm --force $(service)
-	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) create $(service)
-	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) start $(service)
-else
-	@echo "Please provide a service name using 'service=<name>' or 'SERVICE=<name>'"
-endif
-
-.PHONY: build-react-native-android
-build-react-native-android:
-	$(DOCKER_CMD) build -f src/react-native-app/android.Dockerfile --platform=linux/amd64 --output=. src/react-native-app
+	@echo "OpenTelemetry Dem
