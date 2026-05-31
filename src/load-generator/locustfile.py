@@ -10,6 +10,7 @@ import uuid
 import logging
 
 from locust import HttpUser, task, between, events
+from locust.env import Environment
 from flask import jsonify
 from locust_plugins.users.playwright import PlaywrightUser, pw, PageWithRetry, event
 
@@ -87,7 +88,7 @@ REQUEST_TIMEOUT = os.environ.get("REQUEST_TIMEOUT", "10")
 init_complete = False
 
 @events.init.add_listener
-def on_init(environment, **kwargs) -> None:
+def on_init(environment: Environment, **kwargs) -> None:
     """Locust test initialization hook.
 
     Sets up a health check endpoint on the Locust web UI and logs registered task counts
@@ -96,6 +97,9 @@ def on_init(environment, **kwargs) -> None:
     Args:
         environment: Locust environment instance containing test configuration and state.
         **kwargs: Arbitrary keyword arguments passed to the initialization hook.
+
+    Raises:
+        AttributeError: If the Locust environment does not have an active web UI instance.
     """
     global init_complete
     # Add health endpoint to locust's web server
