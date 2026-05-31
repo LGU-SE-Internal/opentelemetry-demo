@@ -10,7 +10,7 @@ import random
 import uuid
 import logging
 
-from locust import HttpUser, task, between
+from locust import HttpUser, task, between, events
 from locust_plugins.users.playwright import PlaywrightUser, pw, PageWithRetry, event
 
 from opentelemetry import context, baggage, trace
@@ -77,6 +77,22 @@ URLLib3Instrumentor().instrument()
 
 logging.info("Instrumentation complete - logs will now include trace context")
 logging.info(f"Load generator v{SERVICE_VERSION} starting")
+
+@events.request.add_listener
+def log_failed_request(request_type, name, response_time, response_length, response, context, exception, **kwargs):
+    if exception or (response and response.status_code >= 400):
+        extra_fields = {
+            "request.method": request_type,
+            "request.path": name,
+            "response.time_ms": response_time,
+            "response.size_bytes": response_length
+        }
+        if response:
+            extra_fields["response.status_code"] = response.status_code
+        if exception:
+            extra_fields["error.message"] = str(exception)
+        # Trace ID is automatically added by OpenTelemetry logging instrumentation
+        logging.error("HTTP request failed", extra=extra_fields)
 
 # Initialize Flagd provider
 ofrep_endpoint = os.environ.get("OFREP_PROVIDER_ENDPOINT")
