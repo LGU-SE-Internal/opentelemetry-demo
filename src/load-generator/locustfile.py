@@ -114,7 +114,7 @@ categories = [
     "books",
     None,
 ]
-
+logging.info(f"Loaded {len(categories)} product categories")
 products = [
     "0PUK6V6EV0",
     "1YMWWN1N4O",
