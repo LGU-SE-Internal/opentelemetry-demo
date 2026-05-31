@@ -279,7 +279,40 @@ start:
 	@echo "Go to http://localhost:8080/telemetry/ for the Weaver generated telemetry documentation."
 
 .PHONY: start-minimal
-start-minimal:
+start-minimal: ## Run minimal version of demo with observability stack
 	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES_CORE) $(DOCKER_COMPOSE_FILES_OBSERVABILITY) $(DOCKER_COMPOSE_FILES_EXTRAS) up --force-recreate --remove-orphans --detach
 	@echo ""
-	@echo "OpenTelemetry Dem
+	@echo "OpenTelemetry Demo is running in minimal mode."
+	@echo "Go to http://localhost:8080 for the demo UI."
+	@echo "Go to http://localhost:8080/jaeger/ui for the Jaeger UI."
+	@echo "Go to http://localhost:8080/grafana/ for the Grafana UI."
+	@echo "Go to http://localhost:8080/loadgen/ for the Load Generator UI."
+	@echo "Go to http://localhost:8080/feature/ to change feature flags."
+
+.PHONY: stop
+stop: ## Stop all running demo containers
+	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) down --remove-orphans
+
+.PHONY: restart
+restart: ## Restart all services or a single service if service= is specified
+ifneq ($(strip $(service)),)
+	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) restart $(service)
+else
+	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) restart
+endif
+
+.PHONY: logs
+logs: ## Show logs for all services or a single service if service= is specified
+ifneq ($(strip $(service)),)
+	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) logs -f $(service)
+else
+	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) logs -f
+endif
+
+.PHONY: help
+help: ## Show this help message with all available targets and descriptions
+	@printf "\n\033[1mOpenTelemetry Demo Makefile Targets\033[0m\n\n"
+	@printf "\033[36m%-30s\033[0m %s\n" "Target" "Description"
+	@printf "%-30s %s\n" "------" "-----------"
+	@grep -hE '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'
+	@printf "\n"
