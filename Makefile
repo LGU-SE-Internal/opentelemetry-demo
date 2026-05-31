@@ -283,3 +283,12 @@ start-minimal:
 	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES_CORE) $(DOCKER_COMPOSE_FILES_OBSERVABILITY) $(DOCKER_COMPOSE_FILES_EXTRAS) up --force-recreate --remove-orphans --detach
 	@echo ""
 	@echo "OpenTelemetry Dem
+
+.PHONY: test-entrypoint
+test-entrypoint:
+	@echo "Running entrypoint.sh bats tests..."
+	@if ! command -v bats >/dev/null 2>&1; then \
+		echo "bats-core is not installed. Please install bats-core first."; \
+		exit 1; \
+	fi
+	cd src/load-generator && bats test_entrypoint.sh
