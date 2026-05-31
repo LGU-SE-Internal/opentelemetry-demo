@@ -1,6 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
+# Add current directory to PATH to use mock locust
+export PATH=".:$PATH"
+
 echo "Running entrypoint.sh validation tests..."
 
 PASS=0
@@ -16,8 +19,10 @@ run_test() {
     
     # Run entrypoint with the given env vars, capture output and exit code
     # We pass --help as the command so locust just exits 0 without running tests
-    output=$(eval "$env_vars" bash entrypoint.sh --help 2>&1)
+    set +e
+    output=$(env $env_vars bash entrypoint.sh --help 2>&1)
     exit_code=$?
+    set -e
     
     if [[ "$expect_success" == "true" ]]; then
         if [[ $exit_code -eq 0 ]]; then
