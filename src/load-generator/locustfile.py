@@ -136,6 +136,9 @@ with open('people.json') as people_file:
 logging.info(f"Loaded {len(people)} people entries from people.json")
 LOCUST_WAIT_MIN = int(os.environ.get('LOCUST_WAIT_MIN', 1))
 LOCUST_WAIT_MAX = int(os.environ.get('LOCUST_WAIT_MAX', 10))
+REQUEST_TIMEOUT = int(os.environ.get("LOCUST_REQUEST_TIMEOUT", 10))
+
+logging.info(f"Request timeout: {REQUEST_TIMEOUT}s")
 
 class WebsiteUser(HttpUser):
     wait_time = between(LOCUST_WAIT_MIN, LOCUST_WAIT_MAX)
@@ -148,14 +151,14 @@ class WebsiteUser(HttpUser):
     def index(self):
         with self.tracer.start_as_current_span("user_index", context=Context()):
             logging.info("User accessing index page")
-            self.client.get("/")
+            self.client.get("/", timeout=REQUEST_TIMEOUT)
 
     @task(10)
     def browse_product(self):
         product = random.choice(products)
         with self.tracer.start_as_current_span("user_browse_product", context=Context(), attributes={"product.id": product}):
             logging.info(f"User browsing product: {product}")
-            self.client.get("/api/products/" + product)
+            self.client.get("/api/products/" + product, timeout=REQUEST_TIMEOUT)
 
     @task(3)
     def get_recommendations(self):
@@ -165,14 +168,14 @@ class WebsiteUser(HttpUser):
             params = {
                 "productIds": [product],
             }
-            self.client.get("/api/recommendations", params=params)
+            self.client.get("/api/recommendations", params=params, timeout=REQUEST_TIMEOUT)
 
     @task(2)
     def get_product_reviews(self):
         product = random.choice(products)
         with self.tracer.start_as_current_span("user_get_product_reviews", context=Context(), attributes={"product.id": product}):
             logging.info(f"User getting product reviews for product: {product}")
-            self.client.get("/api/product-reviews/" + product)
+            self.client.get("/api/product-reviews/" + product, timeout=REQUEST_TIMEOUT)
 
     @task(1)
     def ask_product_ai_assistant(self):
@@ -183,7 +186,7 @@ class WebsiteUser(HttpUser):
             question = {
                 "question": question
             }
-            self.client.post("/api/product-ask-ai-assistant/" + product, json=question)
+            self.client.post("/api/product-ask-ai-assistant/" + product, json=question, timeout=REQUEST_TIMEOUT)
 
     @task(3)
     def get_ads(self):
@@ -193,13 +196,13 @@ class WebsiteUser(HttpUser):
             params = {
                 "contextKeys": [category],
             }
-            self.client.get("/api/data/", params=params)
+            self.client.get("/api/data/", params=params, timeout=REQUEST_TIMEOUT)
 
     @task(3)
     def view_cart(self):
         with self.tracer.start_as_current_span("user_view_cart", context=Context()):
             logging.info("User viewing cart")
-            self.client.get("/api/cart")
+            self.client.get("/api/cart", timeout=REQUEST_TIMEOUT)
 
     @task(2)
     def add_to_cart(self, user: str = "") -> None:
@@ -209,7 +212,7 @@ class WebsiteUser(HttpUser):
             quantity = random.choice([1, 2, 3, 4, 5, 10])
             with self.tracer.start_as_current_span("user_add_to_cart", context=Context(), attributes={"user.id": user, "product.id": product, "quantity": quantity}):
                 logging.info(f"User {user} adding {quantity} of product {product} to cart")
-                self.client.get("/api/products/" + product)
+                self.client.get("/api/products/" + product, timeout=REQUEST_TIMEOUT)
                 cart_item = {
                     "item": {
                         "productId": product,
@@ -217,7 +220,7 @@ class WebsiteUser(HttpUser):
                     },
                     "userId": user,
                 }
-                self.client.post("/api/cart", json=cart_item)
+                self.client.post("/api/cart", json=cart_item, timeout=REQUEST_TIMEOUT)
 
     @task(1)
     def checkout(self) -> None:
@@ -226,7 +229,7 @@ class WebsiteUser(HttpUser):
             self.add_to_cart(user=user)
             checkout_person = random.choice(people)
             checkout_person["userId"] = user
-            self.client.post("/api/checkout", json=checkout_person)
+            self.client.post("/api/checkout", json=checkout_person, timeout=REQUEST_TIMEOUT)
             logging.info(f"Checkout completed for user {user}")
 
     @task(1)
