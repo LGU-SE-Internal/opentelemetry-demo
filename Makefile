@@ -146,34 +146,34 @@ else
 endif
 
 .PHONY: build-and-push
-build-and-push:
+build-and-push: ## Build all services and push images to registry
 	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) build --push
 
 # Create multiplatform builder for buildx
 .PHONY: create-multiplatform-builder
-create-multiplatform-builder:
+create-multiplatform-builder: ## Create multiplatform buildx builder for cross-architecture builds
 	docker buildx create --name otel-demo-builder --bootstrap --use --driver docker-container --config ./buildkitd.toml
 
 # Remove multiplatform builder for buildx
 .PHONY: remove-multiplatform-builder
-remove-multiplatform-builder:
+remove-multiplatform-builder: ## Remove the multiplatform buildx builder
 	docker buildx rm otel-demo-builder
 
 # Build and push multiplatform images (linux/amd64, linux/arm64) using buildx.
 # Requires docker with buildx enabled and a multi-platform capable builder in use.
 # Docker needs to be configured to use containerd storage for images to be loaded into the local registry.
 .PHONY: build-multiplatform
-build-multiplatform:
+build-multiplatform: ## Build multiplatform images (amd64/arm64) and load to local registry
 	# Because buildx bake does not support --env-file yet, we need to load it into the environment first.
 	set -a; . ./.env.override; set +a && docker buildx bake $(DOCKER_COMPOSE_FILES) --load --set "*.platform=linux/amd64,linux/arm64"
 
 .PHONY: build-multiplatform-and-push
-build-multiplatform-and-push:
+build-multiplatform-and-push: ## Build multiplatform images (amd64/arm64) and push to registry
 	# Because buildx bake does not support --env-file yet, we need to load it into the environment first.
 	set -a; . ./.env.override; set +a && docker buildx bake $(DOCKER_COMPOSE_FILES) --push --set "*.platform=linux/amd64,linux/arm64"
 
 .PHONY: clean-images
-clean-images:
+clean-images: ## Remove all local OpenTelemetry Demo docker images
 	$(DOCKER_CMD) rmi $(shell $(DOCKER_CMD) images --filter=reference="ghcr.io/open-telemetry/demo:latest-*" -q); \
     if [ $$? -ne 0 ]; \
     then \
@@ -184,16 +184,16 @@ clean-images:
     fi
 
 .PHONY: run-tests
-run-tests:
+run-tests: ## Run all test suites including frontend tests and trace-based tests
 	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) $(DOCKER_COMPOSE_FILES_TESTS) run frontendTests
 	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) $(DOCKER_COMPOSE_FILES_TESTS) run traceBasedTests
 
 .PHONY: run-tracetesting
-run-tracetesting:
+run-tracetesting: ## Run trace-based tests for specified services (set SERVICES_TO_TEST to filter)
 	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) $(DOCKER_COMPOSE_FILES_TESTS) run traceBasedTests ${SERVICES_TO_TEST}
 
 .PHONY: coverage
-coverage:
+coverage: ## Run all unit tests with coverage reporting (add HTML=1 to generate HTML report)
 	@echo "Running all unit tests with coverage enabled..."
 	# Run all service unit test containers that produce coverage reports
 	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) $(DOCKER_COMPOSE_FILES_TESTS) run --rm frontendTests
@@ -243,21 +243,21 @@ ifdef HTML
 endif
 
 .PHONY: generate-protobuf
-generate-protobuf:
+generate-protobuf: ## Generate protobuf files using local dependencies
 	./ide-gen-proto.sh
 
 .PHONY: docker-generate-protobuf
-docker-generate-protobuf:
+docker-generate-protobuf: ## Generate protobuf files using docker
 	./docker-gen-proto.sh
 
 .PHONY: clean
-clean:
+clean: ## Clean all generated protobuf files
 	rm -rf ./src/{checkout,product-catalog}/genproto/oteldemo/
 	rm -rf ./src/recommendation/{demo_pb2,demo_pb2_grpc}.py
 	rm -rf ./src/frontend/protos/demo.ts
 
 .PHONY: check-clean-work-tree
-check-clean-work-tree:
+check-clean-work-tree: ## Verify working tree is clean (no uncommitted changes)
 	@if ! git diff --quiet; then \
 	  echo; \
 	  echo 'Working tree is not clean, did you forget to run "make docker-generate-protobuf"?'; \
@@ -267,7 +267,7 @@ check-clean-work-tree:
 	fi
 
 .PHONY: start
-start:
+start: ## Run full demo with observability stack and extras
 	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) up --force-recreate --remove-orphans --detach
 	@echo ""
 	@echo "OpenTelemetry Demo is running."
