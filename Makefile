@@ -195,7 +195,7 @@ run-tracetesting:
 .PHONY: run-locust-tests
 run-locust-tests:
 	@echo "Running locustfile.py unit tests with coverage..."
-	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) $(DOCKER_COMPOSE_FILES_TESTS) run --rm --no-deps loadgenerator bash -c "cd /usr/src/app/ && pytest --cov --cov-report=term --cov-report=lcov:/coverage/lcov.locust.info tests/"
+	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) $(DOCKER_COMPOSE_FILES_TESTS) run --rm --no-deps loadgenerator bash -c "cd /usr/src/app/ && pip install pytest-cov==5.0.0 && pytest --cov=locustfile.py --cov-report=term --cov-report=lcov:/coverage/lcov.locust.info tests/"
 	mkdir -p ./coverage
 	docker cp $$($(DOCKER_COMPOSE_CMD) ps -q loadgenerator):/coverage/lcov.locust.info ./coverage/
 	$(DOCKER_COMPOSE_CMD) rm -f -s loadgenerator

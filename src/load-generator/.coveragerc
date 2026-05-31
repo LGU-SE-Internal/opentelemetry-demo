@@ -2,5 +2,9 @@
 source = .
 include = locustfile.py
 omit =
-    test_*.py
-    */test_*.py
+    */test*
+    */tests/*
+
+[report]
+show_missing = True
+skip_covered = False
