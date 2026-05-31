@@ -87,7 +87,16 @@ REQUEST_TIMEOUT = os.environ.get("REQUEST_TIMEOUT", "10")
 init_complete = False
 
 @events.init.add_listener
-def on_init(environment, **kwargs):
+def on_init(environment, **kwargs) -> None:
+    """Locust test initialization hook.
+
+    Sets up a health check endpoint on the Locust web UI and logs registered task counts
+    for each user class during test startup.
+
+    Args:
+        environment: Locust environment instance containing test configuration and state.
+        **kwargs: Arbitrary keyword arguments passed to the initialization hook.
+    """
     global init_complete
     # Add health endpoint to locust's web server
     @environment.web_ui.app.route("/health")
@@ -115,7 +124,15 @@ api.set_provider(OFREPProvider(base_url=base_url))
 api.add_hooks([TracingHook()])
 
 
-def get_flagd_value(FlagName):
+def get_flagd_value(FlagName: str) -> int:
+    """Retrieves an integer flag value from the Flagd feature flag provider.
+
+    Args:
+        FlagName: Name of the feature flag to retrieve.
+
+    Returns:
+        Integer value of the requested feature flag, defaults to 0 if the flag is not found.
+    """
     # Initialize OpenFeature
     client = api.get_client()
     return client.get_integer_value(FlagName, 0)
@@ -209,30 +226,4 @@ class WebsiteUser(HttpUser):
     @task(1)
     def ask_product_ai_assistant(self):
         product = random.choice(products)
-        question = "Can you summarize the product reviews?"
-        with self.tracer.start_as_current_span(
-            "user_ask_product_ai_assistant",
-            context=Context(),
-            attributes={"product.id": product, "question": question},
-        ):
-            logging.info(
-                f"Asking the AI Assistant a question for: {product} {question}"
-            )
-            question = {"question": question}
-            self.client.post("/api/product-ask-ai-assistant/" + product, json=question)
-
-    @task(3)
-    def get_ads(self):
-        category = random.choice(categories)
-        with self.tracer.start_as_current_span(
-            "user_get_ads", context=Context(), attributes={"category": str(category)}
-        ):
-            logging.info(f"User getting ads for category: {category}")
-            params = {
-                "contextKeys": [category],
-            }
-            self.client.get("/api/data/", params=params)
-
-    @task(3)
-    def view_cart(self):
-        with 
+        question = "Can you summari
