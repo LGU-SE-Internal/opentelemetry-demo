@@ -10,7 +10,7 @@ import random
 import uuid
 import logging
 
-from locust import HttpUser, task, between
+from locust import HttpUser, task, between, events
 from locust_plugins.users.playwright import PlaywrightUser, pw, PageWithRetry, event
 
 from opentelemetry import context, baggage, trace
@@ -65,6 +65,47 @@ root_logger.setLevel(logging.INFO)
 # Configure metrics
 metric_exporter = OTLPMetricExporter(insecure=True)
 set_meter_provider(MeterProvider([PeriodicExportingMetricReader(metric_exporter)]))
+
+# Get meter for custom metrics
+meter = trace.get_tracer_provider().meter_provider.get_meter(__name__, SERVICE_VERSION)
+
+# Custom metrics counters
+successful_tasks_counter = meter.create_counter(
+    name="locust.successful_tasks",
+    description="Number of successful task executions",
+    unit="1"
+)
+
+failed_tasks_counter = meter.create_counter(
+    name="locust.failed_tasks",
+    description="Number of failed task executions",
+    unit="1"
+)
+
+def on_request_success(request_type, name, response_time, response_length, **kwargs):
+    """Event handler for successful requests to increment success counter"""
+    successful_tasks_counter.add(
+        1,
+        {
+            "task_name": name,
+            "request_type": request_type
+        }
+    )
+
+def on_request_failure(request_type, name, response_time, exception, **kwargs):
+    """Event handler for failed requests to increment failure counter"""
+    failed_tasks_counter.add(
+        1,
+        {
+            "task_name": name,
+            "request_type": request_type,
+            "exception_type": type(exception).__name__
+        }
+    )
+
+# Register event handlers
+events.request_success.add_listener(on_request_success)
+events.request_failure.add_listener(on_request_failure)
 
 # Instrument logging to automatically inject trace context
 LoggingInstrumentor().instrument(set_logging_format=True)
