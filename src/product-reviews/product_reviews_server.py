@@ -318,10 +318,42 @@ def fetch_product_info(product_id):
     except Exception as e:
         return json.dumps({"error": str(e)})
 
-def must_map_env(key: str):
+def must_map_env(key: str, expected_type: str = "string", allowed_values: list = None):
+    import sys
     value = os.environ.get(key)
     if value is None:
-        raise Exception(f'{key} environment variable must be set')
+        error_msg = f"Invalid environment variable configuration:\n"
+        error_msg += f"  Variable name: {key}\n"
+        error_msg += f"  Invalid value: <not set>\n"
+        error_msg += f"  Expected: Required {expected_type} value"
+        if allowed_values is not None:
+            error_msg += f", allowed values: {', '.join(allowed_values)}"
+        print(error_msg, file=sys.stderr)
+        sys.exit(1)
+    
+    # Validate format based on type
+    if expected_type == "TCP port number":
+        try:
+            port = int(value)
+            if port < 1 or port > 65535:
+                raise ValueError
+        except (ValueError, TypeError):
+            error_msg = f"Invalid environment variable configuration:\n"
+            error_msg += f"  Variable name: {key}\n"
+            error_msg += f"  Invalid value: {value}\n"
+            error_msg += f"  Expected: {expected_type} between 1 and 65535"
+            print(error_msg, file=sys.stderr)
+            sys.exit(1)
+    
+    # Validate against allowed values
+    if allowed_values is not None and value not in allowed_values:
+        error_msg = f"Invalid environment variable configuration:\n"
+        error_msg += f"  Variable name: {key}\n"
+        error_msg += f"  Invalid value: {value}\n"
+        error_msg += f"  Expected: {expected_type}, allowed values: {', '.join(allowed_values)}"
+        print(error_msg, file=sys.stderr)
+        sys.exit(1)
+    
     return value
 
 def check_feature_flag(flag_name: str):
@@ -366,7 +398,7 @@ if __name__ == "__main__":
     health_pb2_grpc.add_HealthServicer_to_server(service, server)
 
     llm_host = must_map_env('LLM_HOST')
-    llm_port = must_map_env('LLM_PORT')
+    llm_port = must_map_env('LLM_PORT', expected_type="TCP port number")
     llm_mock_url = f"http://{llm_host}:{llm_port}/v1"
     llm_base_url = must_map_env('LLM_BASE_URL')
     llm_api_key = must_map_env('OPENAI_API_KEY')
@@ -377,7 +409,7 @@ if __name__ == "__main__":
     product_catalog_stub = demo_pb2_grpc.ProductCatalogServiceStub(pc_channel)
 
     # Start server
-    port = must_map_env('PRODUCT_REVIEWS_PORT')
+    port = must_map_env('PRODUCT_REVIEWS_PORT', expected_type="TCP port number")
     server.add_insecure_port(f'[::]:{port}')
     server.start()
     logger.info(f'Product reviews service started, listening on port {port}')

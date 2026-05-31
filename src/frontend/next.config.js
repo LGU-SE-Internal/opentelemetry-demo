@@ -27,6 +27,33 @@ const {
   PUBLIC_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = '',
 } = process.env;
 
+// Validate required environment variables
+const envVarSpecs = [
+  { name: 'AD_ADDR', type: 'gRPC service address (host:port)', allowedValues: [] },
+  { name: 'CART_ADDR', type: 'gRPC service address (host:port)', allowedValues: [] },
+  { name: 'CHECKOUT_ADDR', type: 'gRPC service address (host:port)', allowedValues: [] },
+  { name: 'CURRENCY_ADDR', type: 'gRPC service address (host:port)', allowedValues: [] },
+  { name: 'PRODUCT_CATALOG_ADDR', type: 'gRPC service address (host:port)', allowedValues: [] },
+  { name: 'PRODUCT_REVIEWS_ADDR', type: 'gRPC service address (host:port)', allowedValues: [] },
+  { name: 'RECOMMENDATION_ADDR', type: 'gRPC service address (host:port)', allowedValues: [] },
+  { name: 'SHIPPING_ADDR', type: 'HTTP service address (host:port)', allowedValues: [] },
+];
+
+envVarSpecs.forEach(spec => {
+  const value = process.env[spec.name];
+  if (!value) {
+    let errorMsg = "Invalid environment variable configuration:\n";
+    errorMsg += `  Variable name: ${spec.name}\n`;
+    errorMsg += `  Invalid value: <not set>\n`;
+    errorMsg += `  Expected: Required ${spec.type} value`;
+    if (spec.allowedValues.length > 0) {
+      errorMsg += `, allowed values: ${spec.allowedValues.join(', ')}`;
+    }
+    console.error(errorMsg);
+    process.exit(1);
+  }
+});
+
 const nextConfig = {
   reactStrictMode: true,
   output: 'standalone',

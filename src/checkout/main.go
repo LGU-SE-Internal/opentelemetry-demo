@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -159,7 +160,7 @@ type checkout struct {
 
 func main() {
 	var port string
-	mustMapEnv(&port, "CHECKOUT_PORT")
+	mustMapEnv(&port, "CHECKOUT_PORT", "TCP port number", []string{})
 
 	tp := initTracerProvider()
 	defer func() {
@@ -212,32 +213,32 @@ func main() {
 		Transport: otelhttp.NewTransport(http.DefaultTransport),
 	}
 
-	mustMapEnv(&svc.shippingSvcAddr, "SHIPPING_ADDR")
+	mustMapEnv(&svc.shippingSvcAddr, "SHIPPING_ADDR", "service host:port address", []string{})
 	c := mustCreateClient(svc.shippingSvcAddr)
 	svc.shippingSvcClient = pb.NewShippingServiceClient(c)
 	defer c.Close()
 
-	mustMapEnv(&svc.productCatalogSvcAddr, "PRODUCT_CATALOG_ADDR")
+	mustMapEnv(&svc.productCatalogSvcAddr, "PRODUCT_CATALOG_ADDR", "service host:port address", []string{})
 	c = mustCreateClient(svc.productCatalogSvcAddr)
 	svc.productCatalogSvcClient = pb.NewProductCatalogServiceClient(c)
 	defer c.Close()
 
-	mustMapEnv(&svc.cartSvcAddr, "CART_ADDR")
+	mustMapEnv(&svc.cartSvcAddr, "CART_ADDR", "service host:port address", []string{})
 	c = mustCreateClient(svc.cartSvcAddr)
 	svc.cartSvcClient = pb.NewCartServiceClient(c)
 	defer c.Close()
 
-	mustMapEnv(&svc.currencySvcAddr, "CURRENCY_ADDR")
+	mustMapEnv(&svc.currencySvcAddr, "CURRENCY_ADDR", "service host:port address", []string{})
 	c = mustCreateClient(svc.currencySvcAddr)
 	svc.currencySvcClient = pb.NewCurrencyServiceClient(c)
 	defer c.Close()
 
-	mustMapEnv(&svc.emailSvcAddr, "EMAIL_ADDR")
+	mustMapEnv(&svc.emailSvcAddr, "EMAIL_ADDR", "service host:port address", []string{})
 	c = mustCreateClient(svc.emailSvcAddr)
 	svc.emailSvcClient = pb.NewEmailServiceClient(c)
 	defer c.Close()
 
-	mustMapEnv(&svc.paymentSvcAddr, "PAYMENT_ADDR")
+	mustMapEnv(&svc.paymentSvcAddr, "PAYMENT_ADDR", "service host:port address", []string{})
 	c = mustCreateClient(svc.paymentSvcAddr)
 	svc.paymentSvcClient = pb.NewPaymentServiceClient(c)
 	defer c.Close()
@@ -287,11 +288,43 @@ func main() {
 	logger.Info("Checkout gRPC server stopped")
 }
 
-func mustMapEnv(target *string, envKey string) {
+func mustMapEnv(target *string, envKey string, expectedType string, allowedValues []string) {
 	v := os.Getenv(envKey)
 	if v == "" {
-		panic(fmt.Sprintf("environment variable %q not set", envKey))
+		errorMsg := fmt.Sprintf("Invalid environment variable configuration:\n  Variable name: %s\n  Invalid value: <not set>\n  Expected: Required %s value", envKey, expectedType)
+		if len(allowedValues) > 0 {
+			errorMsg += fmt.Sprintf(", allowed values: %s", strings.Join(allowedValues, ", "))
+		}
+		fmt.Fprintln(os.Stderr, errorMsg)
+		os.Exit(1)
 	}
+	
+	// Validate format based on type
+	if expectedType == "TCP port number" {
+		port, err := strconv.Atoi(v)
+		if err != nil || port < 1 || port > 65535 {
+			errorMsg := fmt.Sprintf("Invalid environment variable configuration:\n  Variable name: %s\n  Invalid value: %s\n  Expected: %s between 1 and 65535", envKey, v, expectedType)
+			fmt.Fprintln(os.Stderr, errorMsg)
+			os.Exit(1)
+		}
+	}
+	
+	// Validate against allowed values
+	if len(allowedValues) > 0 {
+		found := false
+		for _, allowed := range allowedValues {
+			if v == allowed {
+				found = true
+				break
+			}
+		}
+		if !found {
+			errorMsg := fmt.Sprintf("Invalid environment variable configuration:\n  Variable name: %s\n  Invalid value: %s\n  Expected: %s, allowed values: %s", envKey, v, expectedType, strings.Join(allowedValues, ", "))
+			fmt.Fprintln(os.Stderr, errorMsg)
+			os.Exit(1)
+		}
+	}
+	
 	envCount++
 	*target = v
 }

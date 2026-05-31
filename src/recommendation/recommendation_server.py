@@ -113,10 +113,42 @@ def get_product_list(request_product_ids):
         return prod_list
 
 
-def must_map_env(key: str):
+def must_map_env(key: str, expected_type: str = "string", allowed_values: list = None):
+    import sys
     value = os.environ.get(key)
     if value is None:
-        raise Exception(f'{key} environment variable must be set')
+        error_msg = f"Invalid environment variable configuration:\n"
+        error_msg += f"  Variable name: {key}\n"
+        error_msg += f"  Invalid value: <not set>\n"
+        error_msg += f"  Expected: Required {expected_type} value"
+        if allowed_values is not None:
+            error_msg += f", allowed values: {', '.join(allowed_values)}"
+        print(error_msg, file=sys.stderr)
+        sys.exit(1)
+    
+    # Validate format based on type
+    if expected_type == "TCP port number":
+        try:
+            port = int(value)
+            if port < 1 or port > 65535:
+                raise ValueError
+        except (ValueError, TypeError):
+            error_msg = f"Invalid environment variable configuration:\n"
+            error_msg += f"  Variable name: {key}\n"
+            error_msg += f"  Invalid value: {value}\n"
+            error_msg += f"  Expected: {expected_type} between 1 and 65535"
+            print(error_msg, file=sys.stderr)
+            sys.exit(1)
+    
+    # Validate against allowed values
+    if allowed_values is not None and value not in allowed_values:
+        error_msg = f"Invalid environment variable configuration:\n"
+        error_msg += f"  Variable name: {key}\n"
+        error_msg += f"  Invalid value: {value}\n"
+        error_msg += f"  Expected: {expected_type}, allowed values: {', '.join(allowed_values)}"
+        print(error_msg, file=sys.stderr)
+        sys.exit(1)
+    
     return value
 
 
@@ -166,7 +198,7 @@ if __name__ == "__main__":
     health_pb2_grpc.add_HealthServicer_to_server(service, server)
 
     # Start server
-    port = must_map_env('RECOMMENDATION_PORT')
+    port = must_map_env('RECOMMENDATION_PORT', expected_type="TCP port number")
     server.add_insecure_port(f'[::]:{port}')
     server.start()
     logger.info(f'Recommendation service started, listening on port {port}')
