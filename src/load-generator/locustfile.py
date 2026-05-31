@@ -9,6 +9,16 @@ import random
 import uuid
 import logging
 
+# Validate MAX_REQUESTS_PER_SECOND environment variable if provided
+max_rps = os.environ.get("MAX_REQUESTS_PER_SECOND")
+if max_rps is not None:
+    try:
+        max_rps_int = int(max_rps)
+        if max_rps_int <= 0:
+            raise ValueError("Value must be a positive integer")
+    except ValueError as e:
+        raise ValueError(f"Invalid MAX_REQUESTS_PER_SECOND environment variable: {e}. Please provide a valid positive integer.") from e
+
 from locust import HttpUser, task, between
 from locust_plugins.users.playwright import PlaywrightUser, pw, PageWithRetry, event
 
@@ -209,5 +219,4 @@ class WebsiteUser(HttpUser):
         with self.tracer.start_as_current_span("user_checkout_multi", context=Context(),
                                             attributes={"user.id": user, "item.count": item_count}):
             for i in range(item_count):
-                self.add_to_cart(user=user)
-    
+                self.add_to_cart(user
