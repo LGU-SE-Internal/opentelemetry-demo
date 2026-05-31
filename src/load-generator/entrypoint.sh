@@ -11,5 +11,16 @@ if [[ -n "${LOCUST_RUN_TIME:-}" ]]; then
     fi
 fi
 
+# Validate LOCUST_EXIT_CODE_ON_FAILURE environment variable if set
+if [[ -n "${LOCUST_EXIT_CODE_ON_FAILURE:-}" ]]; then
+    # Convert to lowercase for case-insensitive check
+    lower_val="${LOCUST_EXIT_CODE_ON_FAILURE,,}"
+    if ! [[ "$lower_val" =~ ^(0|1|true|false)$ ]]; then
+        echo "ERROR: Invalid LOCUST_EXIT_CODE_ON_FAILURE value: '$LOCUST_EXIT_CODE_ON_FAILURE'" >&2
+        echo "Valid values are: 0, 1, true, false (case-insensitive)" >&2
+        exit 1
+    fi
+fi
+
 # Execute the original locust command with all passed arguments
 exec locust --skip-log-setup "$@"
