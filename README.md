@@ -100,6 +100,7 @@ the load test behavior using the following environment variables:
 | `FLAGD_HOST` | Hostname of the FlagD feature flag service | No | `localhost` | `custom-flagd` |
 | `FLAGD_PORT` | Port of the FlagD service | No | `8013` | `9013` |
 | `FLAGD_OFREP_PORT` | Port of the FlagD OFREP API | No | `8016` | `9016` |
+| `OFREP_PROVIDER_ENDPOINT` | Full OFREP provider endpoint URL (overrides FLAGD_HOST and FLAGD_OFREP_PORT if set) | No | - | `http://custom-flagd-provider:8016` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP endpoint for sending telemetry data | No | `http://otelcol:4317` | `http://otel-collector:4317` |
 | `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE` | Metrics temporality preference | No | `cumulative` | `delta` |
 | `OTEL_RESOURCE_ATTRIBUTES` | Additional OpenTelemetry resource attributes | No | - | `deployment.environment=test` |
