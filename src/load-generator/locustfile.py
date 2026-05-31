@@ -202,7 +202,7 @@ class WebsiteUser(HttpUser):
             self.client.get("/api/cart")
 
     @task(2)
-    def add_to_cart(self, user=""):
+    def add_to_cart(self, user: str = ""):
         if user == "":
             user = str(uuid.uuid1())
         product = random.choice(products)
@@ -220,7 +220,7 @@ class WebsiteUser(HttpUser):
             self.client.post("/api/cart", json=cart_item)
 
     @task(1)
-    def checkout(self):
+    def checkout(self) -> None:
         user = str(uuid.uuid1())
         with self.tracer.start_as_current_span("user_checkout_single", context=Context(), attributes={"user.id": user}):
             self.add_to_cart(user=user)
