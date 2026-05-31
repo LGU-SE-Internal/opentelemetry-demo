@@ -101,6 +101,14 @@ api.set_provider(OFREPProvider(base_url=base_url))
 api.add_hooks([TracingHook()])
 
 def get_flagd_value(FlagName):
+    """Retrieves an integer flag value from the configured OFREP provider.
+    
+    Args:
+        FlagName (str): Name of the feature flag to retrieve
+        
+    Returns:
+        int: The flag value, defaults to 0 if the flag is not found
+    """
     # Initialize OpenFeature
     client = api.get_client()
     return client.get_integer_value(FlagName, 0)
@@ -141,17 +149,33 @@ class WebsiteUser(HttpUser):
     wait_time = between(LOCUST_WAIT_MIN, LOCUST_WAIT_MAX)
 
     def __init__(self, *args, **kwargs):
+        """Initialize the WebsiteUser instance with a tracer instance.
+        
+        Args:
+            *args: Variable length argument list passed to parent HttpUser class
+            **kwargs: Arbitrary keyword arguments passed to parent HttpUser class
+        """
         super().__init__(*args, **kwargs)
         self.tracer = trace.get_tracer(__name__)
 
     @task(1)
     def index(self):
+        """Access the website index page.
+        
+        Returns:
+            None
+        """
         with self.tracer.start_as_current_span("user_index", context=Context()):
             logging.info("User accessing index page")
             self.client.get("/")
 
     @task(10)
     def browse_product(self):
+        """Browse a randomly selected product page.
+        
+        Returns:
+            None
+        """
         product = random.choice(products)
         with self.tracer.start_as_current_span("user_browse_product", context=Context(), attributes={"product.id": product}):
             logging.info(f"User browsing product: {product}")
@@ -159,6 +183,11 @@ class WebsiteUser(HttpUser):
 
     @task(3)
     def get_recommendations(self):
+        """Get product recommendations for a randomly selected product.
+        
+        Returns:
+            None
+        """
         product = random.choice(products)
         with self.tracer.start_as_current_span("user_get_recommendations", context=Context(), attributes={"product.id": product}):
             logging.info(f"User getting recommendations for product: {product}")
@@ -169,6 +198,11 @@ class WebsiteUser(HttpUser):
 
     @task(2)
     def get_product_reviews(self):
+        """Get reviews for a randomly selected product.
+        
+        Returns:
+            None
+        """
         product = random.choice(products)
         with self.tracer.start_as_current_span("user_get_product_reviews", context=Context(), attributes={"product.id": product}):
             logging.info(f"User getting product reviews for product: {product}")
@@ -176,6 +210,11 @@ class WebsiteUser(HttpUser):
 
     @task(1)
     def ask_product_ai_assistant(self):
+        """Ask the product AI assistant a predefined question about a random product.
+        
+        Returns:
+            None
+        """
         product = random.choice(products)
         question = 'Can you summarize the product reviews?'
         with self.tracer.start_as_current_span("user_ask_product_ai_assistant", context=Context(), attributes={"product.id": product, "question": question}):
@@ -187,6 +226,11 @@ class WebsiteUser(HttpUser):
 
     @task(3)
     def get_ads(self):
+        """Get advertisements for a randomly selected product category.
+        
+        Returns:
+            None
+        """
         category = random.choice(categories)
         with self.tracer.start_as_current_span("user_get_ads", context=Context(), attributes={"category": str(category)}):
             logging.info(f"User getting ads for category: {category}")
@@ -197,12 +241,25 @@ class WebsiteUser(HttpUser):
 
     @task(3)
     def view_cart(self):
+        """View the current user's shopping cart.
+        
+        Returns:
+            None
+        """
         with self.tracer.start_as_current_span("user_view_cart", context=Context()):
             logging.info("User viewing cart")
             self.client.get("/api/cart")
 
     @task(2)
     def add_to_cart(self, user: str = "") -> None:
+        """Add a random product with random quantity to the user's shopping cart.
+        
+        Args:
+            user (str, optional): User ID to use for the operation. If empty, a new UUID is generated. Defaults to "".
+            
+        Returns:
+            None
+        """
         if user == "":
             user = str(uuid.uuid1())
             product = random.choice(products)
@@ -221,6 +278,14 @@ class WebsiteUser(HttpUser):
 
     @task(1)
     def checkout(self) -> None:
+        """Perform a checkout flow with a single product in the cart.
+        
+        Generates a new user ID, adds a random product to cart, then checks out with
+        a randomly selected person from the people dataset.
+        
+        Returns:
+            None
+        """
         user = str(uuid.uuid1())
         with self.tracer.start_as_current_span("user_checkout_single", context=Context(), attributes={"user.id": user}):
             self.add_to_cart(user=user)
@@ -231,6 +296,14 @@ class WebsiteUser(HttpUser):
 
     @task(1)
     def checkout_multi(self) -> None:
+        """Perform a checkout flow with multiple products in the cart.
+        
+        Generates a new user ID, adds multiple (2-4) random products to cart,
+        then checks out with a randomly selected person from the people dataset.
+        
+        Returns:
+            None
+        """
         user = str(uuid.uuid1())
         item_count = random.choice([2, 3, 4])
         with self.tracer.start_as_current_span("user_checkout_multi", context=Context(),
