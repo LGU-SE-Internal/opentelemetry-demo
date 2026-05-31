@@ -107,8 +107,42 @@ products = [
     "HQTGWGPNH4",
 ]
 
-with open('people.json') as people_file:
-    people = json.load(people_file)
+def validate_people_entries(people_data):
+    """Validate people.json entries have all required fields."""
+    required_fields = ["name", "email", "id"]
+    errors = []
+    for idx, person in enumerate(people_data):
+        missing_fields = [field for field in required_fields if field not in person]
+        if missing_fields:
+            errors.append(f"Entry {idx} missing required fields: {', '.join(missing_fields)}")
+    return errors
+
+def load_and_validate_people(file_path):
+    """Load people.json file and validate its contents."""
+    try:
+        with open(file_path, 'r') as f:
+            people_data = json.load(f)
+    except json.JSONDecodeError as e:
+        return False, f"Malformed JSON: {str(e)}"
+    except Exception as e:
+        return False, f"Failed to read file: {str(e)}"
+    
+    validation_errors = validate_people_entries(people_data)
+    if validation_errors:
+        return False, "\n".join(validation_errors)
+    
+    return True, "Validation passed"
+
+# Load and validate people data
+try:
+    validation_passed, validation_msg = load_and_validate_people('people.json')
+    if not validation_passed:
+        raise ValueError(f"people.json validation failed:\n{validation_msg}")
+    with open('people.json') as people_file:
+        people = json.load(people_file)
+except Exception as e:
+    logging.error(f"Error loading people data: {str(e)}")
+    raise
 
 class WebsiteUser(HttpUser):
     wait_time = between(1, 10)
@@ -209,5 +243,4 @@ class WebsiteUser(HttpUser):
         with self.tracer.start_as_current_span("user_checkout_multi", context=Context(),
                                             attributes={"user.id": user, "item.count": item_count}):
             for i in range(item_count):
-                self.add_to_cart(user=user)
-    
+                self.add_to_cart(user
