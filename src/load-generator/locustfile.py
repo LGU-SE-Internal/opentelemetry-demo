@@ -152,12 +152,12 @@ people = json.load(people_file)
 class WebsiteUser(HttpUser):
     wait_time = between(1, 10)
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.tracer = trace.get_tracer(__name__)
         self.client.timeout = int(REQUEST_TIMEOUT)
 
-    def on_start(self):
+    def on_start(self) -> None:
         self.client.headers["User-Agent"] = random.choice(USER_AGENTS)
         with self.tracer.start_as_current_span("user_session_start", context=Context()):
             session_id = str(uuid.uuid4())
@@ -168,13 +168,13 @@ class WebsiteUser(HttpUser):
             self.index()
 
     @task(1)
-    def index(self):
+    def index(self) -> None:
         with self.tracer.start_as_current_span("user_index", context=Context()):
             logging.info("User accessing index page")
             self.client.get("/")
 
     @task(10)
-    def browse_product(self):
+    def browse_product(self) -> None:
         product = random.choice(products)
         with self.tracer.start_as_current_span(
             "user_browse_product", context=Context(), attributes={"product.id": product}
@@ -183,7 +183,7 @@ class WebsiteUser(HttpUser):
             self.client.get("/api/products/" + product)
 
     @task(3)
-    def get_recommendations(self):
+    def get_recommendations(self) -> None:
         product = random.choice(products)
         with self.tracer.start_as_current_span(
             "user_get_recommendations",
@@ -197,7 +197,7 @@ class WebsiteUser(HttpUser):
             self.client.get("/api/recommendations", params=params)
 
     @task(2)
-    def get_product_reviews(self):
+    def get_product_reviews(self) -> None:
         product = random.choice(products)
         with self.tracer.start_as_current_span(
             "user_get_product_reviews",
@@ -208,7 +208,7 @@ class WebsiteUser(HttpUser):
             self.client.get("/api/product-reviews/" + product)
 
     @task(1)
-    def ask_product_ai_assistant(self):
+    def ask_product_ai_assistant(self) -> None:
         product = random.choice(products)
         question = "Can you summarize the product reviews?"
         with self.tracer.start_as_current_span(
@@ -223,7 +223,6 @@ class WebsiteUser(HttpUser):
             self.client.post("/api/product-ask-ai-assistant/" + product, json=question)
 
     @task(3)
-    def get_ads(self):
+    def get_ads(self) -> None:
         category = random.choice(categories)
-        with self.tracer.start_as_current_span(
-            "user_get_ads", context=Context(), attrib
+        with self.trace
