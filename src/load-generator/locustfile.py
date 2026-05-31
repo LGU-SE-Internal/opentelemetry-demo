@@ -128,6 +128,8 @@ products = [
     "HQTGWGPNH4",
 ]
 
+logging.info(f"Loaded {len(products)} product IDs")
+
 with open('people.json') as people_file:
     people = json.load(people_file)
 
