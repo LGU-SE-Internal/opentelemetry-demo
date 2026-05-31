@@ -89,6 +89,8 @@ The demo uses Locust as a load generator to simulate user traffic. You can custo
 | `LOCUST_USERS` | Peak number of concurrent Locust users | No | `10` | `50` |
 | `LOCUST_RUN_TIME` | Duration to run the load test for (e.g. `10m`, `1h`) | No | - | `30m` |
 | `LOCUST_SPAWN_RATE` | Rate to spawn new users at (users per second) | No | `1` | `5` |
+| `LOCUST_WAIT_MIN` | Minimum wait time between task executions (seconds) | No | `1` | `2` |
+| `LOCUST_WAIT_MAX` | Maximum wait time between task executions (seconds) | No | `10` | `15` |
 | `LOCUST_HOST` | Host URL of the frontend service to test | Yes | `http://frontend:8080` | `http://localhost:8080` |
 | `LOCUST_HEADLESS` | Run Locust in headless mode without web UI (set to `true` to enable) | No | `false` | `true` |
 | `LOCUST_AUTOSTART` | Automatically start the load test when Locust starts (set to `true` to enable) | No | `false` | `true` |
