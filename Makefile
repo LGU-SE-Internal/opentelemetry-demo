@@ -45,7 +45,7 @@ SEMCONVGEN_VERSION=0.11.0
 YAMLLINT_VERSION=1.30.0
 
 .PHONY: all
-all: install-tools markdownlint misspell yamllint checklicense
+all: install-tools markdownlint misspell yamllint checklicense ## Run all lint and check targets
 
 $(MISSPELL):
 	cd $(TOOLS_DIR) && go build -o $(MISSPELL_BINARY) github.com/client9/misspell/cmd/misspell
@@ -54,15 +54,15 @@ $(ADDLICENSE):
 	cd $(TOOLS_DIR) && go build -o $(ADDLICENSE_BINARY) github.com/google/addlicense
 
 .PHONY: misspell
-misspell:	$(MISSPELL)
+misspell:	$(MISSPELL) ## Check all markdown files for spelling errors
 	$(MISSPELL) -error $(ALL_DOCS)
 
 .PHONY: misspell-correction
-misspell-correction:	$(MISSPELL)
+misspell-correction:	$(MISSPELL) ## Auto-correct spelling errors in all markdown files
 	$(MISSPELL) -w $(ALL_DOCS)
 
 .PHONY: markdownlint
-markdownlint:
+markdownlint: ## Run markdown lint on all documentation files
 	@if ! npm ls markdownlint; then npm install; fi
 	@for f in $(ALL_DOCS); do \
 		echo $$f; \
