@@ -83,9 +83,12 @@ yamllint: install-yamllint
 shellcheck:
 	shellcheck *.sh
 
-## Run all configured linters (shellcheck, yamllint, markdownlint)
+.PHONY: help
+help: ## Show this help message
+	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z_-]+:.*?##/ { printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
+
 .PHONY: lint
-lint: shellcheck yamllint markdownlint
+lint: shellcheck yamllint markdownlint ## Run all configured linters (shellcheck, yamllint, markdownlint)
 	@echo "All linters completed successfully"
 
 .PHONY: checklicense
