@@ -9,6 +9,7 @@ import urllib.parse
 import random
 import uuid
 import logging
+from typing import Any
 
 from locust import HttpUser, task, between, events
 from locust_plugins.users.playwright import PlaywrightUser, pw, PageWithRetry, event
@@ -138,7 +139,7 @@ except Exception as e:
     logging.error("Verify that FLAGD_HOST and FLAGD_OFREP_PORT environment variables are set correctly, or check your OFREP_PROVIDER_ENDPOINT value.")
     raise SystemExit(1)
 
-def get_flagd_value(FlagName):
+def get_flagd_value(FlagName: str) -> int:
     # Initialize OpenFeature
     client = api.get_client()
     return client.get_integer_value(FlagName, 0)
@@ -181,25 +182,25 @@ logging.info(f"Request timeout: {REQUEST_TIMEOUT}s")
 class WebsiteUser(HttpUser):
     wait_time = between(LOCUST_WAIT_MIN, LOCUST_WAIT_MAX)
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.tracer = trace.get_tracer(__name__)
 
     @task(1)
-    def index(self):
+    def index(self) -> None:
         with self.tracer.start_as_current_span("user_index", context=Context()):
             logging.info("User accessing index page")
             self.client.get("/", timeout=REQUEST_TIMEOUT)
 
     @task(10)
-    def browse_product(self):
+    def browse_product(self) -> None:
         product = random.choice(products)
         with self.tracer.start_as_current_span("user_browse_product", context=Context(), attributes={"product.id": product}):
             logging.info(f"User browsing product: {product}")
             self.client.get("/api/products/" + product, timeout=REQUEST_TIMEOUT)
 
     @task(3)
-    def get_recommendations(self):
+    def get_recommendations(self) -> None:
         product = random.choice(products)
         with self.tracer.start_as_current_span("user_get_recommendations", context=Context(), attributes={"product.id": product}):
             logging.info(f"User getting recommendations for product: {product}")
@@ -209,14 +210,14 @@ class WebsiteUser(HttpUser):
             self.client.get("/api/recommendations", params=params, timeout=REQUEST_TIMEOUT)
 
     @task(2)
-    def get_product_reviews(self):
+    def get_product_reviews(self) -> None:
         product = random.choice(products)
         with self.tracer.start_as_current_span("user_get_product_reviews", context=Context(), attributes={"product.id": product}):
             logging.info(f"User getting product reviews for product: {product}")
             self.client.get("/api/product-reviews/" + product, timeout=REQUEST_TIMEOUT)
 
     @task(1)
-    def ask_product_ai_assistant(self):
+    def ask_product_ai_assistant(self) -> None:
         product = random.choice(products)
         question = 'Can you summarize the product reviews?'
         with self.tracer.start_as_current_span("user_ask_product_ai_assistant", context=Context(), attributes={"product.id": product, "question": question}):
@@ -227,7 +228,7 @@ class WebsiteUser(HttpUser):
             self.client.post("/api/product-ask-ai-assistant/" + product, json=question, timeout=REQUEST_TIMEOUT)
 
     @task(3)
-    def get_ads(self):
+    def get_ads(self) -> None:
         category = random.choice(categories)
         with self.tracer.start_as_current_span("user_get_ads", context=Context(), attributes={"category": str(category)}):
             logging.info(f"User getting ads for category: {category}")
@@ -237,7 +238,7 @@ class WebsiteUser(HttpUser):
             self.client.get("/api/data/", params=params, timeout=REQUEST_TIMEOUT)
 
     @task(3)
-    def view_cart(self):
+    def view_cart(self) -> None:
         with self.tracer.start_as_current_span("user_view_cart", context=Context()):
             logging.info("User viewing cart")
             self.client.get("/api/cart", timeout=REQUEST_TIMEOUT)
