@@ -11,5 +11,13 @@ if [[ -n "${LOCUST_RUN_TIME:-}" ]]; then
     fi
 fi
 
+# Validate LOCUST_LOCUSTFILE environment variable if set
+if [[ -n "${LOCUST_LOCUSTFILE:-}" ]]; then
+    if ! [[ -f "$LOCUST_LOCUSTFILE" ]]; then
+        echo "ERROR: LOCUST_LOCUSTFILE '$LOCUST_LOCUSTFILE' does not exist or is not a file" >&2
+        exit 1
+    fi
+fi
+
 # Execute the original locust command with all passed arguments
 exec locust --skip-log-setup "$@"
