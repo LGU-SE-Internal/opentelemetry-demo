@@ -256,6 +256,15 @@ clean:
 	rm -rf ./src/recommendation/{demo_pb2,demo_pb2_grpc}.py
 	rm -rf ./src/frontend/protos/demo.ts
 
+
+.PHONY: clean-test
+clean-test:
+	# Remove pytest cache directories
+	find . -path "./.git/*" -prune -o -type d -name ".pytest_cache" -exec rm -rf {} + 2>/dev/null || true
+	# Remove coverage reports
+	rm -rf .coverage* htmlcov/ ./coverage/
+	# Remove temporary editor files
+	find . -path "./.git/*" -prune -o -type f \( -name "*~" -o -name "*.swp" \) -exec rm -f {} + 2>/dev/null || true
 .PHONY: check-clean-work-tree
 check-clean-work-tree:
 	@if ! git diff --quiet; then \
