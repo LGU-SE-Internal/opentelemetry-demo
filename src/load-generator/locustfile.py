@@ -39,6 +39,91 @@ from openfeature.contrib.hook.opentelemetry import TracingHook
 
 from playwright.async_api import Route, Request
 
+# Validate environment variables
+def validate_env():
+    import sys
+    env_specs = [
+        ("OFREP_PROVIDER_ENDPOINT", "URL string", []),
+        ("FLAGD_HOST", "hostname string", []),
+        ("FLAGD_OFREP_PORT", "TCP port number between 1 and 65535", []),
+        ("LOCUST_WAIT_MIN", "positive integer", []),
+        ("LOCUST_WAIT_MAX", "positive integer >= LOCUST_WAIT_MIN", []),
+    ]
+    
+    errors = []
+    
+    # Check required vars
+    ofrep_endpoint = os.environ.get("OFREP_PROVIDER_ENDPOINT")
+    if not ofrep_endpoint:
+        errors.append(
+            "Invalid environment variable configuration:\n"
+            "  Variable name: OFREP_PROVIDER_ENDPOINT\n"
+            "  Invalid value: <not set>\n"
+            "  Expected: Required URL string"
+        )
+    
+    # Validate ports and numbers
+    flagd_port = os.environ.get("FLAGD_OFREP_PORT", 8016)
+    try:
+        port = int(flagd_port)
+        if port < 1 or port > 65535:
+            errors.append(
+                f"Invalid environment variable configuration:\n"
+                f"  Variable name: FLAGD_OFREP_PORT\n"
+                f"  Invalid value: {flagd_port}\n"
+                f"  Expected: TCP port number between 1 and 65535"
+            )
+    except ValueError:
+        errors.append(
+            f"Invalid environment variable configuration:\n"
+            f"  Variable name: FLAGD_OFREP_PORT\n"
+            f"  Invalid value: {flagd_port}\n"
+            f"  Expected: TCP port number between 1 and 65535"
+        )
+    
+    wait_min = os.environ.get("LOCUST_WAIT_MIN", 1)
+    try:
+        wmin = int(wait_min)
+        if wmin < 0:
+            errors.append(
+                f"Invalid environment variable configuration:\n"
+                f"  Variable name: LOCUST_WAIT_MIN\n"
+                f"  Invalid value: {wait_min}\n"
+                f"  Expected: positive integer"
+            )
+    except ValueError:
+        errors.append(
+            f"Invalid environment variable configuration:\n"
+            f"  Variable name: LOCUST_WAIT_MIN\n"
+            f"  Invalid value: {wait_min}\n"
+            f"  Expected: positive integer"
+        )
+    
+    wait_max = os.environ.get("LOCUST_WAIT_MAX", 10)
+    try:
+        wmax = int(wait_max)
+        if wmax < 0 or wmax < int(wait_min):
+            errors.append(
+                f"Invalid environment variable configuration:\n"
+                f"  Variable name: LOCUST_WAIT_MAX\n"
+                f"  Invalid value: {wait_max}\n"
+                f"  Expected: positive integer >= LOCUST_WAIT_MIN"
+            )
+    except ValueError:
+        errors.append(
+            f"Invalid environment variable configuration:\n"
+            f"  Variable name: LOCUST_WAIT_MAX\n"
+            f"  Invalid value: {wait_max}\n"
+            f"  Expected: positive integer >= LOCUST_WAIT_MIN"
+        )
+    
+    if errors:
+        for err in errors:
+            print(err, file=sys.stderr)
+        sys.exit(1)
+
+validate_env()
+
 SERVICE_VERSION = "1.0.0"
 
 # Configure tracer provider first (needed for trace context in logs)
