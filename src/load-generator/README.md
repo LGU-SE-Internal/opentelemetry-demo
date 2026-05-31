@@ -95,3 +95,21 @@ There are currently no optional fields for people.json entries. All fields docum
 - The file must contain a valid JSON array of user entries
 - All entries must follow the schema documented above for the load generator to work correctly
 - Any invalid entries or JSON formatting errors will cause the load generator to fail on startup
+
+## Testing
+
+Unit tests for the load generator helper functions are available in `test_locustfile.py`.
+
+### Prerequisites
+Install test dependencies:
+```bash
+pip install pytest
+```
+
+### Running Tests
+```bash
+cd src/load-generator
+pytest test_locustfile.py -v
+```
+
+The tests run independently without requiring any external services or dependencies beyond pytest.
