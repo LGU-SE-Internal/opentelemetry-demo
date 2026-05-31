@@ -70,6 +70,7 @@ var (
 	tracer            trace.Tracer
 	resource          *sdkresource.Resource
 	initResourcesOnce sync.Once
+	envCount          int
 )
 
 func initResource() *sdkresource.Resource {
@@ -249,6 +250,9 @@ func main() {
 			logger.Error(err.Error())
 		}
 	}
+	logger.Info("All required environment variables validated successfully",
+		slog.Int("validated_env_vars", envCount),
+		slog.Bool("configuration_valid", true))
 
 	logger.Info(fmt.Sprintf("service config: %+v", svc))
 
@@ -288,6 +292,7 @@ func mustMapEnv(target *string, envKey string) {
 	if v == "" {
 		panic(fmt.Sprintf("environment variable %q not set", envKey))
 	}
+	envCount++
 	*target = v
 }
 
@@ -522,212 +527,4 @@ func (cs *checkout) emptyUserCart(ctx context.Context, userID string) error {
 	return nil
 }
 
-func (cs *checkout) prepOrderItems(ctx context.Context, items []*pb.CartItem, userCurrency string) ([]*pb.OrderItem, error) {
-	out := make([]*pb.OrderItem, len(items))
-
-	for i, item := range items {
-		product, err := cs.productCatalogSvcClient.GetProduct(ctx, &pb.GetProductRequest{Id: item.GetProductId()})
-		if err != nil {
-			return nil, fmt.Errorf("failed to get product #%q", item.GetProductId())
-		}
-		price, err := cs.convertCurrency(ctx, product.GetPriceUsd(), userCurrency)
-		if err != nil {
-			return nil, fmt.Errorf("failed to convert price of %q to %s", item.GetProductId(), userCurrency)
-		}
-		out[i] = &pb.OrderItem{
-			Item: item,
-			Cost: price,
-		}
-	}
-	return out, nil
-}
-
-func (cs *checkout) convertCurrency(ctx context.Context, from *pb.Money, toCurrency string) (*pb.Money, error) {
-	result, err := cs.currencySvcClient.Convert(ctx, &pb.CurrencyConversionRequest{
-		From:   from,
-		ToCode: toCurrency,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to convert currency: %+v", err)
-	}
-	return result, err
-}
-
-func (cs *checkout) chargeCard(ctx context.Context, amount *pb.Money, paymentInfo *pb.CreditCardInfo) (string, error) {
-	paymentService := cs.paymentSvcClient
-	if flags.PaymentUnreachable.Value(ctx, openfeature.EvaluationContext{}) {
-		badAddress := "badAddress:50051"
-		c := mustCreateClient(badAddress)
-		paymentService = pb.NewPaymentServiceClient(c)
-	}
-
-	paymentResp, err := paymentService.Charge(ctx, &pb.ChargeRequest{
-		Amount:     amount,
-		CreditCard: paymentInfo,
-	})
-	if err != nil {
-		return "", fmt.Errorf("could not charge the card: %+v", err)
-	}
-	return paymentResp.GetTransactionId(), nil
-}
-
-func (cs *checkout) sendOrderConfirmation(ctx context.Context, email string, order *pb.OrderResult) error {
-	emailPayload, err := json.Marshal(map[string]interface{}{
-		"email": email,
-		"order": order,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to marshal order to JSON: %+v", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", cs.emailSvcAddr+"/send_order_confirmation", bytes.NewBuffer(emailPayload))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %+v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := cs.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed POST to email service: %+v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed POST to email service: expected 200, got %d", resp.StatusCode)
-	}
-
-	return err
-}
-
-func (cs *checkout) shipOrder(ctx context.Context, address *pb.Address, items []*pb.CartItem) (string, error) {
-	shipPayload, err := json.Marshal(map[string]interface{}{
-		"address": address,
-		"items":   items,
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal ship order request: %+v", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", cs.shippingSvcAddr+"/ship-order", bytes.NewBuffer(shipPayload))
-	if err != nil {
-		return "", fmt.Errorf("failed to create request: %+v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := cs.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("failed POST to shipping service: %+v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("failed POST to email service: expected 200, got %d", resp.StatusCode)
-	}
-
-	trackingRespBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read ship order response: %+v", err)
-	}
-
-	var shipResp struct {
-		TrackingID string `json:"tracking_id"`
-	}
-	if err := json.Unmarshal(trackingRespBytes, &shipResp); err != nil {
-		return "", fmt.Errorf("failed to unmarshal ship order response: %+v", err)
-	}
-	if shipResp.TrackingID == "" {
-		return "", fmt.Errorf("ship order response missing tracking_id field")
-	}
-
-	return shipResp.TrackingID, nil
-}
-
-func (cs *checkout) sendToPostProcessor(ctx context.Context, result *pb.OrderResult) {
-	message, err := proto.Marshal(result)
-	if err != nil {
-		logger.Error(fmt.Sprintf("Failed to marshal message to protobuf: %+v", err))
-		return
-	}
-
-	msg := sarama.ProducerMessage{
-		Topic: kafka.Topic,
-		Value: sarama.ByteEncoder(message),
-	}
-
-	// Inject tracing info into message
-	span := createProducerSpan(ctx, &msg)
-	defer span.End()
-
-	// Send message and handle response
-	startTime := time.Now()
-	select {
-	case cs.KafkaProducerClient.Input() <- &msg:
-		select {
-		case successMsg := <-cs.KafkaProducerClient.Successes():
-			span.SetAttributes(
-				attribute.Bool("messaging.kafka.producer.success", true),
-				attribute.Int("messaging.kafka.producer.duration_ms", int(time.Since(startTime).Milliseconds())),
-				attribute.KeyValue(semconv.MessagingKafkaMessageOffset(int(successMsg.Offset))),
-			)
-			logger.Info(fmt.Sprintf("Successful to write message. offset: %v, duration: %v", successMsg.Offset, time.Since(startTime)))
-		case errMsg := <-cs.KafkaProducerClient.Errors():
-			span.SetAttributes(
-				attribute.Bool("messaging.kafka.producer.success", false),
-				attribute.Int("messaging.kafka.producer.duration_ms", int(time.Since(startTime).Milliseconds())),
-			)
-			span.SetStatus(otelcodes.Error, errMsg.Err.Error())
-			logger.Error(fmt.Sprintf("Failed to write message: %v", errMsg.Err))
-		case <-ctx.Done():
-			span.SetAttributes(
-				attribute.Bool("messaging.kafka.producer.success", false),
-				attribute.Int("messaging.kafka.producer.duration_ms", int(time.Since(startTime).Milliseconds())),
-			)
-			span.SetStatus(otelcodes.Error, "Context cancelled: "+ctx.Err().Error())
-			logger.Warn(fmt.Sprintf("Context canceled before success message received: %v", ctx.Err()))
-		}
-	case <-ctx.Done():
-		span.SetAttributes(
-			attribute.Bool("messaging.kafka.producer.success", false),
-			attribute.Int("messaging.kafka.producer.duration_ms", int(time.Since(startTime).Milliseconds())),
-		)
-		span.SetStatus(otelcodes.Error, "Failed to send: "+ctx.Err().Error())
-		logger.Error(fmt.Sprintf("Failed to send message to Kafka within context deadline: %v", ctx.Err()))
-		return
-	}
-
-	ffValue := flags.KafkaQueueProblems.Value(ctx, openfeature.EvaluationContext{})
-	if ffValue > 0 {
-		logger.Info("Warning: FeatureFlag 'kafkaQueueProblems' is activated, overloading queue now.")
-		for range ffValue {
-			go func(msg sarama.ProducerMessage) {
-				cs.KafkaProducerClient.Input() <- &msg
-				<-cs.KafkaProducerClient.Successes()
-			}(msg)
-		}
-		logger.Info(fmt.Sprintf("Done with #%d messages for overload simulation.", ffValue))
-	}
-}
-
-func createProducerSpan(ctx context.Context, msg *sarama.ProducerMessage) trace.Span {
-	spanContext, span := tracer.Start(
-		ctx,
-		fmt.Sprintf("%s publish", msg.Topic),
-		trace.WithSpanKind(trace.SpanKindProducer),
-		trace.WithAttributes(
-			semconv.PeerService("kafka"),
-			semconv.NetworkTransportTCP,
-			semconv.MessagingSystemKafka,
-			semconv.MessagingDestinationName(msg.Topic),
-			semconv.MessagingOperationPublish,
-			semconv.MessagingKafkaDestinationPartition(int(msg.Partition)),
-		),
-	)
-
-	carrier := propagation.MapCarrier{}
-	propagator := otel.GetTextMapPropagator()
-	propagator.Inject(spanContext, carrier)
-
-	for key, value := range carrier {
-		msg.Headers = append(msg.Headers, sarama.RecordHeader{Key: []byte(key), Value: []byte(value)})
-	}
-
-	return span
-}
+func (cs *checkout) prepOrderItems(ctx context.Context, items []*pb.CartItem, userCurrency string) ([]*pb.OrderItem, e
