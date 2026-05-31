@@ -1,0 +1,2 @@
+ERROR: Invalid LOCUST_USERS value: 'invalid'
+Expected positive integer value. Examples: 1, 10, 100
