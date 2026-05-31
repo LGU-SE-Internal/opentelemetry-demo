@@ -54,6 +54,7 @@ Ensure you have the following installed:
 - [Git](https://git-scm.com/book/en/v2/Getting-Started-Installing-Git)
 - [Make](https://www.gnu.org/software/make/)
 - [Docker][docker] with [Docker Compose][docker-compose] v2.0.0+
+- (Optional) [Ruff](https://docs.astral.sh/ruff/) v0.4.0+ for Python linting
 
 Alternatively, [Podman][podman] 4.7.0+ can be used instead of Docker. See
 [Using Podman Instead of Docker](#using-podman-instead-of-docker) for setup
