@@ -6,7 +6,7 @@ FROM docker.io/library/python:3.12.13-slim-bookworm@sha256:93ab4b7fa528b25124c97
 
 FROM base AS builder
 RUN apt-get -qq update \
-    && apt-get install -y --no-install-recommends g++ \
+    && apt-get install -y --no-install-recommends g++ bc \
     && rm -rf /var/lib/apt/lists/*
 
 COPY ./src/load-generator/requirements.txt .
@@ -16,7 +16,8 @@ FROM base
 WORKDIR /usr/src/app/
 COPY --from=builder /reqs /usr/local
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
-RUN playwright install --with-deps chromium
+RUN apt-get -qq update && apt-get install -y --no-install-recommends bc && rm -rf /var/lib/apt/lists/* \
+    && playwright install --with-deps chromium
 COPY ./src/load-generator/locustfile.py .
 COPY ./src/load-generator/people.json .
 COPY ./src/load-generator/entrypoint.sh .
