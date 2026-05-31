@@ -16,8 +16,7 @@ run_test() {
     echo -n "Running test: $test_name... "
     
     # Run the entrypoint script with the given environment variables, capture output and exit code
-    output=$(env -i PATH=".:$PATH" $env_vars bash "$ENTRYPOINT_SCRIPT" $command 2>&1)
-    exit_code=$?
+    { output=$(env -i PATH=".:$PATH" $env_vars bash "$ENTRYPOINT_SCRIPT" $command 2>&1); exit_code=$?; } || true
 
     if [ $exit_code -eq $expected_exit_code ]; then
         echo "PASSED"
