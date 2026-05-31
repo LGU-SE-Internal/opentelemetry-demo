@@ -155,3 +155,40 @@ For more information about the emeritus role, see the [community repository](htt
 [Tracetest]: https://github.com/kubeshop/opentelemetry-demo
 [Uptrace]: https://github.com/uptrace/uptrace/tree/master/example/opentelemetry-demo
 [VictoriaMetrics]: https://github.com/VictoriaMetrics-Community/opentelemetry-demo
+
+## Health Check Endpoint
+
+The load generator exposes a health check endpoint to verify operational status **only when running in server/API mode** (default for the demo deployment).
+
+### Endpoint Path
+`GET /health` (served on the load generator's default port 8089, or configured `LOCUST_WEB_PORT` value)
+
+### Supported Response Codes
+- `200 OK`: Load generator is running, healthy, and ready to accept traffic
+- `503 Service Unavailable`: Load generator is initializing or shutting down, not ready to handle requests
+- `404 Not Found`: Load generator is not running in server/API mode (endpoint not available)
+
+### Metadata Fields
+The 200 OK JSON response includes the following metadata fields:
+| Field | Type | Description |
+|-------|------|-------------|
+| `status` | string | Current service status, will be "running" when healthy |
+| `worker_count` | integer | Number of active worker processes |
+| `user_count` | integer | Number of currently simulated load test users |
+| `version` | string | Locust version running the load generator |
+
+### Example Usage
+#### cURL Request
+```bash
+curl http://localhost:8089/health
+```
+
+#### Sample 200 OK Response
+```json
+{
+  "status": "running",
+  "worker_count": 1,
+  "user_count": 0,
+  "version": "2.31.0"
+}
+```
