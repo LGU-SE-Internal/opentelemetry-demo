@@ -207,7 +207,8 @@ class WebsiteUser(HttpUser):
                 "contextKeys": [category],
             }
             self.client.get("/api/data/", params=params)
-
     @task(3)
     def view_cart(self):
-        with self.tracer.start_as_current_span("user_view_ca
+        with self.tracer.start_as_current_span("user_view_cart", context=Context()):
+            logging.info("User viewing cart")
+            self.client.get("/api/cart")
