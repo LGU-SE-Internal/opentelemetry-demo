@@ -84,6 +84,11 @@ if ofrep_endpoint:
     base_url = ofrep_endpoint
 else:
     flagd_host = os.environ.get('FLAGD_HOST', 'localhost')
+    # Validate FLAGD_HOST is not empty
+    if not flagd_host or not flagd_host.strip():
+        logging.error("FLAGD_HOST environment variable is empty or invalid when flagd integration is enabled (OFREP_PROVIDER_ENDPOINT not provided)")
+        logging.error("Please provide a valid non-empty FLAGD_HOST value or set OFREP_PROVIDER_ENDPOINT directly")
+        raise SystemExit(1)
     flagd_port = os.environ.get('FLAGD_OFREP_PORT', 8016)
     base_url = f"http://{flagd_host}:{flagd_port}"
 
