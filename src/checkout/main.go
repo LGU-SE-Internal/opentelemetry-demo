@@ -298,6 +298,33 @@ func mustMapEnv(target *string, envKey string, expectedType string, allowedValue
 		fmt.Fprintln(os.Stderr, errorMsg)
 		os.Exit(1)
 	}
+	
+	// Validate format based on type
+	if expectedType == "TCP port number" {
+		port, err := strconv.Atoi(v)
+		if err != nil || port < 1 || port > 65535 {
+			errorMsg := fmt.Sprintf("Invalid environment variable configuration:\n  Variable name: %s\n  Invalid value: %s\n  Expected: %s between 1 and 65535", envKey, v, expectedType)
+			fmt.Fprintln(os.Stderr, errorMsg)
+			os.Exit(1)
+		}
+	}
+	
+	// Validate against allowed values
+	if len(allowedValues) > 0 {
+		found := false
+		for _, allowed := range allowedValues {
+			if v == allowed {
+				found = true
+				break
+			}
+		}
+		if !found {
+			errorMsg := fmt.Sprintf("Invalid environment variable configuration:\n  Variable name: %s\n  Invalid value: %s\n  Expected: %s, allowed values: %s", envKey, v, expectedType, strings.Join(allowedValues, ", "))
+			fmt.Fprintln(os.Stderr, errorMsg)
+			os.Exit(1)
+		}
+	}
+	
 	envCount++
 	*target = v
 }

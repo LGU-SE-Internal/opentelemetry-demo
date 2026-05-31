@@ -64,6 +64,32 @@ envVarSpecs.forEach(spec => {
     console.error(errorMsg);
     process.exit(1);
   }
+  
+  // Validate format based on type
+  if (spec.type === 'TCP port number') {
+    const port = parseInt(value, 10);
+    if (isNaN(port) || port < 1 || port > 65535) {
+      let errorMsg = "Invalid environment variable configuration:\n";
+      errorMsg += `  Variable name: ${spec.name}\n`;
+      errorMsg += `  Invalid value: ${value}\n`;
+      errorMsg += `  Expected: ${spec.type} between 1 and 65535`;
+      console.error(errorMsg);
+      process.exit(1);
+    }
+  }
+  
+  // Validate against allowed values
+  if (spec.allowedValues.length > 0) {
+    if (!spec.allowedValues.includes(value)) {
+      let errorMsg = "Invalid environment variable configuration:\n";
+      errorMsg += `  Variable name: ${spec.name}\n`;
+      errorMsg += `  Invalid value: ${value}\n`;
+      errorMsg += `  Expected: ${spec.type}, allowed values: ${spec.allowedValues.join(', ')}`;
+      console.error(errorMsg);
+      process.exit(1);
+    }
+  }
+  
   validatedEnvCount++;
 });
 
