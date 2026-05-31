@@ -105,22 +105,12 @@ logging.info("Instrumentation complete - logs will now include trace context")
 # Initialize Flagd provider
 base_url = f"http://{os.environ.get('FLAGD_HOST', 'localhost')}:{os.environ.get('FLAGD_OFREP_PORT', 8016)}"
 api.set_provider(OFREPProvider(base_url=base_url))
-api.add_hooks([TracingHook()])
+api.add_hooks([TracingHook(), LoggingHook()])
 
 def get_flagd_value(FlagName):
     # Initialize OpenFeature
     client = api.get_client()
     details = client.get_integer_details(FlagName, 0)
-    logging.debug(
-        f"OpenFeature flag evaluation result: name={FlagName}, value={details.value}, error={str(details.error) if details.error else 'none'}, reason={details.reason}, variant={details.variant}",
-        extra={
-            "flag.name": FlagName,
-            "flag.value": details.value,
-            "flag.error": str(details.error) if details.error else None,
-            "flag.reason": details.reason,
-            "flag.variant": details.variant
-        }
-    )
     return details.value
 
 categories = [
@@ -205,33 +195,4 @@ class WebsiteUser(HttpUser):
             params = {
                 "contextKeys": [category],
             }
-            self.client.get("/api/data/", params=params)
-
-    @task(3)
-    def view_cart(self):
-        with self.tracer.start_as_current_span("user_view_cart", context=Context()):
-            logging.info("User viewing cart")
-            self.client.get("/api/cart")
-
-    @task(2)
-    def add_to_cart(self, user=""):
-        if user == "":
-            user = str(uuid.uuid1())
-        product = random.choice(products)
-        quantity = random.choice([1, 2, 3, 4, 5, 10])
-        with self.tracer.start_as_current_span("user_add_to_cart", context=Context(), attributes={"user.id": user, "product.id": product, "quantity": quantity}):
-            logging.info(f"User {user} adding {quantity} of product {product} to cart")
-            self.client.get("/api/products/" + product)
-            cart_item = {
-                "item": {
-                    "productId": product,
-                    "quantity": quantity,
-                },
-                "userId": user,
-            }
-            self.client.post("/api/cart", json=cart_item)
-
-    @task(1)
-    def checkout(self):
-        user = str(uuid.uuid1())
-        with self.tracer.start_as_current_span("user_checkout_single", context=Context(
+            s
