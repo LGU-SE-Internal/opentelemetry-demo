@@ -8,6 +8,7 @@ import os
 import random
 import uuid
 import logging
+import sys
 
 from locust import HttpUser, task, between
 from locust_plugins.users.playwright import PlaywrightUser, pw, PageWithRetry, event
@@ -74,6 +75,43 @@ URLLib3Instrumentor().instrument()
 
 logging.info("Instrumentation complete - logs will now include trace context")
 
+# Validate USER_WAIT_TIME environment variables
+user_wait_min = os.environ.get("USER_WAIT_TIME_MIN")
+user_wait_max = os.environ.get("USER_WAIT_TIME_MAX")
+
+valid_min = None
+valid_max = None
+
+if user_wait_min is not None:
+    try:
+        valid_min = float(user_wait_min)
+        if valid_min <= 0:
+            print(f"ERROR: USER_WAIT_TIME_MIN must be a positive number, got '{user_wait_min}'", file=sys.stderr)
+            print("Example: USER_WAIT_TIME_MIN=2 or USER_WAIT_TIME_MIN=1.5", file=sys.stderr)
+            sys.exit(1)
+    except ValueError:
+        print(f"ERROR: USER_WAIT_TIME_MIN must be a valid number (integer or float), got '{user_wait_min}'", file=sys.stderr)
+        print("Example: USER_WAIT_TIME_MIN=2 or USER_WAIT_TIME_MIN=1.5", file=sys.stderr)
+        sys.exit(1)
+
+if user_wait_max is not None:
+    try:
+        valid_max = float(user_wait_max)
+        if valid_max <= 0:
+            print(f"ERROR: USER_WAIT_TIME_MAX must be a positive number, got '{user_wait_max}'", file=sys.stderr)
+            print("Example: USER_WAIT_TIME_MAX=10 or USER_WAIT_TIME_MAX=15.5", file=sys.stderr)
+            sys.exit(1)
+    except ValueError:
+        print(f"ERROR: USER_WAIT_TIME_MAX must be a valid number (integer or float), got '{user_wait_max}'", file=sys.stderr)
+        print("Example: USER_WAIT_TIME_MAX=10 or USER_WAIT_TIME_MAX=15.5", file=sys.stderr)
+        sys.exit(1)
+
+if valid_min is not None and valid_max is not None:
+    if valid_max < valid_min:
+        print(f"ERROR: USER_WAIT_TIME_MAX ({valid_max}) must be greater than or equal to USER_WAIT_TIME_MIN ({valid_min})", file=sys.stderr)
+        print("Example: USER_WAIT_TIME_MIN=2, USER_WAIT_TIME_MAX=10", file=sys.stderr)
+        sys.exit(1)
+
 # Initialize Flagd provider
 base_url = f"http://{os.environ.get('FLAGD_HOST', 'localhost')}:{os.environ.get('FLAGD_OFREP_PORT', 8016)}"
 api.set_provider(OFREPProvider(base_url=base_url))
@@ -111,7 +149,9 @@ with open('people.json') as people_file:
     people = json.load(people_file)
 
 class WebsiteUser(HttpUser):
-    wait_time = between(1, 10)
+    wait_time_min = valid_min if valid_min is not None else 1
+    wait_time_max = valid_max if valid_max is not None else 10
+    wait_time = between(wait_time_min, wait_time_max)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -170,44 +210,4 @@ class WebsiteUser(HttpUser):
 
     @task(3)
     def view_cart(self):
-        with self.tracer.start_as_current_span("user_view_cart", context=Context()):
-            logging.info("User viewing cart")
-            self.client.get("/api/cart")
-
-    @task(2)
-    def add_to_cart(self, user=""):
-        if user == "":
-            user = str(uuid.uuid1())
-        product = random.choice(products)
-        quantity = random.choice([1, 2, 3, 4, 5, 10])
-        with self.tracer.start_as_current_span("user_add_to_cart", context=Context(), attributes={"user.id": user, "product.id": product, "quantity": quantity}):
-            logging.info(f"User {user} adding {quantity} of product {product} to cart")
-            self.client.get("/api/products/" + product)
-            cart_item = {
-                "item": {
-                    "productId": product,
-                    "quantity": quantity,
-                },
-                "userId": user,
-            }
-            self.client.post("/api/cart", json=cart_item)
-
-    @task(1)
-    def checkout(self):
-        user = str(uuid.uuid1())
-        with self.tracer.start_as_current_span("user_checkout_single", context=Context(), attributes={"user.id": user}):
-            self.add_to_cart(user=user)
-            checkout_person = random.choice(people)
-            checkout_person["userId"] = user
-            self.client.post("/api/checkout", json=checkout_person)
-            logging.info(f"Checkout completed for user {user}")
-
-    @task(1)
-    def checkout_multi(self):
-        user = str(uuid.uuid1())
-        item_count = random.choice([2, 3, 4])
-        with self.tracer.start_as_current_span("user_checkout_multi", context=Context(),
-                                            attributes={"user.id": user, "item.count": item_count}):
-            for i in range(item_count):
-                self.add_to_cart(user=user)
-    
+        with self.tracer.start_as_current_span("user_view_ca
