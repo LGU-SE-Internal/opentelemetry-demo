@@ -79,6 +79,15 @@ install-yamllint:
 yamllint: install-yamllint
 	yamllint .
 
+.PHONY: shellcheck
+shellcheck:
+	shellcheck *.sh
+
+## Run all configured linters (shellcheck, yamllint, markdownlint)
+.PHONY: lint
+lint: shellcheck yamllint markdownlint
+	@echo "All linters completed successfully"
+
 .PHONY: checklicense
 checklicense:	$(ADDLICENSE)
 	@echo "Checking license headers..."
