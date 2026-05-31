@@ -100,7 +100,7 @@ except Exception as e:
 api.set_provider(OFREPProvider(base_url=base_url))
 api.add_hooks([TracingHook()])
 
-def get_flagd_value(FlagName):
+def get_flagd_value(FlagName: str) -> int:
     # Initialize OpenFeature
     client = api.get_client()
     return client.get_integer_value(FlagName, 0)
@@ -140,25 +140,25 @@ LOCUST_WAIT_MAX = int(os.environ.get('LOCUST_WAIT_MAX', 10))
 class WebsiteUser(HttpUser):
     wait_time = between(LOCUST_WAIT_MIN, LOCUST_WAIT_MAX)
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.tracer = trace.get_tracer(__name__)
 
     @task(1)
-    def index(self):
+    def index(self) -> None:
         with self.tracer.start_as_current_span("user_index", context=Context()):
             logging.info("User accessing index page")
             self.client.get("/")
 
     @task(10)
-    def browse_product(self):
+    def browse_product(self) -> None:
         product = random.choice(products)
         with self.tracer.start_as_current_span("user_browse_product", context=Context(), attributes={"product.id": product}):
             logging.info(f"User browsing product: {product}")
             self.client.get("/api/products/" + product)
 
     @task(3)
-    def get_recommendations(self):
+    def get_recommendations(self) -> None:
         product = random.choice(products)
         with self.tracer.start_as_current_span("user_get_recommendations", context=Context(), attributes={"product.id": product}):
             logging.info(f"User getting recommendations for product: {product}")
@@ -168,25 +168,25 @@ class WebsiteUser(HttpUser):
             self.client.get("/api/recommendations", params=params)
 
     @task(2)
-    def get_product_reviews(self):
+    def get_product_reviews(self) -> None:
         product = random.choice(products)
         with self.tracer.start_as_current_span("user_get_product_reviews", context=Context(), attributes={"product.id": product}):
             logging.info(f"User getting product reviews for product: {product}")
             self.client.get("/api/product-reviews/" + product)
 
     @task(1)
-    def ask_product_ai_assistant(self):
+    def ask_product_ai_assistant(self) -> None:
         product = random.choice(products)
         question = 'Can you summarize the product reviews?'
         with self.tracer.start_as_current_span("user_ask_product_ai_assistant", context=Context(), attributes={"product.id": product, "question": question}):
             logging.info(f"Asking the AI Assistant a question for: {product} {question}")
-            question = {
+            request_body = {
                 "question": question
             }
-            self.client.post("/api/product-ask-ai-assistant/" + product, json=question)
+            self.client.post("/api/product-ask-ai-assistant/" + product, json=request_body)
 
     @task(3)
-    def get_ads(self):
+    def get_ads(self) -> None:
         category = random.choice(categories)
         with self.tracer.start_as_current_span("user_get_ads", context=Context(), attributes={"category": str(category)}):
             logging.info(f"User getting ads for category: {category}")
@@ -196,7 +196,7 @@ class WebsiteUser(HttpUser):
             self.client.get("/api/data/", params=params)
 
     @task(3)
-    def view_cart(self):
+    def view_cart(self) -> None:
         with self.tracer.start_as_current_span("user_view_cart", context=Context()):
             logging.info("User viewing cart")
             self.client.get("/api/cart")
