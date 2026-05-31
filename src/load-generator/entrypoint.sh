@@ -11,5 +11,23 @@ if [[ -n "${LOCUST_RUN_TIME:-}" ]]; then
     fi
 fi
 
+# Validate LOCUST_USERS environment variable if set
+if [[ -n "${LOCUST_USERS:-}" ]]; then
+    if ! [[ "$LOCUST_USERS" =~ ^[0-9]+$ ]] || [[ "$LOCUST_USERS" -le 0 ]]; then
+        echo "ERROR: Invalid LOCUST_USERS value: '$LOCUST_USERS'" >&2
+        echo "Expected positive integer greater than 0" >&2
+        exit 1
+    fi
+fi
+
+# Validate LOCUST_SPAWN_RATE environment variable if set
+if [[ -n "${LOCUST_SPAWN_RATE:-}" ]]; then
+    if ! [[ "$LOCUST_SPAWN_RATE" =~ ^[0-9]+$ ]] || [[ "$LOCUST_SPAWN_RATE" -le 0 ]]; then
+        echo "ERROR: Invalid LOCUST_SPAWN_RATE value: '$LOCUST_SPAWN_RATE'" >&2
+        echo "Expected positive integer greater than 0" >&2
+        exit 1
+    fi
+fi
+
 # Execute the original locust command with all passed arguments
 exec locust --skip-log-setup "$@"
