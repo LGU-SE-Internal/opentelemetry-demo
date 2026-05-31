@@ -39,6 +39,8 @@ from openfeature.contrib.hook.opentelemetry import TracingHook
 
 from playwright.async_api import Route, Request
 
+SERVICE_VERSION = "1.0.0"
+
 # Configure tracer provider first (needed for trace context in logs)
 tracer_provider = TracerProvider()
 trace.set_tracer_provider(tracer_provider)
@@ -74,6 +76,7 @@ SystemMetricsInstrumentor().instrument()
 URLLib3Instrumentor().instrument()
 
 logging.info("Instrumentation complete - logs will now include trace context")
+logging.info(f"Load generator v{SERVICE_VERSION} starting")
 
 # Initialize Flagd provider
 ofrep_endpoint = os.environ.get("OFREP_PROVIDER_ENDPOINT")
