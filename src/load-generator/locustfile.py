@@ -82,7 +82,18 @@ api.add_hooks([TracingHook()])
 def get_flagd_value(FlagName):
     # Initialize OpenFeature
     client = api.get_client()
-    return client.get_integer_value(FlagName, 0)
+    details = client.get_integer_details(FlagName, 0)
+    logging.debug(
+        "OpenFeature flag evaluation result",
+        extra={
+            "flag.name": FlagName,
+            "flag.value": details.value,
+            "flag.error": str(details.error) if details.error else None,
+            "flag.reason": details.reason,
+            "flag.variant": details.variant
+        }
+    )
+    return details.value
 
 categories = [
     "binoculars",
@@ -209,5 +220,4 @@ class WebsiteUser(HttpUser):
         with self.tracer.start_as_current_span("user_checkout_multi", context=Context(),
                                             attributes={"user.id": user, "item.count": item_count}):
             for i in range(item_count):
-                self.add_to_cart(user=user)
-    
+                self.add_to_cart(user
