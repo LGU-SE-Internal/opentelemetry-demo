@@ -47,6 +47,10 @@ YAMLLINT_VERSION=1.30.0
 .PHONY: all
 all: install-tools markdownlint misspell yamllint checklicense
 
+.PHONY: test-entrypoint
+test-entrypoint:
+	@cd src/load-generator && ./test_entrypoint.sh
+
 $(MISSPELL):
 	cd $(TOOLS_DIR) && go build -o $(MISSPELL_BINARY) github.com/client9/misspell/cmd/misspell
 
