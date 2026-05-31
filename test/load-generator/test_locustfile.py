@@ -51,6 +51,46 @@ def test_user_agent_on_start():
     assert mock_client.headers["User-Agent"] in locustfile.USER_AGENTS
 
 
+
+def test_rotate_user_agent_valid_selection():
+    """AC1: Test rotate_user_agent picks a random valid user agent from configured list"""
+    for _ in range(50):
+        selected = locustfile.rotate_user_agent()
+        assert selected in locustfile.USER_AGENTS, f"Selected agent {selected} not in USER_AGENTS"
+    
+    # Test with exclude list
+    exclude = [locustfile.USER_AGENTS[0]]
+    for _ in range(50):
+        selected = locustfile.rotate_user_agent(exclude=exclude)
+        assert selected in locustfile.USER_AGENTS
+        assert selected not in exclude
+    
+    # Test fallback when all agents are excluded
+    exclude_all = locustfile.USER_AGENTS.copy()
+    for _ in range(50):
+        selected = locustfile.rotate_user_agent(exclude=exclude_all)
+        assert selected in locustfile.USER_AGENTS
+
+
+def test_rotate_user_agent_no_duplicates_consecutive():
+    """AC2: Test no duplicate user agents are returned in 100 consecutive rotation calls when list size is sufficient"""
+    # Use a large enough test agent list (200 unique agents)
+    test_agents = [f"TestAgent/{i:03d}" for i in range(200)]
+    with patch.object(locustfile, "USER_AGENTS", test_agents):
+        last_selected = []
+        duplicate_found = False
+        for _ in range(100):
+            # Exclude the last 100 selected agents to avoid duplicates
+            agent = locustfile.rotate_user_agent(exclude=last_selected)
+            if agent in last_selected:
+                duplicate_found = True
+                break
+            last_selected.append(agent)
+            if len(last_selected) > 100:
+                last_selected.pop(0)
+        assert not duplicate_found, "Duplicate user agent found in consecutive 100 rotation calls with sufficient list size"
+
+
 def test_env_var_defaults():
     """Test that environment variables fall back to correct defaults when not set"""
     with patch.dict(os.environ, clear=True):

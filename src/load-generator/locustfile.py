@@ -51,6 +51,17 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.4; rv:125.0) Gecko/20100101 Firefox/125.0",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
 ]
+def rotate_user_agent(exclude: list[str] | None = None) -> str:
+    """
+    Rotate user agent, selecting a random valid one from USER_AGENTS list.
+    If exclude list is provided, will not select any agent in that list.
+    """
+    exclude = exclude or []
+    available_agents = [agent for agent in USER_AGENTS if agent not in exclude]
+    if not available_agents:
+        available_agents = USER_AGENTS  # Fallback to full list if all are excluded
+    return random.choice(available_agents)
+
 
 # Configure tracer provider first (needed for trace context in logs)
 tracer_provider = TracerProvider()
