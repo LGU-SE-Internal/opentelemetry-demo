@@ -88,3 +88,30 @@ def test_env_var_loading():
             import importlib
             importlib.reload(locustfile)
             assert locustfile.browser_traffic_enabled is False, f"Expected False for value '{val}'"
+
+def test_flagd_env_vars():
+    """Test FLAGD related environment variables are loaded correctly"""
+    # Test default values for FLAGD variables
+    with patch.dict(os.environ, {}, clear=True):
+        import importlib
+        importlib.reload(locustfile)
+        assert locustfile.base_url == "http://localhost:8016", f"Expected default base_url http://localhost:8016, got {locustfile.base_url}"
+    
+    # Test custom FLAGD_HOST
+    with patch.dict(os.environ, {"FLAGD_HOST": "flagd.test"}):
+        import importlib
+        importlib.reload(locustfile)
+        assert locustfile.base_url == "http://flagd.test:8016", f"Expected base_url with custom host, got {locustfile.base_url}"
+    
+    # Test custom FLAGD_OFREP_PORT
+    with patch.dict(os.environ, {"FLAGD_OFREP_PORT": "8080"}):
+        import importlib
+        importlib.reload(locustfile)
+        assert locustfile.base_url == "http://localhost:8080", f"Expected base_url with custom port, got {locustfile.base_url}"
+    
+    # Test both custom FLAGD_HOST and FLAGD_OFREP_PORT
+    with patch.dict(os.environ, {"FLAGD_HOST": "my.host", "FLAGD_OFREP_PORT": "9090"}):
+        import importlib
+        importlib.reload(locustfile)
+        assert locustfile.base_url == "http://my.host:9090", f"Expected base_url with custom host and port, got {locustfile.base_url}"
+
