@@ -38,6 +38,7 @@ from openfeature.contrib.provider.ofrep import OFREPProvider
 from openfeature.contrib.hook.opentelemetry import TracingHook
 
 from playwright.async_api import Route, Request
+SERVICE_VERSION = "1.0.0"
 
 # Configure tracer provider first (needed for trace context in logs)
 tracer_provider = TracerProvider()
@@ -74,6 +75,7 @@ SystemMetricsInstrumentor().instrument()
 URLLib3Instrumentor().instrument()
 
 logging.info("Instrumentation complete - logs will now include trace context")
+logging.info(f"Load generator v{SERVICE_VERSION} starting")
 
 # Initialize Flagd provider
 ofrep_endpoint = os.environ.get("OFREP_PROVIDER_ENDPOINT")
@@ -212,23 +214,4 @@ class WebsiteUser(HttpUser):
                 },
                 "userId": user,
             }
-            self.client.post("/api/cart", json=cart_item)
-
-    @task(1)
-    def checkout(self):
-        user = str(uuid.uuid1())
-        with self.tracer.start_as_current_span("user_checkout_single", context=Context(), attributes={"user.id": user}):
-            self.add_to_cart(user=user)
-            checkout_person = random.choice(people)
-            checkout_person["userId"] = user
-            self.client.post("/api/checkout", json=checkout_person)
-            logging.info(f"Checkout completed for user {user}")
-
-    @task(1)
-    def checkout_multi(self):
-        user = str(uuid.uuid1())
-        item_count = random.choice([2, 3, 4])
-        with self.tracer.start_as_current_span("user_checkout_multi", context=Context(),
-                                            attributes={"user.id": user, "item.count": item_count}):
-            for i in range(item_count):
-                self.add_to_cart(user=user)
+            self.client.post("/api/cart"
