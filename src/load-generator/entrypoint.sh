@@ -11,5 +11,15 @@ if [[ -n "${LOCUST_RUN_TIME:-}" ]]; then
     fi
 fi
 
+# Validate LOCUST_TAGS environment variable if set and non-empty
+if [[ -n "${LOCUST_TAGS:-}" ]]; then
+    # Valid characters: alphanumeric, underscores, hyphens, spaces (space delimited tags)
+    if ! echo "$LOCUST_TAGS" | grep -qE '^[-a-zA-Z0-9_ ]+$'; then
+        echo "ERROR: Invalid LOCUST_TAGS value: '$LOCUST_TAGS'" >&2
+        echo "Expected space-delimited list of tags containing only alphanumeric characters, underscores, and hyphens. Examples: 'checkout browse', 'add_to_cart', 'search filter'" >&2
+        exit 1
+    fi
+fi
+
 # Execute the original locust command with all passed arguments
 exec locust --skip-log-setup "$@"
