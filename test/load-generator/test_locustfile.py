@@ -88,3 +88,93 @@ def test_env_var_loading():
             import importlib
             importlib.reload(locustfile)
             assert locustfile.browser_traffic_enabled is False, f"Expected False for value '{val}'"
+
+def test_people_json_validation_passes_for_valid_entries():
+    """Test validation passes for valid people.json entries"""
+    valid_people = [
+        {
+            "email": "test@example.com",
+            "address": {
+                "streetAddress": "123 Test St",
+                "zipCode": "12345",
+                "city": "Testville",
+                "state": "TS",
+                "country": "Testland"
+            },
+            "userCurrency": "USD",
+            "creditCard": {
+                "creditCardNumber": "4111-1111-1111-1111",
+                "creditCardExpirationMonth": 12,
+                "creditCardExpirationYear": 2030,
+                "creditCardCvv": 123
+            }
+        }
+    ]
+    with patch("locustfile.json.load", return_value=valid_people):
+        import importlib
+        # Should not raise or exit
+        importlib.reload(locustfile)
+        assert len(locustfile.people) == 1
+
+
+def test_people_json_validation_fails_for_missing_fields():
+    """Test validation fails and exits when entries are missing required fields"""
+    invalid_people = [
+        # Missing top-level email field
+        {
+            "address": {
+                "streetAddress": "123 Test St",
+                "zipCode": "12345",
+                "city": "Testville",
+                "state": "TS",
+                "country": "Testland"
+            },
+            "userCurrency": "USD",
+            "creditCard": {
+                "creditCardNumber": "4111-1111-1111-1111",
+                "creditCardExpirationMonth": 12,
+                "creditCardExpirationYear": 2030,
+                "creditCardCvv": 123
+            }
+        },
+        # Missing address zipCode field
+        {
+            "email": "test2@example.com",
+            "address": {
+                "streetAddress": "456 Test St",
+                "city": "Testville",
+                "state": "TS",
+                "country": "Testland"
+            },
+            "userCurrency": "USD",
+            "creditCard": {
+                "creditCardNumber": "4111-1111-1111-1111",
+                "creditCardExpirationMonth": 12,
+                "creditCardExpirationYear": 2030,
+                "creditCardCvv": 123
+            }
+        },
+        # Missing credit card cvv field
+        {
+            "email": "test3@example.com",
+            "address": {
+                "streetAddress": "789 Test St",
+                "zipCode": "12345",
+                "city": "Testville",
+                "state": "TS",
+                "country": "Testland"
+            },
+            "userCurrency": "USD",
+            "creditCard": {
+                "creditCardNumber": "4111-1111-1111-1111",
+                "creditCardExpirationMonth": 12,
+                "creditCardExpirationYear": 2030
+            }
+        }
+    ]
+    with patch("locustfile.json.load", return_value=invalid_people):
+        import importlib
+        with patch("sys.exit") as mock_exit:
+            importlib.reload(locustfile)
+            # Verify exit was called with non-zero code
+            mock_exit.assert_called_once_with(1)

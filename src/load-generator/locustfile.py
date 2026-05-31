@@ -147,6 +147,37 @@ products = [
 people_file = open("people.json")
 people = json.load(people_file)
 
+# Validate people.json entries
+REQUIRED_TOP_LEVEL_FIELDS = {"email", "address", "userCurrency", "creditCard"}
+REQUIRED_ADDRESS_FIELDS = {"streetAddress", "zipCode", "city", "state", "country"}
+REQUIRED_CREDITCARD_FIELDS = {"creditCardNumber", "creditCardExpirationMonth", "creditCardExpirationYear", "creditCardCvv"}
+
+valid = True
+for idx, entry in enumerate(people):
+    # Check top level fields
+    missing_top = [f for f in REQUIRED_TOP_LEVEL_FIELDS if f not in entry]
+    if missing_top:
+        for field in missing_top:
+            logging.error(f"Entry {idx} missing required top-level field: {field}")
+        valid = False
+    else:
+        # Check address fields
+        missing_addr = [f for f in REQUIRED_ADDRESS_FIELDS if f not in entry["address"]]
+        if missing_addr:
+            for field in missing_addr:
+                logging.error(f"Entry {idx} missing required address field: {field}")
+            valid = False
+        # Check credit card fields
+        missing_cc = [f for f in REQUIRED_CREDITCARD_FIELDS if f not in entry["creditCard"]]
+        if missing_cc:
+            for field in missing_cc:
+                logging.error(f"Entry {idx} missing required creditCard field: {field}")
+            valid = False
+
+if not valid:
+    logging.critical("Invalid people.json entries found, exiting.")
+    exit(1)
+
 
 class WebsiteUser(HttpUser):
     wait_time = between(1, 10)
@@ -227,12 +258,4 @@ class WebsiteUser(HttpUser):
         with self.tracer.start_as_current_span(
             "user_get_ads", context=Context(), attributes={"category": str(category)}
         ):
-            logging.info(f"User getting ads for category: {category}")
-            params = {
-                "contextKeys": [category],
-            }
-            self.client.get("/api/data/", params=params)
-
-    @task(3)
-    def view_cart(self):
-        with 
+            logging.info(f"User gettin
