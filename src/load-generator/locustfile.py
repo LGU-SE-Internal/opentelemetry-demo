@@ -97,8 +97,15 @@ except Exception as e:
     logging.error("Please set OFREP_PROVIDER_ENDPOINT to a valid URL, or ensure FLAGD_HOST and FLAGD_OFREP_PORT are correctly configured")
     raise SystemExit(1)
 
-api.set_provider(OFREPProvider(base_url=base_url))
-api.add_hooks([TracingHook()])
+try:
+    api.set_provider(OFREPProvider(base_url=base_url))
+    api.add_hooks([TracingHook()])
+    logging.info(f"Successfully initialized OFREP provider at {base_url}")
+except Exception as e:
+    logging.error(f"Failed to initialize OFREP provider at {base_url}. Connection error: {str(e)}")
+    logging.error("Please ensure that the flagd/OFREP service is running and reachable at the configured endpoint.")
+    logging.error("Verify that FLAGD_HOST and FLAGD_OFREP_PORT environment variables are set correctly, or check your OFREP_PROVIDER_ENDPOINT value.")
+    raise SystemExit(1)
 
 def get_flagd_value(FlagName):
     # Initialize OpenFeature
