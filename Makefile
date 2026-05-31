@@ -45,7 +45,7 @@ SEMCONVGEN_VERSION=0.11.0
 YAMLLINT_VERSION=1.30.0
 
 .PHONY: all
-all: install-tools markdownlint misspell yamllint checklicense
+all: install-tools markdownlint misspell yamllint spellcheck checklicense
 
 $(MISSPELL):
 	cd $(TOOLS_DIR) && go build -o $(MISSPELL_BINARY) github.com/client9/misspell/cmd/misspell
@@ -60,6 +60,10 @@ misspell:	$(MISSPELL)
 .PHONY: misspell-correction
 misspell-correction:	$(MISSPELL)
 	$(MISSPELL) -w $(ALL_DOCS)
+
+.PHONY: spellcheck
+spellcheck: $(MISSPELL)
+	$(MISSPELL) -error $(ALL_DOCS)
 
 .PHONY: markdownlint
 markdownlint:
