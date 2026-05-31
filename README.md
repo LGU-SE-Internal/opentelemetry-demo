@@ -85,7 +85,7 @@ the load test behavior using the following environment variables:
 ### Supported Locust Environment Variables
 
 | Variable Name | Description | Required | Default Value | Example Value |
-|---------------|-------------|----------|---------------|---------------|
+| ------------- | ----------- | -------- | ------------- | ------------- |
 | `LOCUST_WEB_PORT` | Port to expose the Locust web UI on | No | `8089` | `8090` |
 | `LOCUST_USERS` | Peak number of concurrent Locust users | No | `10` | `50` |
 | `LOCUST_RUN_TIME` | Duration to run the load test for (e.g. `10m`, `1h`) | No | - | `30m` |
@@ -114,6 +114,7 @@ You can set these environment variables in multiple ways:
 1. Add them to your `.env` file in the project root
 2. Override them in a Docker Compose override file (e.g. `compose.override.yaml`)
 3. Pass them directly when starting the demo:
+
    ```bash
    LOCUST_USERS=100 LOCUST_RUN_TIME=1h docker compose up
    ```
