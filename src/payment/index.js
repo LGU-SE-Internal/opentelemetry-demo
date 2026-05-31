@@ -46,12 +46,28 @@ server.addService(otelDemoPackage.oteldemo.PaymentService.service, { charge: cha
 
 let ip = "0.0.0.0";
 
+const requiredEnvVars = ['PAYMENT_PORT'];
+let validatedEnvCount = 0;
+
+requiredEnvVars.forEach(envVar => {
+  if (!process.env[envVar]) {
+    logger.error(`Missing required environment variable: ${envVar}`);
+    process.exit(1);
+  }
+  validatedEnvCount++;
+});
+
 const ipv6_enabled = process.env.IPV6_ENABLED;
 
 if (ipv6_enabled == "true") {
   ip = "[::]";
   logger.info(`Overwriting Localhost IP: ${ip}`)
 }
+
+logger.info("All required environment variables validated successfully", {
+  validated_env_vars: validatedEnvCount,
+  configuration_valid: true
+});
 
 const address = ip + `:${process.env['PAYMENT_PORT']}`;
 
