@@ -8,9 +8,10 @@ import os
 import random
 import uuid
 import logging
+from typing import Any, Tuple
 
 from locust import HttpUser, task, between, events
-from flask import jsonify
+from flask import jsonify, Response
 from locust_plugins.users.playwright import PlaywrightUser, pw, PageWithRetry, event
 
 from opentelemetry import context, baggage, trace
@@ -87,11 +88,11 @@ REQUEST_TIMEOUT = os.environ.get("REQUEST_TIMEOUT", "10")
 init_complete = False
 
 @events.init.add_listener
-def on_init(environment, **kwargs):
+def on_init(environment: Any, **kwargs: Any) -> None:
     global init_complete
     # Add health endpoint to locust's web server
     @environment.web_ui.app.route("/health")
-    def health_check():
+    def health_check() -> Tuple[Response, int]:
         if init_complete:
             return jsonify({
                 "status": "healthy",
@@ -115,7 +116,7 @@ api.set_provider(OFREPProvider(base_url=base_url))
 api.add_hooks([TracingHook()])
 
 
-def get_flagd_value(FlagName):
+def get_flagd_value(FlagName: str) -> int:
     # Initialize OpenFeature
     client = api.get_client()
     return client.get_integer_value(FlagName, 0)
@@ -225,14 +226,4 @@ class WebsiteUser(HttpUser):
     def get_ads(self):
         category = random.choice(categories)
         with self.tracer.start_as_current_span(
-            "user_get_ads", context=Context(), attributes={"category": str(category)}
-        ):
-            logging.info(f"User getting ads for category: {category}")
-            params = {
-                "contextKeys": [category],
-            }
-            self.client.get("/api/data/", params=params)
-
-    @task(3)
-    def view_cart(self):
-        with 
+            "user_get_ads", context=Context(), attrib
