@@ -11,5 +11,15 @@ if [[ -n "${LOCUST_RUN_TIME:-}" ]]; then
     fi
 fi
 
+# Validate LOCUST_SPAWN_RATE environment variable if set
+if [[ -n "${LOCUST_SPAWN_RATE:-}" ]]; then
+    # Valid format: positive integer or float, e.g. 1, 10, 0.5, 100.25
+    if ! [[ "$LOCUST_SPAWN_RATE" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+        echo "ERROR: Invalid LOCUST_SPAWN_RATE value: '$LOCUST_SPAWN_RATE'" >&2
+        echo "Expected positive numeric value (integer or float). Examples: 1, 10, 0.5, 100.25" >&2
+        exit 1
+    fi
+fi
+
 # Execute the original locust command with all passed arguments
 exec locust --skip-log-setup "$@"
