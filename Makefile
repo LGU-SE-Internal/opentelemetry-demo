@@ -44,6 +44,12 @@ endif
 SEMCONVGEN_VERSION=0.11.0
 YAMLLINT_VERSION=1.30.0
 
+.PHONY: help
+help: ## Show this help message
+	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} /^[a-zA-Z_-]+:.*?##/ { printf "  \033[36m%-30s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) }' $(MAKEFILE_LIST)
+
+.DEFAULT_GOAL := help
+
 .PHONY: all
 all: install-tools markdownlint misspell yamllint
 
@@ -131,14 +137,14 @@ fix: misspell-correction
 	@echo "All autofixes complete"
 
 .PHONY: install-tools
-install-tools: $(MISSPELL) $(ADDLICENSE)
+install-tools: $(MISSPELL) $(ADDLICENSE) ## Install all required development tools
 	npm install
 	@echo "All tools installed"
 
 # Use to build all services, or a single service component
 # Example: make build service=frontend
 .PHONY: build
-build:
+build: ## Build all services, or a single service with service=name
 ifneq ($(strip $(service)),)
 	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) build $(service)
 else
@@ -225,88 +231,4 @@ start:
 	@echo "Go to http://localhost:8080/jaeger/ui for the Jaeger UI."
 	@echo "Go to http://localhost:8080/grafana/ for the Grafana UI."
 	@echo "Go to http://localhost:8080/loadgen/ for the Load Generator UI."
-	@echo "Go to http://localhost:8080/feature/ to change feature flags."
-	@echo "Go to http://localhost:8080/telemetry/ for the Weaver generated telemetry documentation."
-
-.PHONY: start-minimal
-start-minimal:
-	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES_CORE) $(DOCKER_COMPOSE_FILES_OBSERVABILITY) $(DOCKER_COMPOSE_FILES_EXTRAS) up --force-recreate --remove-orphans --detach
-	@echo ""
-	@echo "OpenTelemetry Demo in minimal mode is running."
-	@echo "Go to http://localhost:8080 for the demo UI."
-	@echo "Go to http://localhost:8080/jaeger/ui for the Jaeger UI."
-	@echo "Go to http://localhost:8080/grafana/ for the Grafana UI."
-	@echo "Go to http://localhost:8080/loadgen/ for the Load Generator UI."
-	@echo "Go to http://localhost:8080/feature/ to change feature flags."
-	@echo "Go to http://localhost:8080/telemetry/ for the Weaver generated telemetry documentation."
-
-.PHONY: start-no-o11y
-start-no-o11y:
-	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES_FULL) $(DOCKER_COMPOSE_FILES_EXTRAS) up --force-recreate --remove-orphans --detach
-	@echo ""
-	@echo "OpenTelemetry Demo is running (no observability stack)."
-	@echo "Go to http://localhost:8080 for the demo UI."
-	@echo "Go to http://localhost:8080/loadgen/ for the Load Generator UI."
-	@echo "Go to http://localhost:8080/feature/ to change feature flags."
-	@echo "Go to http://localhost:8080/telemetry/ for the Weaver generated telemetry documentation."
-
-.PHONY: start-minimal-no-o11y
-start-minimal-no-o11y:
-	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES_CORE) $(DOCKER_COMPOSE_FILES_EXTRAS) up --force-recreate --remove-orphans --detach
-	@echo ""
-	@echo "OpenTelemetry Demo in minimal mode is running (no observability stack)."
-	@echo "Go to http://localhost:8080 for the demo UI."
-	@echo "Go to http://localhost:8080/loadgen/ for the Load Generator UI."
-	@echo "Go to http://localhost:8080/feature/ to change feature flags."
-	@echo "Go to http://localhost:8080/telemetry/ for the Weaver generated telemetry documentation."
-
-.PHONY: start-profiling
-start-profiling:
-	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES_FULL) $(DOCKER_COMPOSE_FILES_OBSERVABILITY) $(DOCKER_COMPOSE_FILES_PROFILING) $(DOCKER_COMPOSE_FILES_EXTRAS) up --force-recreate --remove-orphans --detach
-	@echo ""
-	@echo "OpenTelemetry Demo in profiling mode is running."
-	@echo "Go to http://localhost:8080 for the demo UI."
-	@echo "Go to http://localhost:8080/jaeger/ui for the Jaeger UI."
-	@echo "Go to http://localhost:8080/grafana/ for the Grafana UI."
-	@echo "Go to http://localhost:8080/loadgen/ for the Load Generator UI."
-	@echo "Go to http://localhost:8080/profiles/ for the Firepit UI."
-	@echo "Go to http://localhost:8080/telemetry/ for the Weaver generated telemetry documentation."
-
-.PHONY: stop
-stop:
-	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) down --remove-orphans --volumes
-	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) $(DOCKER_COMPOSE_FILES_PROFILING) down --remove-orphans --volumes
-	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) $(DOCKER_COMPOSE_FILES_TESTS) down --remove-orphans --volumes
-	@echo ""
-	@echo "OpenTelemetry Demo is stopped."
-
-# Use to restart a single service component
-# Example: make restart service=frontend
-.PHONY: restart
-restart:
-ifneq ($(strip $(service)),)
-	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) stop $(service)
-	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) rm --force $(service)
-	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) create $(service)
-	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) start $(service)
-else
-	@echo "Please provide a service name using 'service=<name>' or 'SERVICE=<name>'"
-endif
-
-# Use to rebuild and restart (redeploy) a single service component
-# Example: make redeploy service=frontend
-.PHONY: redeploy
-redeploy:
-ifneq ($(strip $(service)),)
-	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) build $(service)
-	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) stop $(service)
-	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) rm --force $(service)
-	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) create $(service)
-	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) start $(service)
-else
-	@echo "Please provide a service name using 'service=<name>' or 'SERVICE=<name>'"
-endif
-
-.PHONY: build-react-native-android
-build-react-native-android:
-	$(DOCKER_CMD) build -f src/react-native-app/android.Dockerfile --platform=linux/amd64 --output=. src/react-native-app
+	@echo "Go to http://loc
