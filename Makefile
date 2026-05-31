@@ -184,9 +184,14 @@ clean-images:
     fi
 
 .PHONY: run-tests
-run-tests:
+run-tests: test-load-generator-entrypoint
 	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) $(DOCKER_COMPOSE_FILES_TESTS) run frontendTests
 	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) $(DOCKER_COMPOSE_FILES_TESTS) run traceBasedTests
+
+.PHONY: test-load-generator-entrypoint
+test-load-generator-entrypoint:
+	@echo "Running load generator entrypoint.sh validation tests..."
+	cd src/load-generator && ./test_entrypoint.sh
 
 .PHONY: run-tracetesting
 run-tracetesting:
