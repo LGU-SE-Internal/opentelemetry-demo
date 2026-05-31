@@ -117,8 +117,8 @@ addlicense:	$(ADDLICENSE)
 
 .PHONY: checklinks
 checklinks:
-	@echo "Checking links..."
-	lychee --config .lychee.toml --cache .
+	@echo "Checking links in markdown files..."
+	lychee --config .lychee.toml --cache $(ALL_DOCS)
 
 # Run all checks in order of speed / likely failure.
 .PHONY: check
