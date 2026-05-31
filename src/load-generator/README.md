@@ -10,6 +10,8 @@ The load generator supports the following environment variables for configuratio
 |---------------|-------------|----------|---------------|
 | `LOCUST_WEB_PORT` | Port to expose the Locust web UI on | No | `8089` |
 | `LOCUST_USERS` | Peak number of concurrent Locust users | No | `10` |
+| `LOCUST_RUN_TIME` | Duration to run the load test for (e.g. `10m`, `1h`) | No |  |
+| `LOCUST_SPAWN_RATE` | Rate to spawn new users at (users per second) | No | `1` |
 | `LOCUST_HOST` | Host URL of the frontend service to test | Yes | `http://frontend:8080` |
 | `LOCUST_HEADLESS` | Run Locust in headless mode without web UI (set to `true` to enable) | No | `false` |
 | `LOCUST_AUTOSTART` | Automatically start the load test when Locust starts (set to `true` to enable) | No | `false` |
