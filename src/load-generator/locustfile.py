@@ -88,7 +88,7 @@ def get_flagd_value(FlagName):
     client = api.get_client()
     details = client.get_integer_details(FlagName, 0)
     logging.debug(
-        "OpenFeature flag evaluation result",
+        f"OpenFeature flag evaluation result: name={FlagName}, value={details.value}, error={str(details.error) if details.error else 'none'}, reason={details.reason}, variant={details.variant}",
         extra={
             "flag.name": FlagName,
             "flag.value": details.value,
@@ -213,9 +213,4 @@ class WebsiteUser(HttpUser):
         with self.tracer.start_as_current_span("user_checkout_single", context=Context(), attributes={"user.id": user}):
             self.add_to_cart(user=user)
             checkout_person = random.choice(people)
-            checkout_person["userId"] = user
-            self.client.post("/api/checkout", json=checkout_person)
-            logging.info(f"Checkout completed for user {user}")
-
-    @task(1)
-    def check
+            checkout_per
