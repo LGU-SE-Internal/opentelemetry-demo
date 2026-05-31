@@ -1,0 +1,6 @@
+[run]
+source = .
+include = locustfile.py
+omit =
+    test_*.py
+    */test_*.py
