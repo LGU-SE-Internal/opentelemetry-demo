@@ -42,17 +42,27 @@ from playwright.async_api import Route, Request
 SERVICE_VERSION = "1.0.0"
 
 # Configure tracer provider first (needed for trace context in logs)
-tracer_provider = TracerProvider()
-trace.set_tracer_provider(tracer_provider)
-tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(insecure=True)))
+try:
+    tracer_provider = TracerProvider()
+    trace.set_tracer_provider(tracer_provider)
+    tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(insecure=True)))
+except Exception as e:
+    logging.error(f"Failed to initialize OpenTelemetry tracer provider: {str(e)}")
+    logging.error("Please check your OTLP endpoint configuration (OTEL_EXPORTER_OTLP_TRACES_ENDPOINT) and ensure the collector is reachable.")
+    raise SystemExit(1)
 
 # Configure logger provider with the same resource
-logger_provider = LoggerProvider()
-set_logger_provider(logger_provider)
-
-# Set up log exporter and processor
-log_exporter = OTLPLogExporter(insecure=True)
-logger_provider.add_log_record_processor(BatchLogRecordProcessor(log_exporter))
+try:
+    logger_provider = LoggerProvider()
+    set_logger_provider(logger_provider)
+    
+    # Set up log exporter and processor
+    log_exporter = OTLPLogExporter(insecure=True)
+    logger_provider.add_log_record_processor(BatchLogRecordProcessor(log_exporter))
+except Exception as e:
+    logging.error(f"Failed to initialize OpenTelemetry logger provider: {str(e)}")
+    logging.error("Please check your OTLP endpoint configuration (OTEL_EXPORTER_OTLP_LOGS_ENDPOINT) and ensure the collector is reachable.")
+    raise SystemExit(1)
 
 # Create logging handler that will include trace context
 handler = LoggingHandler(level=logging.INFO, logger_provider=logger_provider)
@@ -63,8 +73,13 @@ root_logger.addHandler(handler)
 root_logger.setLevel(logging.INFO)
 
 # Configure metrics
-metric_exporter = OTLPMetricExporter(insecure=True)
-set_meter_provider(MeterProvider([PeriodicExportingMetricReader(metric_exporter)]))
+try:
+    metric_exporter = OTLPMetricExporter(insecure=True)
+    set_meter_provider(MeterProvider([PeriodicExportingMetricReader(metric_exporter)]))
+except Exception as e:
+    logging.error(f"Failed to initialize OpenTelemetry meter provider: {str(e)}")
+    logging.error("Please check your OTLP endpoint configuration (OTEL_EXPORTER_OTLP_METRICS_ENDPOINT) and ensure the collector is reachable.")
+    raise SystemExit(1)
 
 # Instrument logging to automatically inject trace context
 LoggingInstrumentor().instrument(set_logging_format=True)
