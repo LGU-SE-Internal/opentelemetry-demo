@@ -5,6 +5,7 @@
 
 import json
 import os
+import urllib.parse
 import random
 import uuid
 import logging
@@ -75,7 +76,24 @@ URLLib3Instrumentor().instrument()
 logging.info("Instrumentation complete - logs will now include trace context")
 
 # Initialize Flagd provider
-base_url = f"http://{os.environ.get('FLAGD_HOST', 'localhost')}:{os.environ.get('FLAGD_OFREP_PORT', 8016)}"
+ofrep_endpoint = os.environ.get("OFREP_PROVIDER_ENDPOINT")
+if ofrep_endpoint:
+    base_url = ofrep_endpoint
+else:
+    flagd_host = os.environ.get('FLAGD_HOST', 'localhost')
+    flagd_port = os.environ.get('FLAGD_OFREP_PORT', 8016)
+    base_url = f"http://{flagd_host}:{flagd_port}"
+
+# Validate endpoint URL
+try:
+    result = urllib.parse.urlparse(base_url)
+    if not all([result.scheme, result.netloc]):
+        raise ValueError("Missing scheme or network location")
+except Exception as e:
+    logging.error(f"Invalid OFREP provider endpoint: {base_url}. Error: {str(e)}")
+    logging.error("Please set OFREP_PROVIDER_ENDPOINT to a valid URL, or ensure FLAGD_HOST and FLAGD_OFREP_PORT are correctly configured")
+    raise SystemExit(1)
+
 api.set_provider(OFREPProvider(base_url=base_url))
 api.add_hooks([TracingHook()])
 
@@ -212,5 +230,4 @@ class WebsiteUser(HttpUser):
         with self.tracer.start_as_current_span("user_checkout_multi", context=Context(),
                                             attributes={"user.id": user, "item.count": item_count}):
             for i in range(item_count):
-                self.add_to_cart(user=user)
-    
+                s
