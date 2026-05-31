@@ -75,6 +75,7 @@ install-yamllint:
     # Using a venv is recommended
 	yamllint --version >/dev/null 2>&1 || pip install -U yamllint~=$(YAMLLINT_VERSION)
 
+# Run yamllint against all YAML/YML files in the repository, excluding .git and vendored dependencies
 .PHONY: yamllint
 yamllint: install-yamllint
 	yamllint $(shell find . -type f \( -name '*.yaml' -o -name '*.yml' \) \
@@ -236,7 +237,4 @@ start:
 	@echo "Go to http://localhost:8080/telemetry/ for the Weaver generated telemetry documentation."
 
 .PHONY: start-minimal
-start-minimal:
-	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES_CORE) $(DOCKER_COMPOSE_FILES_OBSERVABILITY) $(DOCKER_COMPOSE_FILES_EXTRAS) up --force-recreate --remove-orphans --detach
-	@echo ""
-	@echo "OpenTelemetry Dem
+s
