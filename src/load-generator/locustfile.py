@@ -145,8 +145,8 @@ products = [
     "HQTGWGPNH4",
 ]
 try:
-    people = json.load(people_file)
     people_file = open("people.json")
+    people = json.load(people_file)
 except FileNotFoundError as e:
     logging.error({
         "error": "failed to load people.json",
@@ -234,27 +234,4 @@ class WebsiteUser(HttpUser):
         question = "Can you summarize the product reviews?"
         with self.tracer.start_as_current_span(
             "user_ask_product_ai_assistant",
-            context=Context(),
-            attributes={"product.id": product, "question": question},
-        ):
-            logging.info(
-                f"Asking the AI Assistant a question for: {product} {question}"
-            )
-            question = {"question": question}
-            self.client.post("/api/product-ask-ai-assistant/" + product, json=question)
-
-    @task(3)
-    def get_ads(self):
-        category = random.choice(categories)
-        with self.tracer.start_as_current_span(
-            "user_get_ads", context=Context(), attributes={"category": str(category)}
-        ):
-            logging.info(f"User getting ads for category: {category}")
-            params = {
-                "contextKeys": [category],
-            }
-            self.client.get("/api/data/", params=params)
-
-    @task(3)
-    def view_cart(self):
-        with 
+            context=Context()
