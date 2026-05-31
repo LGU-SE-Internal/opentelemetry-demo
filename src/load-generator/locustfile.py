@@ -51,13 +51,17 @@ set_logger_provider(logger_provider)
 log_exporter = OTLPLogExporter(insecure=True)
 logger_provider.add_log_record_processor(BatchLogRecordProcessor(log_exporter))
 
+# Configure log level from environment variable, default to INFO
+log_level_name = os.environ.get("LOG_LEVEL", "INFO").upper()
+log_level = getattr(logging, log_level_name, logging.INFO)
+
 # Create logging handler that will include trace context
-handler = LoggingHandler(level=logging.INFO, logger_provider=logger_provider)
+handler = LoggingHandler(level=log_level, logger_provider=logger_provider)
 
 # Configure root logger
 root_logger = logging.getLogger()
 root_logger.addHandler(handler)
-root_logger.setLevel(logging.INFO)
+root_logger.setLevel(log_level)
 
 # Configure metrics
 metric_exporter = OTLPMetricExporter(insecure=True)
@@ -214,10 +218,4 @@ class WebsiteUser(HttpUser):
             logging.info(f"Checkout completed for user {user}")
 
     @task(1)
-    def checkout_multi(self):
-        user = str(uuid.uuid1())
-        item_count = random.choice([2, 3, 4])
-        with self.tracer.start_as_current_span("user_checkout_multi", context=Context(),
-                                            attributes={"user.id": user, "item.count": item_count}):
-            for i in range(item_count):
-                self.add_to_cart(user
+    def check
