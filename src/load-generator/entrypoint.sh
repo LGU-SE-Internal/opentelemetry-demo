@@ -21,5 +21,6 @@ if [[ -n "${LOCUST_TAGS:-}" ]]; then
     fi
 fi
 
+
 # Execute the original locust command with all passed arguments
 exec locust --skip-log-setup "$@"
