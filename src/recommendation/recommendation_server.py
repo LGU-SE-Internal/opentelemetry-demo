@@ -6,8 +6,16 @@
 
 # Python
 import os
+import sys
 import random
 from concurrent import futures
+import logging
+
+MIN_PYTHON_VERSION = (3, 10)
+if sys.version_info < MIN_PYTHON_VERSION:
+    current_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    min_version_str = f"{MIN_PYTHON_VERSION[0]}.{MIN_PYTHON_VERSION[1]}"
+    logging.warning(f"Unsupported Python version {current_version}. Minimum required Python version is {min_version_str}. This application may not work correctly.")
 
 # Pip
 import grpc

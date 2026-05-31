@@ -5,9 +5,16 @@
 
 import json
 import os
+import sys
 import random
 import uuid
 import logging
+
+MIN_PYTHON_VERSION = (3, 10)
+if sys.version_info < MIN_PYTHON_VERSION:
+    current_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    min_version_str = f"{MIN_PYTHON_VERSION[0]}.{MIN_PYTHON_VERSION[1]}"
+    logging.warning(f"Unsupported Python version {current_version}. Minimum required Python version is {min_version_str}. This application may not work correctly.")
 
 from locust import HttpUser, task, between, events
 from flask import jsonify
@@ -227,12 +234,4 @@ class WebsiteUser(HttpUser):
         with self.tracer.start_as_current_span(
             "user_get_ads", context=Context(), attributes={"category": str(category)}
         ):
-            logging.info(f"User getting ads for category: {category}")
-            params = {
-                "contextKeys": [category],
-            }
-            self.client.get("/api/data/", params=params)
-
-    @task(3)
-    def view_cart(self):
-        with 
+            logging.info(f"User gettin

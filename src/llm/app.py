@@ -9,7 +9,14 @@ import time
 import random
 import re
 import os
+import sys
 import logging
+
+MIN_PYTHON_VERSION = (3, 10)
+if sys.version_info < MIN_PYTHON_VERSION:
+    current_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    min_version_str = f"{MIN_PYTHON_VERSION[0]}.{MIN_PYTHON_VERSION[1]}"
+    logging.warning(f"Unsupported Python version {current_version}. Minimum required Python version is {min_version_str}. This application may not work correctly.")
 
 from openfeature import api
 from openfeature.contrib.provider.flagd import FlagdProvider
@@ -215,8 +222,4 @@ if __name__ == '__main__':
     product_review_summaries = load_product_review_summaries(product_review_summaries_file_path)
     inaccurate_product_review_summaries = load_product_review_summaries(inaccurate_product_review_summaries_file_path)
 
-    app.logger.info(product_review_summaries)
-
-    print("OpenAI API server starting on http://localhost:8000")
-    print("Set your OpenAI base URL to: http://localhost:8000/v1")
-    app.run(host='0.0.0.0', port=8000, debug=True)
+    
