@@ -8,6 +8,7 @@ import os
 import random
 import uuid
 import logging
+import sys
 
 from locust import HttpUser, task, between
 from locust_plugins.users.playwright import PlaywrightUser, pw, PageWithRetry, event
@@ -107,8 +108,18 @@ products = [
     "HQTGWGPNH4",
 ]
 
-with open('people.json') as people_file:
-    people = json.load(people_file)
+try:
+    with open('people.json') as people_file:
+        people = json.load(people_file)
+except FileNotFoundError:
+    logging.error("Failed to load people.json: file not found. Please ensure the people.json file exists in the working directory.")
+    sys.exit(1)
+except json.JSONDecodeError as e:
+    logging.error(f"Failed to parse people.json: invalid JSON format. Error: {str(e)}")
+    sys.exit(1)
+except Exception as e:
+    logging.error(f"Unexpected error loading people.json: {str(e)}")
+    sys.exit(1)
 
 class WebsiteUser(HttpUser):
     wait_time = between(1, 10)
@@ -209,5 +220,4 @@ class WebsiteUser(HttpUser):
         with self.tracer.start_as_current_span("user_checkout_multi", context=Context(),
                                             attributes={"user.id": user, "item.count": item_count}):
             for i in range(item_count):
-                self.add_to_cart(user=user)
-    
+                self.add_t
