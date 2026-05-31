@@ -5,6 +5,7 @@
 
 import json
 import os
+import sys
 import random
 import uuid
 import logging
@@ -37,6 +38,13 @@ from openfeature.contrib.provider.ofrep import OFREPProvider
 from openfeature.contrib.hook.opentelemetry import TracingHook
 
 from playwright.async_api import Route, Request
+
+# Validate LOCUST_HOST when running in headless mode
+if os.getenv("LOCUST_HEADLESS", "").lower() == "true":
+    locust_host = os.getenv("LOCUST_HOST", "")
+    if not locust_host.strip():
+        print("ERROR: LOCUST_HOST environment variable is required when running Locust in headless mode", file=sys.stderr)
+        sys.exit(1)
 
 # Configure tracer provider first (needed for trace context in logs)
 tracer_provider = TracerProvider()
