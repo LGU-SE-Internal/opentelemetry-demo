@@ -61,6 +61,7 @@ misspell:	$(MISSPELL)
 misspell-correction:	$(MISSPELL)
 	$(MISSPELL) -w $(ALL_DOCS)
 
+# Run markdownlint on all markdown files respecting .markdownlint.yaml configuration
 .PHONY: markdownlint
 markdownlint:
 	@if ! npm ls markdownlint; then npm install; fi
