@@ -1,46 +1,52 @@
 # Load Generator
 
-The load generator creates simulated traffic to the demo.
-
-## Accessing the Load Generator
-
-You can access the web interface to Locust at `http://localhost:8080/loadgen/`.
+This service generates synthetic traffic for the OpenTelemetry Demo application using Locust.
 
 ## Configuration
 
 The load generator supports the following environment variables for configuration:
 
-| Environment Variable | Description | Required | Default Value |
-|----------------------|-------------|----------|---------------|
-| `LOCUST_WEB_PORT` | Port on which the Locust web interface listens | No | `8089` |
-| `LOCUST_USERS` | Number of concurrent simulated users to run | No | `5` |
-| `LOCUST_HOST` | Base URL of the target service to send traffic to | No | `http://frontend-proxy:8080` |
-| `LOCUST_WEB_HOST` | Host address the Locust web interface binds to | No | `load-generator` |
-| `LOCUST_AUTOSTART` | Whether to automatically start the load test on container startup | No | `true` |
-| `LOCUST_HEADLESS` | Run Locust in headless mode without the web interface | No | `false` |
-| `FLAGD_HOST` | Hostname of the flagd feature flag service | No | `localhost` |
-| `FLAGD_OFREP_PORT` | Port for the flagd OFREP (OpenFeature Remote Evaluation Protocol) endpoint | No | `8016` |
+| Variable Name | Description | Required | Default Value |
+|---------------|-------------|----------|---------------|
+| `LOCUST_WEB_PORT` | Port to expose the Locust web UI on | No | `8089` |
+| `LOCUST_USERS` | Peak number of concurrent Locust users | No | `10` |
+| `LOCUST_HOST` | Host URL of the frontend service to test | Yes | `http://frontend:8080` |
+| `LOCUST_HEADLESS` | Run Locust in headless mode without web UI (set to `true` to enable) | No | `false` |
+| `LOCUST_AUTOSTART` | Automatically start the load test when Locust starts (set to `true` to enable) | No | `false` |
+| `LOCUST_BROWSER_TRAFFIC_ENABLED` | Enable browser-based traffic generation using Playwright | No | `true` |
+| `LOCUST_WEB_HOST` | Host address to bind the Locust web UI to | No | `0.0.0.0` |
+| `FLAGD_HOST` | Hostname of the FlagD feature flag service | No | `localhost` |
+| `FLAGD_PORT` | Port of the FlagD service | No | `8013` |
+| `FLAGD_OFREP_PORT` | Port of the FlagD OFREP API | No | `8016` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP endpoint for sending telemetry data | No | `http://otelcol:4317` |
+| `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE` | Metrics temporality preference | No | `cumulative` |
+| `OTEL_RESOURCE_ATTRIBUTES` | Additional OpenTelemetry resource attributes | No |  |
+| `OTEL_SERVICE_NAME` | Service name for OpenTelemetry telemetry | No | `load-generator` |
+| `PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION` | Protocol buffers implementation to use | No | `python` |
 
-### Common Configuration Examples
+## Examples
 
-#### 1. Run with 50 concurrent users
+### Example 1: Run in headless mode with 50 users for 10 minutes
 ```yaml
 environment:
+  LOCUST_HOST: http://frontend:8080
+  LOCUST_HEADLESS: true
+  LOCUST_AUTOSTART: true
   LOCUST_USERS: 50
+  LOCUST_RUN_TIME: 10m
 ```
 
-#### 2. Run in headless mode (no web UI)
+### Example 2: Disable browser traffic
 ```yaml
 environment:
-  LOCUST_HEADLESS: "true"
-  LOCUST_AUTOSTART: "true"
+  LOCUST_BROWSER_TRAFFIC_ENABLED: false
 ```
 
-#### 3. Point to a custom flagd instance
+### Example 3: Custom FlagD configuration
 ```yaml
 environment:
-  FLAGD_HOST: "my-custom-flagd"
-  FLAGD_OFREP_PORT: 8080
+  FLAGD_HOST: custom-flagd-host
+  FLAGD_OFREP_PORT: 9016
 ```
 
 ## Modifying the Load Generator
