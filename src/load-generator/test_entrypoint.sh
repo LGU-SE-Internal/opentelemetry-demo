@@ -4,6 +4,17 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENTRYPOINT_SCRIPT="$SCRIPT_DIR/entrypoint.sh"
 
+# Create mock locust command so we don't need actual locust installed
+MOCK_BIN_DIR=$(mktemp -d)
+trap 'rm -rf "$MOCK_BIN_DIR"' EXIT
+cat > "$MOCK_BIN_DIR/locust" << 'EOF'
+#!/bin/bash
+# Mock locust command that just exits successfully
+exit 0
+EOF
+chmod +x "$MOCK_BIN_DIR/locust"
+export PATH="$MOCK_BIN_DIR:$PATH"
+
 echo "Running entrypoint.sh validation tests..."
 echo "=========================================="
 
