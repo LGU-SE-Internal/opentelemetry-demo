@@ -145,8 +145,8 @@ products = [
     "HQTGWGPNH4",
 ]
 try:
-    people_file = open("people.json")
-    people = json.load(people_file)
+    with open("people.json", "r", encoding="utf-8") as people_file:
+        people = json.load(people_file)
 except FileNotFoundError as e:
     logging.error({
         "error": "failed to load people.json",
@@ -165,6 +165,13 @@ except json.JSONDecodeError as e:
     logging.error({
         "error": "failed to load people.json",
         "reason": "invalid JSON content",
+        "details": str(e)
+    })
+    sys.exit(1)
+except Exception as e:
+    logging.error({
+        "error": "failed to load people.json",
+        "reason": "unexpected error",
         "details": str(e)
     })
     sys.exit(1)
