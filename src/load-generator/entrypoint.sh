@@ -11,5 +11,15 @@ if [[ -n "${LOCUST_RUN_TIME:-}" ]]; then
     fi
 fi
 
+# Validate LOCUST_WEB_PORT environment variable if set
+if [[ -n "${LOCUST_WEB_PORT:-}" ]]; then
+    # Valid format: integer between 1 and 65535
+    if ! [[ "$LOCUST_WEB_PORT" =~ ^[0-9]+$ ]] || (( LOCUST_WEB_PORT < 1 || LOCUST_WEB_PORT > 65535 )); then
+        echo "ERROR: Invalid LOCUST_WEB_PORT value: '$LOCUST_WEB_PORT'" >&2
+        echo "Expected integer value between 1 and 65535 (valid TCP port number)." >&2
+        exit 1
+    fi
+fi
+
 # Execute the original locust command with all passed arguments
 exec locust --skip-log-setup "$@"
