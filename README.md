@@ -77,6 +77,39 @@ keeping it up to date for you.
 | [Dynatrace]               | [OpenSearch]   | [VictoriaMetrics]                |
 | [Elastic]                 | [Oracle]       |                                  |
 
+## Load Testing
+
+The demo uses Locust as a load generator to simulate user traffic. You can customize the load test behavior using the following environment variables:
+
+### Supported Locust Environment Variables
+
+| Variable Name | Description | Required | Default Value | Example Value |
+|---------------|-------------|----------|---------------|---------------|
+| `LOCUST_WEB_PORT` | Port to expose the Locust web UI on | No | `8089` | `8090` |
+| `LOCUST_USERS` | Peak number of concurrent Locust users | No | `10` | `50` |
+| `LOCUST_RUN_TIME` | Duration to run the load test for (e.g. `10m`, `1h`) | No | - | `30m` |
+| `LOCUST_SPAWN_RATE` | Rate to spawn new users at (users per second) | No | `1` | `5` |
+| `LOCUST_HOST` | Host URL of the frontend service to test | Yes | `http://frontend:8080` | `http://localhost:8080` |
+| `LOCUST_HEADLESS` | Run Locust in headless mode without web UI (set to `true` to enable) | No | `false` | `true` |
+| `LOCUST_AUTOSTART` | Automatically start the load test when Locust starts (set to `true` to enable) | No | `false` | `true` |
+| `LOCUST_BROWSER_TRAFFIC_ENABLED` | Enable browser-based traffic generation using Playwright | No | `true` | `false` |
+| `LOCUST_WEB_HOST` | Host address to bind the Locust web UI to | No | `0.0.0.0` | `127.0.0.1` |
+| `FLAGD_HOST` | Hostname of the FlagD feature flag service | No | `localhost` | `custom-flagd` |
+| `FLAGD_PORT` | Port of the FlagD service | No | `8013` | `9013` |
+| `FLAGD_OFREP_PORT` | Port of the FlagD OFREP API | No | `8016` | `9016` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP endpoint for sending telemetry data | No | `http://otelcol:4317` | `http://otel-collector:4317` |
+| `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE` | Metrics temporality preference | No | `cumulative` | `delta` |
+| `OTEL_RESOURCE_ATTRIBUTES` | Additional OpenTelemetry resource attributes | No | - | `deployment.environment=test` |
+| `OTEL_SERVICE_NAME` | Service name for OpenTelemetry telemetry | No | `load-generator` | `demo-load-generator` |
+| `PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION` | Protocol buffers implementation to use | No | `python` | `cpp` |
+
+### How to Configure These Variables
+
+You can set these environment variables in multiple ways:
+1. Add them to your `.env` file in the project root
+2. Override them in a Docker Compose override file (e.g. `compose.override.yaml`)
+3. Pass them directly when starting the demo: `LOCUST_USERS=100 LOCUST_RUN_TIME=1h docker compose up`
+
 ## Contributing
 
 To get involved with the project see our [CONTRIBUTING](CONTRIBUTING.md)
