@@ -11,5 +11,15 @@ if [[ -n "${LOCUST_RUN_TIME:-}" ]]; then
     fi
 fi
 
+# Validate LOCUST_USERS environment variable if set
+if [[ -n "${LOCUST_USERS:-}" ]]; then
+    # Valid format: positive integer
+    if ! [[ "$LOCUST_USERS" =~ ^[1-9][0-9]*$ ]]; then
+        echo "ERROR: Invalid LOCUST_USERS value: '$LOCUST_USERS'" >&2
+        echo "Expected positive integer value. Examples: 1, 10, 100" >&2
+        exit 1
+    fi
+fi
+
 # Execute the original locust command with all passed arguments
 exec locust --skip-log-setup "$@"
