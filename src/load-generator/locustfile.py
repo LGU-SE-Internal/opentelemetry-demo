@@ -102,6 +102,10 @@ def on_init(environment, **kwargs):
                 "status": "unavailable",
                 "init_complete": False
             }), 503
+    # Log registered task counts for each user class
+    for user_class in environment.user_classes:
+        task_count = len(user_class.tasks)
+        logging.info(f"{user_class.__name__}: {task_count} tasks registered")
     # Mark initialization as complete
     init_complete = True
 
@@ -231,19 +235,4 @@ class WebsiteUser(HttpUser):
 
     @task(3)
     def view_cart(self):
-        with self.tracer.start_as_current_span("user_view_cart", context=Context()):
-            logging.info("User viewing cart")
-            self.client.get("/api/cart")
-
-    @task(2)
-    def add_to_cart(self, user=""):
-        if user == "":
-            user = str(uuid.uuid1())
-        product = random.choice(products)
-        quantity = random.choice([1, 2, 3, 4, 5, 10])
-        with self.tracer.start_as_current_span(
-            "user_add_to_cart",
-            context=Context(),
-            attributes={"user.id": user, "product.id": product, "quantity": quantity},
-        ):
-            logging.info(f"User {user} ad
+        with 
