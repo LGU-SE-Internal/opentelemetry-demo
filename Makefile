@@ -201,24 +201,33 @@ run-tests:
 run-tracetesting:
 	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) $(DOCKER_COMPOSE_FILES_TESTS) run traceBasedTests ${SERVICES_TO_TEST}
 
+.PHONY: run-locust-tests
+run-locust-tests:
+	@echo "Running locustfile.py unit tests with coverage..."
+	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) $(DOCKER_COMPOSE_FILES_TESTS) run --rm --no-deps loadgenerator bash -c "cd /usr/src/app/ && pip install pytest-cov==5.0.0 && pytest --cov=locustfile.py --cov-report=term --cov-report=lcov:/coverage/lcov.locust.info tests/"
+	mkdir -p ./coverage
+	docker cp $$($(DOCKER_COMPOSE_CMD) ps -q loadgenerator):/coverage/lcov.locust.info ./coverage/
+	$(DOCKER_COMPOSE_CMD) rm -f -s loadgenerator
+
 .PHONY: coverage
 coverage:
 	@echo "Running all unit tests with coverage enabled..."
 	# Run all service unit test containers that produce coverage reports
 	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) $(DOCKER_COMPOSE_FILES_TESTS) run --rm frontendTests
+	$(MAKE) run-locust-tests
 	# Add additional service test runs here as coverage is enabled for them
 	@echo "Aggregating coverage reports..."
 	mkdir -p ./coverage
 	@echo "Generating coverage summary..."
 	# Output human-readable summary to console
-	@for file in ./coverage/*.out ./coverage/*.xml ./coverage/*.json ./coverage/*.lcov; do \
+	@for file in ./coverage/*.out ./coverage/*.xml ./coverage/*.json ./coverage/*.lcov ./coverage/*.info; do \
 		if [ -f "$$file" ]; then \
 			echo "$$(basename $$file) coverage:"; \
 			# Handle go coverage files
 			if [[ $$file == *.out ]]; then \
 				go tool cover -func=$$file 2>/dev/null | tail -1 || echo "  Summary not available for $$file"; \
 			# Handle lcov coverage files (JS/TS, Python, etc.)
-			elif [[ $$file == *.lcov ]]; then \
+			elif [[ $$file == *.lcov || $$file == *.info ]]; then \
 				if command -v lcov >/dev/null 2>&1; then \
 					lcov --summary $$file 2>/dev/null | grep -E '(Total|lines|functions|branches)' || echo "  Summary not available for $$file"; \
 				else \
@@ -241,9 +250,9 @@ ifdef HTML
 		go tool cover -html=./coverage/merged.out -o ./coverage/html/index.html; \
 	fi
 	# Handle lcov HTML
-	if [ -f ./coverage/merged.lcov ]; then \
+	if [ -f ./coverage/merged.lcov ] || [ -f ./coverage/*.info ]; then \
 		if command -v genhtml >/dev/null 2>&1; then \
-			genhtml -o ./coverage/html ./coverage/merged.lcov >/dev/null 2>&1; \
+			genhtml -o ./coverage/html ./coverage/*.lcov ./coverage/*.info >/dev/null 2>&1; \
 		else \
 			echo "genhtml not installed, cannot generate HTML report for lcov files"; \
 		fi; \

@@ -1,0 +1,10 @@
+[run]
+source = .
+include = locustfile.py
+omit =
+    */test*
+    */tests/*
+
+[report]
+show_missing = True
+skip_covered = False
