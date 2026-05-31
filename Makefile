@@ -76,11 +76,11 @@ install-yamllint:
 	yamllint --version >/dev/null 2>&1 || pip install -U yamllint~=$(YAMLLINT_VERSION)
 
 .PHONY: yamllint
-yamllint: install-yamllint
+yamllint: install-yamllint ## Run YAML lint on all YAML files
 	yamllint .
 
 .PHONY: checklicense
-checklicense:	$(ADDLICENSE)
+checklicense:	$(ADDLICENSE) ## Check that all files have correct license headers
 	@echo "Checking license headers..."
 	$(ADDLICENSE) -check -c "The OpenTelemetry Authors" -l apache -s=only -y "" \
 		-ignore node_modules/** \
@@ -98,7 +98,7 @@ checklicense:	$(ADDLICENSE)
 		.
 
 .PHONY: addlicense
-addlicense:	$(ADDLICENSE)
+addlicense:	$(ADDLICENSE) ## Add license headers to files missing them
 	@echo "Adding license headers..."
 	$(ADDLICENSE) -c "The OpenTelemetry Authors" -l apache -s=only -y "" \
 		-ignore node_modules/** \
