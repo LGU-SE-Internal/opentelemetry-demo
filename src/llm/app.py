@@ -17,8 +17,21 @@ from openfeature.contrib.provider.flagd import FlagdProvider
 app = Flask(__name__)
 app.logger.setLevel(logging.INFO)
 
+def validate_timeout(value: str, default: str = "10") -> str:
+    try:
+        timeout_int = int(value)
+        if timeout_int > 0:
+            return str(timeout_int)
+        else:
+            app.logger.warning(f"Invalid REQUEST_TIMEOUT value: {value} (must be positive integer). Falling back to default {default}.")
+            return default
+    except (ValueError, TypeError):
+        app.logger.warning(f"Invalid REQUEST_TIMEOUT value: {value} (not a valid integer). Falling back to default {default}.")
+        return default
+
+REQUEST_TIMEOUT = validate_timeout(os.environ.get("REQUEST_TIMEOUT", "10"))
+
 product_review_summaries = None
-product_review_summaries_file_path = "./product-review-summaries.json"
 
 inaccurate_product_review_summaries = None
 inaccurate_product_review_summaries_file_path = "./inaccurate-product-review-summaries.json"
@@ -215,8 +228,4 @@ if __name__ == '__main__':
     product_review_summaries = load_product_review_summaries(product_review_summaries_file_path)
     inaccurate_product_review_summaries = load_product_review_summaries(inaccurate_product_review_summaries_file_path)
 
-    app.logger.info(product_review_summaries)
-
-    print("OpenAI API server starting on http://localhost:8000")
-    print("Set your OpenAI base URL to: http://localhost:8000/v1")
-    app.run(host='0.0.0.0', port=8000, debug=True)
+    
