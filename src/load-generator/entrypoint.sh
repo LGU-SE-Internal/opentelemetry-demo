@@ -11,5 +11,16 @@ if [[ -n "${LOCUST_RUN_TIME:-}" ]]; then
     fi
 fi
 
+# Validate LOCUST_HEADLESS environment variable if set
+if [[ -n "${LOCUST_HEADLESS:-}" ]]; then
+    shopt -s nocasematch
+    if ! [[ "$LOCUST_HEADLESS" =~ ^(true|false)$ ]]; then
+        echo "ERROR: Invalid LOCUST_HEADLESS value: '$LOCUST_HEADLESS'" >&2
+        echo "Expected value is either 'true' or 'false' (case-insensitive)" >&2
+        exit 1
+    fi
+    shopt -u nocasematch
+fi
+
 # Execute the original locust command with all passed arguments
 exec locust --skip-log-setup "$@"
