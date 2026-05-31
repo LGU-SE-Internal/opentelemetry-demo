@@ -110,8 +110,11 @@ products = [
 with open('people.json') as people_file:
     people = json.load(people_file)
 
+LOCUST_WAIT_MIN = int(os.environ.get('LOCUST_WAIT_MIN', 1))
+LOCUST_WAIT_MAX = int(os.environ.get('LOCUST_WAIT_MAX', 10))
+
 class WebsiteUser(HttpUser):
-    wait_time = between(1, 10)
+    wait_time = between(LOCUST_WAIT_MIN, LOCUST_WAIT_MAX)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
