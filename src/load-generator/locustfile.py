@@ -35,8 +35,32 @@ from opentelemetry.sdk.resources import Resource
 from openfeature import api
 from openfeature.contrib.provider.ofrep import OFREPProvider
 from openfeature.contrib.hook.opentelemetry import TracingHook
+from openfeature.hook import Hook, HookContext, HookHints
+from openfeature.evaluation import EvaluationDetails
 
 from playwright.async_api import Route, Request
+
+class LoggingHook(Hook):
+    def after(self, hook_context: HookContext, details: EvaluationDetails, hook_hints: HookHints = None) -> None:
+        logging.debug(
+            f"OpenFeature flag evaluation result: name={hook_context.flag_key}, value={details.value}, error={str(details.error) if details.error else 'none'}, reason={details.reason}, variant={details.variant}",
+            extra={
+                "flag.name": hook_context.flag_key,
+                "flag.value": details.value,
+                "flag.error": str(details.error) if details.error else None,
+                "flag.reason": details.reason,
+                "flag.variant": details.variant
+            }
+        )
+    
+    def error(self, hook_context: HookContext, error: Exception, hook_hints: HookHints = None) -> None:
+        logging.debug(
+            f"OpenFeature flag evaluation error: name={hook_context.flag_key}, error={str(error)}",
+            extra={
+                "flag.name": hook_context.flag_key,
+                "flag.error": str(error)
+            }
+        )
 
 # Configure tracer provider first (needed for trace context in logs)
 tracer_provider = TracerProvider()
@@ -210,7 +234,4 @@ class WebsiteUser(HttpUser):
     @task(1)
     def checkout(self):
         user = str(uuid.uuid1())
-        with self.tracer.start_as_current_span("user_checkout_single", context=Context(), attributes={"user.id": user}):
-            self.add_to_cart(user=user)
-            checkout_person = random.choice(people)
-            checkout_per
+        with self.tracer.start_as_current_span("user_checkout_single", context=Context(
