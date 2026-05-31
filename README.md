@@ -79,7 +79,8 @@ keeping it up to date for you.
 
 ## Load Testing
 
-The demo uses Locust as a load generator to simulate user traffic. You can customize the load test behavior using the following environment variables:
+The demo uses Locust as a load generator to simulate user traffic. You can customize
+the load test behavior using the following environment variables:
 
 ### Supported Locust Environment Variables
 
@@ -108,9 +109,13 @@ The demo uses Locust as a load generator to simulate user traffic. You can custo
 ### How to Configure These Variables
 
 You can set these environment variables in multiple ways:
+
 1. Add them to your `.env` file in the project root
 2. Override them in a Docker Compose override file (e.g. `compose.override.yaml`)
-3. Pass them directly when starting the demo: `LOCUST_USERS=100 LOCUST_RUN_TIME=1h docker compose up`
+3. Pass them directly when starting the demo:
+   ```bash
+   LOCUST_USERS=100 LOCUST_RUN_TIME=1h docker compose up
+   ```
 
 ## Contributing
 
