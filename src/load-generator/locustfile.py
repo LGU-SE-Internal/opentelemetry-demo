@@ -148,58 +148,127 @@ class WebsiteUser(HttpUser):
     def index(self):
         with self.tracer.start_as_current_span("user_index", context=Context()):
             logging.info("User accessing index page")
-            self.client.get("/")
+            response = self.client.get("/")
+            logging.info(
+                "Successful task request",
+                extra={
+                    "task_name": "index",
+                    "response_time_ms": round(response.elapsed.total_seconds() * 1000, 2),
+                    "response_status_code": response.status_code,
+                    "endpoint": "/"
+                }
+            )
 
     @task(10)
     def browse_product(self):
         product = random.choice(products)
         with self.tracer.start_as_current_span("user_browse_product", context=Context(), attributes={"product.id": product}):
+            endpoint = f"/api/products/{product}"
             logging.info(f"User browsing product: {product}")
-            self.client.get("/api/products/" + product)
+            response = self.client.get(endpoint)
+            logging.info(
+                "Successful task request",
+                extra={
+                    "task_name": "browse_product",
+                    "response_time_ms": round(response.elapsed.total_seconds() * 1000, 2),
+                    "response_status_code": response.status_code,
+                    "endpoint": endpoint
+                }
+            )
 
     @task(3)
     def get_recommendations(self):
         product = random.choice(products)
         with self.tracer.start_as_current_span("user_get_recommendations", context=Context(), attributes={"product.id": product}):
+            endpoint = "/api/recommendations"
             logging.info(f"User getting recommendations for product: {product}")
             params = {
                 "productIds": [product],
             }
-            self.client.get("/api/recommendations", params=params)
+            response = self.client.get(endpoint, params=params)
+            logging.info(
+                "Successful task request",
+                extra={
+                    "task_name": "get_recommendations",
+                    "response_time_ms": round(response.elapsed.total_seconds() * 1000, 2),
+                    "response_status_code": response.status_code,
+                    "endpoint": endpoint
+                }
+            )
 
     @task(2)
     def get_product_reviews(self):
         product = random.choice(products)
         with self.tracer.start_as_current_span("user_get_product_reviews", context=Context(), attributes={"product.id": product}):
+            endpoint = f"/api/product-reviews/{product}"
             logging.info(f"User getting product reviews for product: {product}")
-            self.client.get("/api/product-reviews/" + product)
+            response = self.client.get(endpoint)
+            logging.info(
+                "Successful task request",
+                extra={
+                    "task_name": "get_product_reviews",
+                    "response_time_ms": round(response.elapsed.total_seconds() * 1000, 2),
+                    "response_status_code": response.status_code,
+                    "endpoint": endpoint
+                }
+            )
 
     @task(1)
     def ask_product_ai_assistant(self):
         product = random.choice(products)
         question = 'Can you summarize the product reviews?'
         with self.tracer.start_as_current_span("user_ask_product_ai_assistant", context=Context(), attributes={"product.id": product, "question": question}):
+            endpoint = f"/api/product-ask-ai-assistant/{product}"
             logging.info(f"Asking the AI Assistant a question for: {product} {question}")
-            question = {
+            question_payload = {
                 "question": question
             }
-            self.client.post("/api/product-ask-ai-assistant/" + product, json=question)
+            response = self.client.post(endpoint, json=question_payload)
+            logging.info(
+                "Successful task request",
+                extra={
+                    "task_name": "ask_product_ai_assistant",
+                    "response_time_ms": round(response.elapsed.total_seconds() * 1000, 2),
+                    "response_status_code": response.status_code,
+                    "endpoint": endpoint
+                }
+            )
 
     @task(3)
     def get_ads(self):
         category = random.choice(categories)
         with self.tracer.start_as_current_span("user_get_ads", context=Context(), attributes={"category": str(category)}):
+            endpoint = "/api/data/"
             logging.info(f"User getting ads for category: {category}")
             params = {
                 "contextKeys": [category],
             }
-            self.client.get("/api/data/", params=params)
+            response = self.client.get(endpoint, params=params)
+            logging.info(
+                "Successful task request",
+                extra={
+                    "task_name": "get_ads",
+                    "response_time_ms": round(response.elapsed.total_seconds() * 1000, 2),
+                    "response_status_code": response.status_code,
+                    "endpoint": endpoint
+                }
+            )
 
     @task(3)
     def view_cart(self):
         with self.tracer.start_as_current_span("user_view_cart", context=Context()):
+            endpoint = "/api/cart"
             logging.info("User viewing cart")
-            self.client.get("/api/cart")
+            response = self.client.get(endpoint)
+            logging.info(
+                "Successful task request",
+                extra={
+                    "task_name": "view_cart",
+                    "response_time_ms": round(response.elapsed.total_seconds() * 1000, 2),
+                    "response_status_code": response.status_code,
+                    "endpoint": endpoint
+                }
+            )
 
     @task(2)
     def add_to_cart(self, user: str = "") -> None:
@@ -209,7 +278,17 @@ class WebsiteUser(HttpUser):
             quantity = random.choice([1, 2, 3, 4, 5, 10])
             with self.tracer.start_as_current_span("user_add_to_cart", context=Context(), attributes={"user.id": user, "product.id": product, "quantity": quantity}):
                 logging.info(f"User {user} adding {quantity} of product {product} to cart")
-                self.client.get("/api/products/" + product)
+                endpoint_get = f"/api/products/{product}"
+                response_get = self.client.get(endpoint_get)
+                logging.info(
+                    "Successful task request",
+                    extra={
+                        "task_name": "add_to_cart",
+                        "response_time_ms": round(response_get.elapsed.total_seconds() * 1000, 2),
+                        "response_status_code": response_get.status_code,
+                        "endpoint": endpoint_get
+                    }
+                )
                 cart_item = {
                     "item": {
                         "productId": product,
@@ -217,7 +296,17 @@ class WebsiteUser(HttpUser):
                     },
                     "userId": user,
                 }
-                self.client.post("/api/cart", json=cart_item)
+                endpoint_post = "/api/cart"
+                response_post = self.client.post(endpoint_post, json=cart_item)
+                logging.info(
+                    "Successful task request",
+                    extra={
+                        "task_name": "add_to_cart",
+                        "response_time_ms": round(response_post.elapsed.total_seconds() * 1000, 2),
+                        "response_status_code": response_post.status_code,
+                        "endpoint": endpoint_post
+                    }
+                )
 
     @task(1)
     def checkout(self) -> None:
@@ -226,7 +315,17 @@ class WebsiteUser(HttpUser):
             self.add_to_cart(user=user)
             checkout_person = random.choice(people)
             checkout_person["userId"] = user
-            self.client.post("/api/checkout", json=checkout_person)
+            endpoint = "/api/checkout"
+            response = self.client.post(endpoint, json=checkout_person)
+            logging.info(
+                "Successful task request",
+                extra={
+                    "task_name": "checkout",
+                    "response_time_ms": round(response.elapsed.total_seconds() * 1000, 2),
+                    "response_status_code": response.status_code,
+                    "endpoint": endpoint
+                }
+            )
             logging.info(f"Checkout completed for user {user}")
 
     @task(1)
