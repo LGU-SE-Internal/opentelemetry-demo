@@ -110,8 +110,16 @@ products = [
 with open('people.json') as people_file:
     people = json.load(people_file)
 
+# Get user wait time configuration from environment variables
+USER_WAIT_TIME_MIN = int(os.environ.get('USER_WAIT_TIME_MIN', 1))
+USER_WAIT_TIME_MAX = int(os.environ.get('USER_WAIT_TIME_MAX', 10))
+
+# Log the wait time configuration on startup
+logging.info(f"Load generator configured with min wait time between user requests: {USER_WAIT_TIME_MIN}s")
+logging.info(f"Load generator configured with max wait time between user requests: {USER_WAIT_TIME_MAX}s")
+
 class WebsiteUser(HttpUser):
-    wait_time = between(1, 10)
+    wait_time = between(USER_WAIT_TIME_MIN, USER_WAIT_TIME_MAX)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -209,5 +217,4 @@ class WebsiteUser(HttpUser):
         with self.tracer.start_as_current_span("user_checkout_multi", context=Context(),
                                             attributes={"user.id": user, "item.count": item_count}):
             for i in range(item_count):
-                self.add_to_cart(user=user)
-    
+                self.add_to_cart(user
