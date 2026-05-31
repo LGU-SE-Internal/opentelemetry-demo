@@ -8,6 +8,7 @@ import os
 import random
 import uuid
 import logging
+import sys
 
 from locust import HttpUser, task, between, events
 from flask import jsonify
@@ -143,9 +144,30 @@ products = [
     "OLJCESPC7Z",
     "HQTGWGPNH4",
 ]
-
-people_file = open("people.json")
-people = json.load(people_file)
+try:
+    people = json.load(people_file)
+    people_file = open("people.json")
+except FileNotFoundError as e:
+    logging.error({
+        "error": "failed to load people.json",
+        "reason": "file not found",
+        "details": str(e)
+    })
+    sys.exit(1)
+except PermissionError as e:
+    logging.error({
+        "error": "failed to load people.json",
+        "reason": "permission denied when accessing file",
+        "details": str(e)
+    })
+    sys.exit(1)
+except json.JSONDecodeError as e:
+    logging.error({
+        "error": "failed to load people.json",
+        "reason": "invalid JSON content",
+        "details": str(e)
+    })
+    sys.exit(1)
 
 
 class WebsiteUser(HttpUser):
