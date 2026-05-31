@@ -77,7 +77,7 @@ install-yamllint:
 
 # Run yamllint against all YAML/YML files in the repository, excluding .git and vendored dependencies
 .PHONY: yamllint
-yamllint: install-yamllint
+yamllint: install-yamllint ## Run yamllint against all YAML/YML files, excluding .git and vendored dependencies
 	yamllint $(shell find . -type f \( -name '*.yaml' -o -name '*.yml' \) \
 		-not -path './.git/*' \
 		-not -path '*/node_modules/*' \
@@ -234,7 +234,4 @@ start:
 	@echo "Go to http://localhost:8080/grafana/ for the Grafana UI."
 	@echo "Go to http://localhost:8080/loadgen/ for the Load Generator UI."
 	@echo "Go to http://localhost:8080/feature/ to change feature flags."
-	@echo "Go to http://localhost:8080/telemetry/ for the Weaver generated telemetry documentation."
-
-.PHONY: start-minimal
-s
+	@echo "Go to http:/
