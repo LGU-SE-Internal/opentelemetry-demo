@@ -19,7 +19,7 @@
 .codex/
 .cursor/
 .cursorrules
-
+.agentm/
 # Build artifacts
 bin/
 obj/
