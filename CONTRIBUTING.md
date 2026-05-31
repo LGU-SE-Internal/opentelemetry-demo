@@ -122,11 +122,14 @@ Before submitting a pull request, you can run lint checks to catch common issues
 # Run markdownlint on all markdown files
 make markdownlint
 
-# Run all available lint checks (markdown, spelling, license, links)
+# Run shellcheck on shell scripts (currently src/load-generator/entrypoint.sh)
+make shellcheck
+
+# Run all available lint checks (markdown, shellcheck, spelling, license, links)
 make check
 ```
 
-The `markdownlint` target will fail if any markdown formatting issues are detected, helping you catch these before PR submission.
+The `markdownlint` target will fail if any markdown formatting issues are detected, helping you catch these before PR submission. The `shellcheck` target will fail if any shell scripting errors or warnings are found in the project's shell scripts.
 
 ## Troubleshooting Common Issues
 
