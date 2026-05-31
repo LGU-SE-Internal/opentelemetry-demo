@@ -74,6 +74,38 @@ URLLib3Instrumentor().instrument()
 
 logging.info("Instrumentation complete - logs will now include trace context")
 
+# Validate environment variables
+import sys
+
+def validate_env_vars():
+    # Validate LOCUST_USERS
+    locust_users = os.environ.get("LOCUST_USERS")
+    if locust_users is not None:
+        try:
+            users_val = int(locust_users)
+            if users_val < 1:
+                logging.error("Invalid LOCUST_USERS value: must be a positive integer >= 1. Example valid value: 100")
+                sys.exit(1)
+            logging.info(f"Valid LOCUST_USERS value provided: {users_val}")
+        except ValueError:
+            logging.error("Invalid LOCUST_USERS value: must be a positive integer >= 1. Example valid value: 100")
+            sys.exit(1)
+    
+    # Validate LOCUST_SPAWN_RATE
+    locust_spawn_rate = os.environ.get("LOCUST_SPAWN_RATE")
+    if locust_spawn_rate is not None:
+        try:
+            spawn_val = float(locust_spawn_rate)
+            if spawn_val <= 0:
+                logging.error("Invalid LOCUST_SPAWN_RATE value: must be a positive number > 0. Example valid values: 10, 2.5")
+                sys.exit(1)
+            logging.info(f"Valid LOCUST_SPAWN_RATE value provided: {spawn_val}")
+        except ValueError:
+            logging.error("Invalid LOCUST_SPAWN_RATE value: must be a positive number > 0. Example valid values: 10, 2.5")
+            sys.exit(1)
+
+validate_env_vars()
+
 # Initialize Flagd provider
 base_url = f"http://{os.environ.get('FLAGD_HOST', 'localhost')}:{os.environ.get('FLAGD_OFREP_PORT', 8016)}"
 api.set_provider(OFREPProvider(base_url=base_url))
@@ -209,5 +241,4 @@ class WebsiteUser(HttpUser):
         with self.tracer.start_as_current_span("user_checkout_multi", context=Context(),
                                             attributes={"user.id": user, "item.count": item_count}):
             for i in range(item_count):
-                self.add_to_cart(user=user)
-    
+                self.add_to_cart(user
