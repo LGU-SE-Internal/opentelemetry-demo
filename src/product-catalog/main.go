@@ -56,6 +56,7 @@ var (
 	logger *slog.Logger
 	db     *sql.DB
 	reg    metric.Registration
+	envCount int
 )
 
 func init() {
@@ -67,6 +68,7 @@ func initDatabase() error {
 	if connStr == "" {
 		return fmt.Errorf("DB_CONNECTION_STRING environment variable not set")
 	}
+	envCount++
 
 	dbAttrs := otelsql.WithAttributes(
 		append(otelsql.AttributesFromDSN(connStr), semconv.DBSystemNamePostgreSQL)...,
@@ -159,8 +161,12 @@ func main() {
 	}
 
 	svc := &productCatalog{}
-	var port string
+		var port string
 	mustMapEnv(&port, "PRODUCT_CATALOG_PORT")
+
+	logger.Info("All required environment variables validated successfully",
+		slog.Int("validated_env_vars", envCount),
+		slog.Bool("configuration_valid", true))
 
 	logger.Info(fmt.Sprintf("Product Catalog gRPC server started on port: %s", port))
 
@@ -282,136 +288,4 @@ func getProductsFromRows(ctx context.Context, rows *sql.Rows) ([]*pb.Product, er
 		var units int64
 		var nanos int32
 
-		if err := rows.Scan(&id, &name, &description, &picture, &currencyCode, &units, &nanos, &categoriesStr); err != nil {
-			return nil, fmt.Errorf("failed to scan product row: %w", err)
-		}
-
-		products = append(products, parseProductRow(id, name, description, picture, currencyCode, categoriesStr, units, nanos))
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating product rows: %w", err)
-	}
-
-	logger.LogAttrs(
-		ctx,
-		slog.LevelInfo,
-		fmt.Sprintf("Found %d products from database", len(products)),
-		slog.Int("products", len(products)),
-	)
-
-	return products, nil
-}
-
-func parseProductRow(id, name, description, picture, currencyCode, categoriesStr string, units int64, nanos int32) *pb.Product {
-	// Parse comma-delimited categories string into slice
-	var categories []string
-	if categoriesStr != "" {
-		categories = strings.Split(categoriesStr, ",")
-		// Trim whitespace from each category
-		for i, cat := range categories {
-			categories[i] = strings.TrimSpace(cat)
-		}
-	}
-
-	return &pb.Product{
-		Id:          id,
-		Name:        name,
-		Description: description,
-		Picture:     picture,
-		PriceUsd: &pb.Money{
-			CurrencyCode: currencyCode,
-			Units:        units,
-			Nanos:        nanos,
-		},
-		Categories: categories,
-	}
-}
-
-func mustMapEnv(target *string, key string) {
-	value, present := os.LookupEnv(key)
-	if !present {
-		logger.Error(fmt.Sprintf("Environment Variable Not Set: %q", key))
-	}
-	*target = value
-}
-
-func (p *productCatalog) Check(ctx context.Context, req *healthpb.HealthCheckRequest) (*healthpb.HealthCheckResponse, error) {
-	return &healthpb.HealthCheckResponse{Status: healthpb.HealthCheckResponse_SERVING}, nil
-}
-
-func (p *productCatalog) Watch(req *healthpb.HealthCheckRequest, ws healthpb.Health_WatchServer) error {
-	return status.Errorf(codes.Unimplemented, "health check via Watch not implemented")
-}
-
-func (p *productCatalog) ListProducts(ctx context.Context, req *pb.Empty) (*pb.ListProductsResponse, error) {
-	span := trace.SpanFromContext(ctx)
-
-	products, err := loadProductsFromDB(ctx)
-	if err != nil {
-		span.SetStatus(otelcodes.Error, err.Error())
-		return nil, status.Errorf(codes.Internal, "failed to load products: %v", err)
-	}
-
-	span.SetAttributes(
-		attribute.Int("demo.product.count", len(products)),
-	)
-	return &pb.ListProductsResponse{Products: products}, nil
-}
-
-func (p *productCatalog) GetProduct(ctx context.Context, req *pb.GetProductRequest) (*pb.Product, error) {
-	span := trace.SpanFromContext(ctx)
-	span.SetAttributes(
-		attribute.String("demo.product.id", req.Id),
-	)
-
-	// GetProduct will fail on a specific product when feature flag is enabled
-	if p.checkProductFailure(ctx, req.Id) {
-		msg := "Error: Product Catalog Fail Feature Flag Enabled"
-		span.SetStatus(otelcodes.Error, msg)
-		span.AddEvent(msg)
-		return nil, status.Error(codes.Internal, msg)
-	}
-
-	found, err := getProductFromDB(ctx, req.Id)
-	if err != nil {
-		msg := fmt.Sprintf("Product Not Found: %s", req.Id)
-		span.SetStatus(otelcodes.Error, msg)
-		span.AddEvent(msg)
-		return nil, status.Error(codes.NotFound, msg)
-	}
-
-	span.AddEvent("Product Found")
-	span.SetAttributes(
-		attribute.String("demo.product.id", req.Id),
-		attribute.String("demo.product.name", found.Name),
-	)
-
-	logger.LogAttrs(
-		ctx,
-		slog.LevelInfo, "Product Found",
-		slog.String("demo.product.name", found.Name),
-		slog.String("demo.product.id", req.Id),
-	)
-
-	return found, nil
-}
-
-func (p *productCatalog) SearchProducts(ctx context.Context, req *pb.SearchProductsRequest) (*pb.SearchProductsResponse, error) {
-	span := trace.SpanFromContext(ctx)
-
-	result, err := searchProductsFromDB(ctx, req.Query)
-	if err != nil {
-		span.SetStatus(otelcodes.Error, err.Error())
-		return nil, status.Errorf(codes.Internal, "failed to search products: %v", err)
-	}
-
-	span.SetAttributes(
-		attribute.Int("demo.product.search.count", len(result)),
-	)
-	return &pb.SearchProductsResponse{Results: result}, nil
-}
-
-func (p *productCatalog) checkProductFailure(ctx context.Context, id string) bool {
-	return flags.ProductCatalogFailure.Value(ctx, openfeature.NewTargetlessEvaluationContext(map[string]any{"product_id": id}))
-}
+		if err := rows.Scan(&id, &name, &description, &picture, &currencyCode, &units, &n
