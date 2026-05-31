@@ -1,4 +1,4 @@
-test-entrypoint-validation:
-	./test_entrypoint_validation.sh
+.PHONY: test
 
-.PHONY: test-entrypoint-validation
+test:
+	@./test_entrypoint_validation.sh
