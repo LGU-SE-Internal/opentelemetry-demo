@@ -216,4 +216,19 @@ class WebsiteUser(HttpUser):
 
     @task(1)
     def checkout(self):
-        user =
+        user = str(uuid.uuid1())
+        with self.tracer.start_as_current_span("user_checkout_single", context=Context(), attributes={"user.id": user}):
+            self.add_to_cart(user=user)
+            checkout_person = random.choice(people)
+            checkout_person["userId"] = user
+            self.client.post("/api/checkout", json=checkout_person)
+            logging.info(f"Checkout completed for user {user}")
+
+    @task(1)
+    def checkout_multi(self):
+        user = str(uuid.uuid1())
+        item_count = random.choice([2, 3, 4])
+        with self.tracer.start_as_current_span("user_checkout_multi", context=Context(),
+                                            attributes={"user.id": user, "item.count": item_count}):
+            for i in range(item_count):
+                self.add_to_cart(user=user)
