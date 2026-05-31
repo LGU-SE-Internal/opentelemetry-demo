@@ -116,6 +116,36 @@ def on_init(environment, **kwargs):
     # Mark initialization as complete
     init_complete = True
 
+@events.quitting.add_listener
+def on_quit(environment, **kwargs):
+    import opentelemetry.trace
+    import opentelemetry.metrics
+    import opentelemetry._logs
+    logging.debug("Shutdown triggered: flushing OTel telemetry providers")
+    
+    # Flush tracer provider
+    tracer_provider = opentelemetry.trace.get_tracer_provider()
+    if hasattr(tracer_provider, "force_flush"):
+        tracer_provider.force_flush()
+    if hasattr(tracer_provider, "shutdown"):
+        tracer_provider.shutdown()
+    
+    # Flush meter provider
+    meter_provider = opentelemetry.metrics.get_meter_provider()
+    if hasattr(meter_provider, "force_flush"):
+        meter_provider.force_flush()
+    if hasattr(meter_provider, "shutdown"):
+        meter_provider.shutdown()
+    
+    # Flush logger provider
+    logger_provider = opentelemetry._logs.get_logger_provider()
+    if hasattr(logger_provider, "force_flush"):
+        logger_provider.force_flush()
+    if hasattr(logger_provider, "shutdown"):
+        logger_provider.shutdown()
+    
+    logging.debug("OTel telemetry flush completed successfully before exit")
+
 # Initialize Flagd provider
 base_url = f"http://{os.environ.get('FLAGD_HOST', 'localhost')}:{os.environ.get('FLAGD_OFREP_PORT', 8016)}"
 api.set_provider(OFREPProvider(base_url=base_url))
