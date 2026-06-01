@@ -43,14 +43,14 @@ If you'd like to extend this demo or maintain a fork of it, read our
 
 To work on this repository locally, you need the following tools installed:
 
-| Tool | Minimum Version | Installation Guide |
-|------|-----------------|--------------------|
-| Docker | Latest stable | [Install Docker](https://docs.docker.com/get-docker/) |
-| Docker Compose | Latest stable | [Install Docker Compose](https://docs.docker.com/compose/install/) |
-| `make` | 4.0+ | [Install GNU Make](https://www.gnu.org/software/make/) |
-| Git | Latest stable | [Install Git](https://git-scm.com/book/en/v2/Getting-Started-Installing-Git) |
-| Python | 3.12+ | [Install Python](https://www.python.org/downloads/) |
-| Node.js | 20+ | [Install Node.js](https://nodejs.org/en/download/) |
+| Tool               | Minimum Version | Installation Guide                                                                 |
+|--------------------|-----------------|-------------------------------------------------------------------------------------|
+| Docker             | Latest stable   | [Install Docker](https://docs.docker.com/get-docker/)                               |
+| Docker Compose     | Latest stable   | [Install Docker Compose](https://docs.docker.com/compose/install/)                  |
+| `make`             | 4.0+            | [Install GNU Make](https://www.gnu.org/software/make/)                              |
+| Git                | Latest stable   | [Install Git](https://git-scm.com/book/en/v2/Getting-Started-Installing-Git)        |
+| Python             | 3.12+           | [Install Python](https://www.python.org/downloads/)                                 |
+| Node.js            | 20+             | [Install Node.js](https://nodejs.org/en/download/)                                  |
 
 ## Quick start
 
