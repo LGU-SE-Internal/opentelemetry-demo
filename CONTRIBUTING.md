@@ -45,8 +45,11 @@ contributing to OpenTelemetry: providing context, reviewing PRs, and helping
 those get merged. Buddies will not be available 24/7, but is committed to
 responding during their normal contribution hours.
 
-## Setting Up Your Development Environment
+### Review System Architecture
 
+Before diving into contributions, review the [official OpenTelemetry Demo architecture documentation](https://opentelemetry.io/docs/demo/architecture/), which outlines all service components and the end-to-end flow of the demo system.
+
+## Setting Up Your Development Environment
 ### Prerequisites
 
 Ensure you have the following installed:
