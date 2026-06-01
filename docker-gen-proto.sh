@@ -2,37 +2,43 @@
 # Copyright The OpenTelemetry Authors
 # SPDX-License-Identifier: Apache-2.0
 
-set -e # Exit immediately if a command exits with a non-zero status.
+set -euo pipefail # Enable strict error handling
 set -x # Print commands and their arguments as they are executed
 
 # This script is used to generate protobuf files for all services with Docker.
 
 . ./.env
 
+# Validate base directory is repository root
+if [ ! -d "./pb" ]; then
+  echo "ERROR: Script must be run from the repository root directory (pb/ directory not found)" >&2
+  exit 1
+fi
+
 gen_proto_go() {
   echo "Generating Go protobuf files for $1"
-  docker build -f "src/$1/genproto/Dockerfile" -t "$1-genproto" .
+  docker build -f "src/$1/genproto/Dockerfile" -t "$1-genproto" . || { echo "ERROR: Docker build failed for Go service $1" >&2; exit 1; }
   docker run --rm -v $(pwd):/build "$1-genproto" \
-    protoc -I /build/pb /build/pb/demo.proto --go_out="./src/$1/" --go-grpc_out="./src/$1/"
+    protoc -I /build/pb /build/pb/demo.proto --go_out="./src/$1/" --go-grpc_out="./src/$1/" || { echo "ERROR: protoc failed for Go service $1" >&2; exit 1; }
 }
 
 gen_proto_cpp() {
   echo "Generating Cpp protobuf files for $1"
-  docker build --build-arg OPENTELEMETRY_CPP_VERSION=${OPENTELEMETRY_CPP_VERSION} -f "src/$1/genproto/Dockerfile" -t "$1-genproto" .
+  docker build --build-arg OPENTELEMETRY_CPP_VERSION=${OPENTELEMETRY_CPP_VERSION} -f "src/$1/genproto/Dockerfile" -t "$1-genproto" . || { echo "ERROR: Docker build failed for Cpp service $1" >&2; exit 1; }
   docker run --rm -v $(pwd):/build "$1-genproto" \
-    cp -r "/$1/build/generated" "/build/src/$1/build/"
+    cp -r "/$1/build/generated" "/build/src/$1/build/" || { echo "ERROR: Copy generated files failed for Cpp service $1" >&2; exit 1; }
 }
 
 gen_proto_python() {
   echo "Generating Python protobuf files for $1"
-  docker build -f "src/$1/genproto/Dockerfile" -t "$1-genproto" .
+  docker build -f "src/$1/genproto/Dockerfile" -t "$1-genproto" . || { echo "ERROR: Docker build failed for Python service $1" >&2; exit 1; }
   docker run --rm -v $(pwd):/build "$1-genproto" \
-    python -m grpc_tools.protoc -I /build/pb/ --python_out="./src/$1/" --grpc_python_out="./src/$1/" /build/pb/demo.proto
+    python -m grpc_tools.protoc -I /build/pb/ --python_out="./src/$1/" --grpc_python_out="./src/$1/" /build/pb/demo.proto || { echo "ERROR: protoc failed for Python service $1" >&2; exit 1; }
 }
 
 gen_proto_ts() {
   echo "Generating Typescript protobuf files for $1"
-  docker build -f "src/$1/genproto/Dockerfile" -t "$1-genproto" .
+  docker build -f "src/$1/genproto/Dockerfile" -t "$1-genproto" . || { echo "ERROR: Docker build failed for Typescript service $1" >&2; exit 1; }
   docker run --rm -e SERVICE=$1 -v $(pwd):/build "$1-genproto" /bin/sh -c '
     mkdir -p /build/src/$SERVICE/protos && \
     protoc -I /build/pb \
@@ -40,7 +46,7 @@ gen_proto_ts() {
     --ts_proto_opt=esModuleInterop=true \
     --ts_proto_out="/build/src/$SERVICE/protos" \
     --ts_proto_opt=outputServices=grpc-js \
-    /build/pb/demo.proto'
+    /build/pb/demo.proto' || { echo "ERROR: protoc failed for Typescript service $1" >&2; exit 1; }
 }
 
 if [ -z "$1" ]; then

@@ -1,7 +1,7 @@
 #!/bin/sh
 # Copyright The OpenTelemetry Authors
 # SPDX-License-Identifier: Apache-2.0
-
+set -euo pipefail # Enable strict error handling
 
 # This script is used to generate protobuf files for all services.
 # Useful to ensure code can compile without Docker, and provide hints for IDEs.
@@ -9,14 +9,19 @@
 
 base_dir=$(pwd)
 
+# Validate base directory is repository root
+if [ ! -d "${base_dir}/pb" ]; then
+  echo "ERROR: Script must be run from the repository root directory (pb/ directory not found in ${base_dir})" >&2
+  exit 1
+fi
+
 gen_proto_dotnet() {
   echo "Generating .NET protobuf files for $1"
-  cd "$base_dir"/src/"$1" || return
-  mkdir -p ./src/protos/
-  cp -r "$base_dir"/pb/ ./src/protos/
-  cd "$base_dir" || return
+  cd "$base_dir"/src/"$1" || { echo "ERROR: Failed to change directory to $base_dir/src/$1" >&2; exit 1; }
+  mkdir -p ./src/protos/ || { echo "ERROR: Failed to create directory ./src/protos/ in $base_dir/src/$1" >&2; exit 1; }
+  cp -r "$base_dir"/pb/ ./src/protos/ || { echo "ERROR: Failed to copy pb directory to ./src/protos/ in $base_dir/src/$1" >&2; exit 1; }
+  cd "$base_dir" || { echo "ERROR: Failed to change directory back to $base_dir" >&2; exit 1; }
 }
-
 gen_proto_elixir() {
   echo "Generating Elixir protobuf files for $1"
   cd "$base_dir"/src/"$1" || return
