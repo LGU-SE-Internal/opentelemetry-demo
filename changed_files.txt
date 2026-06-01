@@ -1,0 +1,17 @@
+.gitignore
+CONTRIBUTING.md
+Makefile
+README.md
+src/checkout/main.go
+src/frontend/next.config.js
+src/load-generator/Dockerfile
+src/load-generator/README.md
+src/load-generator/entrypoint.sh
+src/load-generator/locustfile.py
+src/load-generator/requirements.in
+src/load-generator/test.sh
+src/payment/index.js
+src/product-catalog/main.go
+src/product-reviews/database.py
+src/product-reviews/product_reviews_server.py
+src/recommendation/recommendation_server.py
