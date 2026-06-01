@@ -1,0 +1,42 @@
+[tool.ruff]
+# Global settings
+line-length = 120
+target-version = "py310"
+exclude = [
+    "__pycache__",
+    "*.pyc",
+    "venv",
+    ".venv",
+    "build",
+    "dist",
+    "*.egg-info",
+    "test-results",
+    "pytest-results",
+    ".pytest_cache",
+    ".tox",
+    ".git",
+    "node_modules",
+]
+
+# Select core linting rules matching community best practices
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # Pyflakes
+    "I",  # isort (import ordering/sorting)
+    "UP", # pyupgrade
+    "B",  # flake8-bugbear
+]
+
+# Configure import sorting (isort)
+[tool.ruff.isort]
+case-sensitive = false
+force-sort-within-sections = true
+known-first-party = []
+section-order = [
+    "future",
+    "standard-library",
+    "third-party",
+    "first-party",
+    "local-folder",
+]
