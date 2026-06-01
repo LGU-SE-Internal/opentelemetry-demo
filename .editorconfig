@@ -49,3 +49,20 @@ indent_size = 2
 # HTML/CSS
 [*.{html,css}]
 indent_size = 2
+
+# Rust files
+[*.rs]
+indent_size = 4
+
+# C# files
+[*.cs]
+indent_size = 4
+indent_style = space
+
+# Elixir files
+[*.{ex,exs}]
+indent_size = 2
+
+# PHP files
+[*.php]
+indent_size = 4
