@@ -192,6 +192,32 @@ run-tests:
 run-tracetesting:
 	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) $(DOCKER_COMPOSE_FILES_TESTS) run traceBasedTests ${SERVICES_TO_TEST}
 
+## test-shell: Run all shell script unit tests using bats-core framework
+.PHONY: test-shell
+test-shell:
+	@echo "Running shell script unit tests..."
+	@BATS_FILES=$$(find ./test -name "*.bats" -type f); \
+	if [ -z "$$BATS_FILES" ]; then \
+		echo "No .bats test files found in ./test directory"; \
+		exit 0; \
+	fi; \
+	if ! command -v bats >/dev/null 2>&1; then \
+		echo "Error: bats-core framework is not installed. Please install bats to run shell tests."; \
+		exit 1; \
+	fi; \
+	echo "Found $$(echo "$$BATS_FILES" | wc -w) test file(s):"; \
+	for test_file in $$BATS_FILES; do echo "  - $$test_file"; done; \
+	echo ""; \
+	bats --formatter pretty $$BATS_FILES; \
+	TEST_EXIT=$$?; \
+	echo ""; \
+	if [ $$TEST_EXIT -eq 0 ]; then \
+		echo "✅ All shell tests passed successfully!"; \
+	else \
+		echo "❌ $$TEST_EXIT shell test(s) failed!"; \
+		exit $$TEST_EXIT; \
+	fi
+
 .PHONY: coverage
 coverage:
 	@echo "Running all unit tests with coverage enabled..."
