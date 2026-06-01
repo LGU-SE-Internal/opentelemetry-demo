@@ -1,65 +1,51 @@
 # EditorConfig is awesome: https://EditorConfig.org
 
-# Top-most EditorConfig file
+# top-most EditorConfig file
 root = true
 
-# General rules for all files
+# All files
 [*]
 charset = utf-8
 end_of_line = lf
+indent_size = 2
+indent_style = space
 insert_final_newline = true
 trim_trailing_whitespace = true
-indent_style = space
-indent_size = 2
 
-# Python: 4 space indentation
+# Python files
 [*.py]
 indent_size = 4
 
 # Shell scripts
-[*.{sh,bash}]
+[*.sh]
 indent_size = 2
-end_of_line = lf
+shell_variant = bash
 
-# YAML
+# YAML files
 [*.{yaml,yml}]
 indent_size = 2
-indent_style = space
 
-# Markdown
+# Markdown files
 [*.md]
 trim_trailing_whitespace = false
-indent_size = 2
 
 # Dockerfile
 [Dockerfile]
 indent_size = 2
 
 # JavaScript/TypeScript
-[*.{js,jsx,ts,tsx}]
+[*.{js,ts,jsx,tsx}]
 indent_size = 2
 
-# Go
+# Go files
 [*.go]
 indent_style = tab
 indent_size = 4
 
-# Protocol buffers
+# Protobuf files
 [*.proto]
 indent_size = 2
 
-# C# files
-[*.cs]
-indent_size = 4
-
-# Java files
-[*.java]
-indent_size = 4
-
-# Rust files
-[*.rs]
-indent_size = 4
-
-# C/C++ files
-[*.{c,cpp,h}]
-indent_size = 4
+# HTML/CSS
+[*.{html,css}]
+indent_size = 2
