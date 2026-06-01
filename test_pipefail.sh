@@ -1,6 +1,10 @@
 #!/bin/bash
 set -euo pipefail
-
-# Test pipeline failure
-false | true
-echo "If we see this, pipefail is NOT working. Exit code: $?"
+# Test pipefail: false | true should return non-zero with pipefail enabled
+if false | true; then
+    echo "pipefail NOT working"
+    exit 1
+else
+    echo "pipefail is working correctly"
+    exit 0
+fi
