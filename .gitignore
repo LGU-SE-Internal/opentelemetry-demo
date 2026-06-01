@@ -4,9 +4,6 @@
 *.iml
 *.ipr
 *.iws
-*.pyc
-__pycache__/
-.pytest_cache/
 .swp
 .DS_Store
 \#*\#
@@ -15,6 +12,11 @@ __pycache__/
 .settings
 .vs/
 .vscode
+
+# Python
+*.pyc
+__pycache__/
+.pytest_cache/
 
 # AI Agents
 .claude/
