@@ -43,6 +43,7 @@ endif
 # Keep links in semantic_conventions/README.md and .vscode/settings.json in sync!
 SEMCONVGEN_VERSION=0.11.0
 YAMLLINT_VERSION=1.30.0
+HADOLINT_VERSION=2.12.0
 
 .PHONY: all
 all: install-tools markdownlint misspell yamllint checklicense
@@ -78,6 +79,26 @@ install-yamllint:
 .PHONY: yamllint
 yamllint: install-yamllint
 	yamllint .
+
+.PHONY: install-hadolint
+install-hadolint:
+	hadolint --version >/dev/null 2>&1 || (wget -O /usr/local/bin/hadolint https://github.com/hadolint/hadolint/releases/download/v$(HADOLINT_VERSION)/hadolint-Linux-x86_64 && chmod +x /usr/local/bin/hadolint)
+
+.PHONY: hadolint
+hadolint: install-hadolint
+	@echo "Running hadolint on all Dockerfiles..."
+	@find . -type f -name 'Dockerfile*' \
+		-not -path './.git/*' \
+		-not -path '*/node_modules/*' \
+		-not -path '*/_build/*' \
+		-not -path '*/deps/*' \
+		-not -path '*/Pods/*' \
+		-not -path '*/.expo/*' \
+		-not -path '*/vendor/*' \
+		-not -path '*/.venv/*' \
+		-not -path '*/dist/*' \
+		-not -path '*/build/*' \
+		-exec hadolint {} +
 
 .PHONY: checklicense
 checklicense:	$(ADDLICENSE)
@@ -122,7 +143,7 @@ checklinks:
 
 # Run all checks in order of speed / likely failure.
 .PHONY: check
-check: misspell markdownlint checklicense checklinks
+check: misspell markdownlint checklicense checklinks hadolint
 	@echo "All checks complete"
 
 # Attempt to fix issues / regenerate tables.
@@ -282,4 +303,23 @@ start:
 start-minimal:
 	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES_CORE) $(DOCKER_COMPOSE_FILES_OBSERVABILITY) $(DOCKER_COMPOSE_FILES_EXTRAS) up --force-recreate --remove-orphans --detach
 	@echo ""
-	@echo "OpenTelemetry Dem
+	@echo "OpenTelemetry Demo is running in minimal mode."
+	@echo "Go to http://localhost:8080 for the demo UI."
+	@echo "Go to http://localhost:8080/jaeger/ui for the Jaeger UI."
+	@echo "Go to http://localhost:8080/grafana/ for the Grafana UI."
+	@echo "Go to http://localhost:8080/loadgen/ for the Load Generator UI."
+	@echo "Go to http://localhost:8080/feature/ to change feature flags."
+	@echo "Go to http://localhost:8080/telemetry/ for the Weaver generated telemetry documentation."
+
+.PHONY: help
+help: ## Show this help message
+	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@echo ""
+	@echo "Available targets:"
+	@echo "\033[36mhadolint\033[0m             Run hadolint static analysis on all Dockerfile files"
+	@echo "\033[36mcheck\033[0m                Run all code quality checks (including hadolint)"
+	@echo "\033[36mmisspell\033[0m             Check spelling in documentation files"
+	@echo "\033[36mmarkdownlint\033[0m         Lint markdown documentation files"
+	@echo "\033[36myamllint\033[0m             Lint YAML configuration files"
+	@echo "\033[36mchecklicense\033[0m         Check for required license headers in source files"
+	@echo "\033[36mchecklinks\033[0m           Check for broken links in documentation"
