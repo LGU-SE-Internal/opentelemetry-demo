@@ -3,33 +3,28 @@
 # Top-most EditorConfig file
 root = true
 
-# Default rules for all files
+# Default settings for all files
 [*]
 charset = utf-8
 end_of_line = lf
-indent_size = 2
-indent_style = space
 insert_final_newline = true
 trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
 
-# Python specific rules
+# Python files
 [*.py]
 indent_size = 4
 
 # Shell scripts
-[*.{sh,bash}]
+[*.sh]
 indent_size = 2
-shell_variant      = bash
-binary_next_line   = true
-switch_case_indent = true
-space_redirects    = true
-pipeline_indent    = 2
 
-# YAML/Ansible/CloudFormation
+# YAML files
 [*.{yaml,yml}]
 indent_size = 2
 
-# Markdown
+# Markdown files (trailing whitespace is intentional for line breaks)
 [*.md]
 trim_trailing_whitespace = false
 indent_size = 2
@@ -38,48 +33,15 @@ indent_size = 2
 [Dockerfile]
 indent_size = 2
 
-# JavaScript/TypeScript/JSON
-[*.{js,ts,tsx,jsx,json}]
+# JavaScript/TypeScript files
+[*.{js,ts,jsx,tsx}]
 indent_size = 2
 
-# Go
+# Go files (standard gofmt uses tabs)
 [*.go]
-indent_size = 4
 indent_style = tab
+indent_size = 4
 
-# Protocol Buffers
+# Protocol buffer files
 [*.proto]
-indent_size = 2
-
-# Java/Gradle
-[*.{java,gradle,kts}]
-indent_size = 4
-
-# C/C++/C#
-[*.{c,h,cpp,cc,cs}]
-indent_size = 4
-
-# HTML/CSS
-[*.{html,css}]
-indent_size = 2
-
-# PHP
-[*.php]
-indent_size = 4
-
-# Ruby
-[*.rb]
-indent_size = 2
-
-# Rust
-[*.rs]
-indent_size = 4
-
-# Makefiles
-[Makefile]
-indent_style = tab
-indent_size = 4
-
-# TOML
-[*.toml]
 indent_size = 2
