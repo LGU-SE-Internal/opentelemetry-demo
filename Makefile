@@ -85,7 +85,7 @@ install-hadolint:
 	hadolint --version >/dev/null 2>&1 || (wget -O /usr/local/bin/hadolint https://github.com/hadolint/hadolint/releases/download/v$(HADOLINT_VERSION)/hadolint-Linux-x86_64 && chmod +x /usr/local/bin/hadolint)
 
 .PHONY: hadolint
-hadolint: install-hadolint
+hadolint: install-hadolint ## Run hadolint static analysis on all Dockerfile files to catch best practice violations and security issues
 	@echo "Running hadolint on all Dockerfiles..."
 	@find . -type f -name 'Dockerfile*' \
 		-not -path './.git/*' \
