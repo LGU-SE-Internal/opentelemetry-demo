@@ -308,4 +308,17 @@ start:
 start-minimal:
 	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES_CORE) $(DOCKER_COMPOSE_FILES_OBSERVABILITY) $(DOCKER_COMPOSE_FILES_EXTRAS) up --force-recreate --remove-orphans --detach
 	@echo ""
-	@echo "OpenTelemetry Dem
+	@echo "OpenTelemetry Demo running in minimal configuration."
+	@echo "Go to http://localhost:8080 for the demo UI."
+	@echo "Go to http://localhost:8080/jaeger/ui for the Jaeger UI."
+	@echo "Go to http://localhost:8080/grafana/ for the Grafana UI."
+
+.PHONY: stop
+stop:
+	$(DOCKER_COMPOSE_CMD) $(DOCKER_COMPOSE_ENV) $(DOCKER_COMPOSE_FILES) down --remove-orphans
+
+## help: Show this help message
+.PHONY: help
+help:
+	@echo "Available targets:"
+	@grep -E '^## [a-zA-Z_-]+:.*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ": "}; {printf "  \033[36m%-30s\033[0m %s\n", substr($$1, 4), $$2}'
