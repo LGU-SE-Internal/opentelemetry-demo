@@ -125,6 +125,10 @@ checklinks:
 check: misspell markdownlint checklicense checklinks
 	@echo "All checks complete"
 
+.PHONY: all-linters
+all-linters: misspell markdownlint yamllint checklicense
+	@echo "All linters complete"
+
 # Attempt to fix issues / regenerate tables.
 .PHONY: fix
 fix: misspell-correction
