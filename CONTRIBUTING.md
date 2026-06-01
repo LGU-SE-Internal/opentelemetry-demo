@@ -114,19 +114,26 @@ Once the images are built and containers are started, visit:
 - **Load Generator UI**: [http://localhost:8080/loadgen/](http://localhost:8080/loadgen/)
 
 
-### Run Lint Checks
+## Running Local CI Checks
 
-Before submitting a pull request, you can run lint checks to catch common issues:
+Before submitting a pull request, you can run our suite of CI checks locally to catch issues before your changes are reviewed. The following make targets are available:
+
+| Target | Description |
+|--------|-------------|
+| `make markdownlint` | Runs markdownlint on all markdown files to ensure consistent formatting |
+| `make yamllint` | Lints all YAML files for syntax errors and formatting issues |
+| `make shellcheck` | Runs static analysis on shell scripts to catch common errors |
+| `make checklicense` | Verifies that all code files have the required license header |
+| `make checklinks` | Checks all links in documentation for broken links |
+| `make misspell` | Scans all files for common spelling mistakes |
+
+To run all available CI checks at once, use:
 
 ```sh
-# Run markdownlint on all markdown files
-make markdownlint
-
-# Run all available lint checks (markdown, spelling, license, links)
 make check
 ```
 
-The `markdownlint` target will fail if any markdown formatting issues are detected, helping you catch these before PR submission.
+This will run all the above checks sequentially and report any issues that need to be fixed before submitting your PR. Running these checks locally can save you time by avoiding waiting for CI runs to complete on your pull request.
 
 ## Troubleshooting Common Issues
 
