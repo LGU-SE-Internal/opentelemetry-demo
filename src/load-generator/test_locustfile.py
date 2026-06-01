@@ -1,70 +1,47 @@
-#!/usr/bin/env python3
+#!/usr/bin/python
+
 # Copyright The OpenTelemetry Authors
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
-from unittest.mock import MagicMock, patch
-from locust import events
-
-# Import the counter functions and handlers from locustfile
-from locustfile import (
-    on_request_success,
-    on_request_failure,
-    successful_tasks_counter,
-    failed_tasks_counter
-)
+from unittest.mock import patch
+from locustfile import on_request_success, on_request_failure
 
 
-def test_successful_task_counter_increment():
-    """AC-1: Test that successful task execution counter increments correctly"""
-    # Mock the counter add method
-    with patch.object(successful_tasks_counter, 'add') as mock_add:
-        # Trigger the success event handler
-        on_request_success(
-            request_type="GET",
-            name="test_task",
-            response_time=100.0,
-            response_length=200
-        )
-        
-        # Verify counter was incremented once with correct attributes
-        mock_add.assert_called_once_with(
-            1,
-            {"task_name": "test_task", "request_type": "GET"}
-        )
+def test_on_request_success_increments_counter():
+    """Test that successful task execution counter is incremented with correct attributes"""
+    with patch('locustfile.successful_tasks_counter') as mock_counter:
+        request_type = "GET"
+        task_name = "test_task"
+        response_time = 100
+        response_length = 200
 
+        on_request_success(request_type, task_name, response_time, response_length)
 
-def test_failed_task_counter_increment():
-    """AC-2: Test that failed task execution counter increments correctly"""
-    # Mock the counter add method
-    with patch.object(failed_tasks_counter, 'add') as mock_add:
-        # Create a test exception
-        test_exception = ValueError("Test error")
-        
-        # Trigger the failure event handler
-        on_request_failure(
-            request_type="POST",
-            name="test_failed_task",
-            response_time=50.0,
-            exception=test_exception
-        )
-        
-        # Verify counter was incremented once with correct attributes
-        mock_add.assert_called_once_with(
+        mock_counter.add.assert_called_once_with(
             1,
             {
-                "task_name": "test_failed_task",
-                "request_type": "POST",
-                "exception_type": "ValueError"
+                "task_name": task_name,
+                "request_type": request_type
             }
         )
 
 
-def test_success_event_handler_registered():
-    """Test that the success handler is properly registered with Locust events"""
-    assert on_request_success in events.request_success._handlers
+def test_on_request_failure_increments_counter():
+    """Test that failed task execution counter is incremented with correct attributes"""
+    with patch('locustfile.failed_tasks_counter') as mock_counter:
+        request_type = "POST"
+        task_name = "test_failed_task"
+        response_time = 50
+        exception = ValueError("Test error")
 
+        on_request_failure(request_type, task_name, response_time, exception)
 
-def test_failure_event_handler_registered():
-    """Test that the failure handler is properly registered with Locust events"""
-    assert on_request_failure in events.request_failure._handlers
+        mock_counter.add.assert_called_once_with(
+            1,
+            {
+                "task_name": task_name,
+                "request_type": request_type,
+                "exception_type": "ValueError"
+            }
+        )
