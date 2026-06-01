@@ -9,9 +9,18 @@ import urllib.parse
 import random
 import uuid
 import logging
+import sys
 
 from locust import HttpUser, task, between
 from locust_plugins.users.playwright import PlaywrightUser, pw, PageWithRetry, event
+
+# Validate LOCUST_HOST environment variable if set
+LOCUST_HOST = os.environ.get("LOCUST_HOST")
+if LOCUST_HOST is not None:
+    if not (LOCUST_HOST.startswith("http://") or LOCUST_HOST.startswith("https://")):
+        print("ERROR: Invalid LOCUST_HOST value: '%s'" % LOCUST_HOST, file=sys.stderr)
+        print("Expected URL starting with http:// or https://", file=sys.stderr)
+        sys.exit(1)
 
 from opentelemetry import context, baggage, trace
 from opentelemetry.context import Context
