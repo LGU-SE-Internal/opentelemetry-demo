@@ -51,6 +51,8 @@ composer.lock
 /src/frontend/pb
 
 # Otel Demo specific
+.env
+.env.example
 docker-compose.override.yml
 
 src/frontend/cypress/videos
