@@ -79,6 +79,12 @@ install-yamllint:
 yamllint: install-yamllint
 	yamllint .
 
+.PHONY: pyright
+pyright: ## Run pyright type checking on all Python source files
+	@echo "Running pyright type checking..."
+	@pyright --version >/dev/null 2>&1 || pip install --break-system-packages -U pyright
+	pyright .
+
 .PHONY: checklicense
 checklicense:	$(ADDLICENSE)
 	@echo "Checking license headers..."
@@ -122,7 +128,7 @@ checklinks:
 
 # Run all checks in order of speed / likely failure.
 .PHONY: check
-check: misspell markdownlint checklicense checklinks
+check: misspell markdownlint checklicense checklinks pyright
 	@echo "All checks complete"
 
 # Attempt to fix issues / regenerate tables.
