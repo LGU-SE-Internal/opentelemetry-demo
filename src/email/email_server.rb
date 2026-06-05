@@ -43,6 +43,15 @@ $confirmation_counter = meter.create_counter("demo.notification.confirmations", 
 post "/send_order_confirmation" do
   data = JSON.parse(request.body.read, object_class: OpenStruct)
 
+  # Input validation
+  if data.email.nil? || data.email.to_s.strip.empty?
+    raise ArgumentError.new("Email address cannot be empty or nil")
+  end
+
+  if data.order.nil?
+    raise ArgumentError.new("Order cannot be nil")
+  end
+
   # get the current auto-instrumented span
   current_span = OpenTelemetry::Trace.current_span
   current_span.add_attributes({
