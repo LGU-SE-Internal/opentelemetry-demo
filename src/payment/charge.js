@@ -21,6 +21,20 @@ function random(arr) {
   return arr[index];
 }
 
+/**
+ * Processes a payment charge request, validating card details and processing the transaction.
+ * @param {Object} request - The payment request object
+ * @param {Object} request.creditCard - The credit card details for the transaction
+ * @param {string} request.creditCard.creditCardNumber - Full credit card number
+ * @param {number} request.creditCard.creditCardExpirationYear - Credit card expiration year (4-digit)
+ * @param {number} request.creditCard.creditCardExpirationMonth - Credit card expiration month (1-12)
+ * @param {Object} request.amount - The charge amount details
+ * @param {number} request.amount.units - Whole units of the currency (e.g. dollars)
+ * @param {number} request.amount.nanos - Fractional units of the currency in nanos (1e-9 units)
+ * @param {string} request.amount.currencyCode - 3-letter ISO 4217 currency code
+ * @returns {Promise<{transactionId: string}>} Promise resolving to object containing the unique transaction ID on success
+ * @throws {Error} If payment fails for any reason: invalid card details, expired card, unsupported card type, or random simulated failure
+ */
 module.exports.charge = async request => {
   const span = tracer.startSpan('charge');
 
