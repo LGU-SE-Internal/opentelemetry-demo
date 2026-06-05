@@ -4,6 +4,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
+"""Recommendation service gRPC server implementation for the OpenTelemetry demo."""
+
 # Python
 import os
 import random
