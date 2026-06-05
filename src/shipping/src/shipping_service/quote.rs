@@ -13,6 +13,9 @@ use tracing::info;
 use super::shipping_types::Quote;
 
 pub async fn create_quote_from_count(count: u32) -> Result<Quote, tonic::Status> {
+    if count == 0 {
+        return Err(tonic::Status::invalid_argument("Count must be positive, got 0"));
+    }
     let f = match request_quote(count).await {
         Ok(float) => float,
         Err(err) => {
@@ -124,5 +127,24 @@ mod tests {
             cents: 1,
         };
         assert_eq!(format!("{}", quote), "0.1");
+    }
+
+    #[actix_web::test]
+    async fn test_create_quote_from_count_validation() {
+        // Test invalid count (0) returns error
+        let result = create_quote_from_count(0).await;
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert_eq!(err.message(), "Count must be positive, got 0");
+
+        // Test positive counts don't return validation error (they may return other errors if service isn't running, but validation passes)
+        for count in [1, 5, 10, 100] {
+            let result = create_quote_from_count(count).await;
+            // Should not return invalid argument error, even if service is unreachable
+            if let Err(e) = result {
+                assert_ne!(e.code(), tonic::Code::InvalidArgument);
+            }
+        }
     }
 }
