@@ -353,6 +353,8 @@ func (p *productCatalog) ListProducts(ctx context.Context, req *pb.Empty) (*pb.L
 		return nil, status.Errorf(codes.Internal, "failed to load products: %v", err)
 	}
 
+	logger.InfoContext(ctx, "Successfully loaded product catalog", slog.Int("product_count", len(products)))
+
 	span.SetAttributes(
 		attribute.Int("demo.product.count", len(products)),
 	)
