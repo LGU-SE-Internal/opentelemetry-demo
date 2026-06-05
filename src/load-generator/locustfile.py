@@ -3,6 +3,8 @@
 # Copyright The OpenTelemetry Authors
 # SPDX-License-Identifier: Apache-2.0
 
+"""Locust load test definitions for the OpenTelemetry demo application."""
+
 import json
 import os
 import random
