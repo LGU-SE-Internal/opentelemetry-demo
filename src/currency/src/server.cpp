@@ -192,10 +192,28 @@ class CurrencyService final : public oteldemo::CurrencyService::Service
       // Do the conversion work
       Money from = request->from();
       string from_code = from.currency_code();
+      
+      // Validate from currency code is not empty
+      if (from_code.empty()) {
+        span->SetStatus(StatusCode::kError);
+        logger->Error(std::string(__func__) + " conversion failed: from currency code is empty");
+        span->End();
+        return Status(grpc::INVALID_ARGUMENT, "from currency code cannot be empty");
+      }
+      
       double rate = currency_conversion[from_code];
       double one_euro = getDouble(from) / rate ;
 
       string to_code = request->to_code();
+      
+      // Validate to currency code is not empty
+      if (to_code.empty()) {
+        span->SetStatus(StatusCode::kError);
+        logger->Error(std::string(__func__) + " conversion failed: to currency code is empty");
+        span->End();
+        return Status(grpc::INVALID_ARGUMENT, "to currency code cannot be empty");
+      }
+      
       double to_rate = currency_conversion[to_code];
 
       double final = one_euro * to_rate;
