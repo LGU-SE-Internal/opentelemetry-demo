@@ -27,6 +27,11 @@ public class CartService : Oteldemo.CartService.CartServiceBase
 
     public override async Task<Empty> AddItem(AddItemRequest request, ServerCallContext context)
     {
+        if (string.IsNullOrEmpty(request.UserId))
+        {
+            throw new ArgumentException("UserId cannot be null or empty.", nameof(request.UserId));
+        }
+        
         var activity = Activity.Current;
         activity?.SetTag("user.id", request.UserId);
         activity?.SetTag("demo.product.id", request.Item.ProductId);
@@ -48,6 +53,11 @@ public class CartService : Oteldemo.CartService.CartServiceBase
 
     public override async Task<Cart> GetCart(GetCartRequest request, ServerCallContext context)
     {
+        if (string.IsNullOrEmpty(request.UserId))
+        {
+            throw new ArgumentException("UserId cannot be null or empty.", nameof(request.UserId));
+        }
+        
         var activity = Activity.Current;
         activity?.SetTag("user.id", request.UserId);
         activity?.AddEvent(new("Fetch cart"));
@@ -74,6 +84,11 @@ public class CartService : Oteldemo.CartService.CartServiceBase
 
     public override async Task<Empty> EmptyCart(EmptyCartRequest request, ServerCallContext context)
     {
+        if (string.IsNullOrEmpty(request.UserId))
+        {
+            throw new ArgumentException("UserId cannot be null or empty.", nameof(request.UserId));
+        }
+        
         var activity = Activity.Current;
         activity?.SetTag("user.id", request.UserId);
         activity?.AddEvent(new("Empty cart"));
