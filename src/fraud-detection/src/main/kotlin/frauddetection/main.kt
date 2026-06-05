@@ -56,12 +56,26 @@ fun main() {
             totalCount = consumer
                 .poll(ofMillis(100))
                 .fold(totalCount) { accumulator, record ->
+                    val orders = OrderResult.parseFrom(record.value())
+                    
+                    // Validate order amount per AC-1: check if total amount is negative or zero
+                    var totalNanos: Long = 0
+                    for (item in orders.itemsList) {
+                        val cost = item.cost
+                        totalNanos += cost.units * 1_000_000_000L + cost.nanos
+                    }
+                    totalNanos += orders.shippingCost.units * 1_000_000_000L + orders.shippingCost.nanos
+                    
+                    if (totalNanos <= 0) {
+                        logger.warn("Order ID {} has invalid amount (null or negative). Skipping further processing.", orders.orderId)
+                        return@fold accumulator + 1
+                    }
+                    
                     val newCount = accumulator + 1
                     if (getFeatureFlagValue("kafkaQueueProblems") > 0) {
                         logger.info("FeatureFlag 'kafkaQueueProblems' is enabled, sleeping 1 second")
                         Thread.sleep(1000)
                     }
-                    val orders = OrderResult.parseFrom(record.value())
                     logger.info("Consumed record with orderId: ${orders.orderId}, and updated total count to: $newCount")
                     newCount
                 }
