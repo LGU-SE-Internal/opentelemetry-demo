@@ -265,6 +265,7 @@ func main() {
 	healthcheck := health.NewServer()
 	healthpb.RegisterHealthServer(srv, healthcheck)
 	logger.Info(fmt.Sprintf("starting to listen on tcp: %q", lis.Addr().String()))
+	logger.Info(fmt.Sprintf("Checkout service started on port %s", port))
 	err = srv.Serve(lis)
 	logger.Error(err.Error())
 
