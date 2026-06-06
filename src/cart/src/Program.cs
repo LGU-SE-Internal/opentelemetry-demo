@@ -54,6 +54,13 @@ builder.Services.AddOpenFeature(openFeatureBuilder =>
         .AddHook<TraceEnricherHook>();
 });
 
+builder.Services.AddValidatorsFromAssemblyContaining<GetCartRequestValidator>();
+builder.Services.AddGrpc(options =>
+{
+    options.EnableDetailedErrors = true;
+})
+.AddFluentValidation();
+
 builder.Services.AddSingleton(x =>
     new CartService(
         x.GetRequiredService<ICartStore>(),
