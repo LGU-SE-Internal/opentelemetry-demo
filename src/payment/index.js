@@ -90,6 +90,11 @@ server.bindAsync(address, grpc.ServerCredentials.createInsecure(), (err, port) =
     }
   });
 
+  // Catch all other routes return 404
+  app.all('*', (req, res) => {
+    res.status(404).send();
+  });
+
   // Start health server
   app.listen(HEALTH_PORT, () => {
     logger.info(`Payment service health endpoint listening on port ${HEALTH_PORT}`);

@@ -5,7 +5,12 @@
   "main": "index.js",
   "scripts": {
     "start": "node --require ./opentelemetry.js index.js",
-    "test": "jest test/**/*.test.js"
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js test/**/*.test.js"
+  },
+  "jest": {
+    "transformIgnorePatterns": [
+      "node_modules/(?!uuid)"
+    ]
   },
   "author": "Jonathan Lui",
   "license": "ISC",
