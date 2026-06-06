@@ -22,11 +22,24 @@ import dev.openfeature.sdk.EvaluationContext
 import dev.openfeature.sdk.ImmutableContext
 import dev.openfeature.sdk.Value
 import dev.openfeature.sdk.OpenFeatureAPI
+import io.grpc.Server
+import io.grpc.ServerBuilder
+import io.grpc.protobuf.services.HealthStatusManager
+import io.grpc.health.v1.HealthCheckResponse.ServingStatus
+import java.util.concurrent.atomic.AtomicLong
+import kotlin.concurrent.thread
 
 const val topic = "orders"
 const val groupID = "fraud-detection"
+const val DEFAULT_HEALTH_PORT = 9091
+const val POLL_TIMEOUT_MS = 100L
+const val HEALTH_CHECK_INTERVAL_MS = 10000L // 10 seconds
+const val MAX_UNHEALTHY_POLL_INTERVAL_MS = 60000L // 60 seconds
+const val SHUTDOWN_WAIT_MS = 5000L // 5 seconds
 
 private val logger: Logger = LogManager.getLogger(groupID)
+private val lastSuccessfulPollTime = AtomicLong(0)
+private var kafkaConsumerConnected = false
 
 fun main() {
     val options = FlagdOptions.builder()
@@ -49,12 +62,54 @@ fun main() {
         subscribe(listOf(topic))
     }
 
+    // Initialize health check service
+    val healthStatusManager = HealthStatusManager()
+    healthStatusManager.setStatus(HealthStatusManager.SERVICE_NAME_ALL_SERVICES, ServingStatus.NOT_SERVING)
+
+    // Configure health port
+    val healthPort = System.getenv("FRAUD_DETECTION_HEALTH_PORT")?.toIntOrNull() ?: DEFAULT_HEALTH_PORT
+    val grpcServer: Server = ServerBuilder.forPort(healthPort)
+        .addService(healthStatusManager.healthService)
+        .build()
+        .start()
+
+    logger.info("Health check server started on port $healthPort")
+
+    // Add shutdown hook
+    Runtime.getRuntime().addShutdownHook(thread(start = false) {
+        logger.info("Received shutdown signal, updating health status to NOT_SERVING")
+        healthStatusManager.setStatus(HealthStatusManager.SERVICE_NAME_ALL_SERVICES, ServingStatus.NOT_SERVING)
+        // Wait for orchestrators to detect status change
+        Thread.sleep(SHUTDOWN_WAIT_MS)
+        grpcServer.shutdown()
+        consumer.close()
+    })
+
+    // Background thread to monitor Kafka health
+    thread(start = true, isDaemon = true) {
+        while (true) {
+            val currentTime = System.currentTimeMillis()
+            val timeSinceLastPoll = currentTime - lastSuccessfulPollTime.get()
+
+            val isHealthy = kafkaConsumerConnected && timeSinceLastPoll < MAX_UNHEALTHY_POLL_INTERVAL_MS
+            val newStatus = if (isHealthy) ServingStatus.SERVING else ServingStatus.NOT_SERVING
+
+            healthStatusManager.setStatus(HealthStatusManager.SERVICE_NAME_ALL_SERVICES, newStatus)
+
+            Thread.sleep(HEALTH_CHECK_INTERVAL_MS)
+        }
+    }
+
     var totalCount = 0L
 
     consumer.use {
         while (true) {
-            totalCount = consumer
-                .poll(ofMillis(100))
+            val records = consumer.poll(ofMillis(POLL_TIMEOUT_MS))
+            if (!records.isEmpty) {
+                kafkaConsumerConnected = true
+                lastSuccessfulPollTime.set(System.currentTimeMillis())
+            }
+            totalCount = records
                 .fold(totalCount) { accumulator, record ->
                     val orders = OrderResult.parseFrom(record.value())
                     
