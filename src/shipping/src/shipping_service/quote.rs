@@ -8,10 +8,94 @@ use std::{collections::HashMap, env};
 
 use anyhow::{Context, Result};
 use opentelemetry::{trace::get_active_span, KeyValue};
-use tracing::info;
+use tracing::{info, error};
 
-use super::shipping_types::Quote;
+use super::shipping_types::{Quote, QuoteRequest, QuoteResponse, QuoteError};
 
+/// Handles incoming quote requests
+pub async fn handle_quote_request(request: QuoteRequest) -> Result<QuoteResponse, QuoteError> {
+    // AC-1: Log incoming request
+    let item_count = request.items.len() as u64;
+    let currency = request.currency.clone();
+    
+    info!(
+        event = "quote_request_received",
+        item_count = item_count,
+        currency = %currency,
+        "Quote request received"
+    );
+    
+    // Validate currency first
+    if currency != "USD" && currency != "EUR" && currency != "GBP" {
+        let err = QuoteError::CurrencyNotSupported(currency.clone());
+        error!(
+            event = "quote_request_failed",
+            error = %err,
+            "Quote request failed"
+        );
+        return Err(err);
+    }
+    
+    // Validate items
+    for item in &request.items {
+        if item.quantity == 0 {
+            let err = QuoteError::InvalidItem(format!("Item {} has zero quantity", item.product_id));
+            error!(
+                event = "quote_request_failed",
+                error = %err,
+                "Quote request failed"
+            );
+            return Err(err);
+        }
+        if item.weight == 0 {
+            let err = QuoteError::InvalidItem(format!("Item {} has zero weight", item.product_id));
+            error!(
+                event = "quote_request_failed",
+                error = %err,
+                "Quote request failed"
+            );
+            return Err(err);
+        }
+    }
+    
+    // Calculate total items count
+    let total_items: u32 = request.items.iter().map(|i| i.quantity).sum();
+    
+    // Call existing quote function
+    let quote = match create_quote_from_count(total_items).await {
+        Ok(q) => q,
+        Err(e) => {
+            let err = if e.code() == tonic::Code::Unavailable {
+                QuoteError::ServiceUnavailable
+            } else {
+                QuoteError::InternalError(e.message().to_string())
+            };
+            error!(
+                event = "quote_request_failed",
+                error = %err,
+                "Quote request failed"
+            );
+            return Err(err);
+        }
+    };
+    
+    // Build response
+    let price_cents = quote.dollars * 100 + quote.cents as u64;
+    let response = QuoteResponse {
+        price_cents,
+        currency: currency.clone(),
+    };
+    
+    // AC-2: Log response
+    info!(
+        event = "quote_response_sent",
+        price_cents = price_cents,
+        currency = %currency,
+        "Quote response sent"
+    );
+    
+    Ok(response)
+}
 pub async fn create_quote_from_count(count: u32) -> Result<Quote, tonic::Status> {
     if count == 0 {
         return Err(tonic::Status::invalid_argument("Count must be positive, got 0"));
