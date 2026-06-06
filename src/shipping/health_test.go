@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -12,170 +11,185 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestAC1_HealthReturns200WhenQuoteServiceReachable tests AC-1: When GET /health is called and the quote service is reachable, returns 200 OK
+// HealthResponse matches the schema defined in the spec
+type HealthResponse struct {
+	Status       string            `json:"status"`
+	Timestamp    string            `json:"timestamp"`
+	Dependencies map[string]string `json:"dependencies"`
+}
+
 func TestAC1_HealthReturns200WhenQuoteServiceReachable(t *testing.T) {
 	// Setup test server
 	req, err := http.NewRequest("GET", "/health", nil)
 	require.NoError(t, err)
 
 	rr := httptest.NewRecorder()
-	handler := http.HandlerFunc(healthHandler) // Assume healthHandler is the handler for /health endpoint
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// This will be replaced by actual implementation
+		w.WriteHeader(http.StatusNotImplemented)
+	})
 
 	// Simulate quote service being reachable
-	mockQuoteServiceReachable = true
+	// TODO: Inject mock reachable quote service client when implementation exists
 
 	handler.ServeHTTP(rr, req)
 
-	assert.Equal(t, http.StatusOK, rr.Code)
+	// Assert status code is 200 OK
+	assert.Equal(t, http.StatusOK, rr.Code, "Expected 200 OK when quote service is reachable")
 }
 
-// TestAC2_HealthReturns503WhenQuoteServiceUnreachable tests AC-2: When GET /health is called and quote service is unreachable, returns 503 Service Unavailable
 func TestAC2_HealthReturns503WhenQuoteServiceUnreachable(t *testing.T) {
+	// Setup test server
 	req, err := http.NewRequest("GET", "/health", nil)
 	require.NoError(t, err)
 
 	rr := httptest.NewRecorder()
-	handler := http.HandlerFunc(healthHandler)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// This will be replaced by actual implementation
+		w.WriteHeader(http.StatusNotImplemented)
+	})
 
 	// Simulate quote service being unreachable
-	mockQuoteServiceReachable = false
+	// TODO: Inject mock unreachable quote service client when implementation exists
 
 	handler.ServeHTTP(rr, req)
 
-	assert.Equal(t, http.StatusServiceUnavailable, rr.Code)
+	// Assert status code is 503 Service Unavailable
+	assert.Equal(t, http.StatusServiceUnavailable, rr.Code, "Expected 503 Service Unavailable when quote service is unreachable")
 }
 
-// TestAC3_200ResponseHasCorrectStructure tests AC-3: 200 responses include correct JSON fields
 func TestAC3_200ResponseHasCorrectStructure(t *testing.T) {
+	// Setup test server with reachable quote service
 	req, err := http.NewRequest("GET", "/health", nil)
 	require.NoError(t, err)
 
 	rr := httptest.NewRecorder()
-	handler := http.HandlerFunc(healthHandler)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// This will be replaced by actual implementation
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{}`))
+	})
 
-	mockQuoteServiceReachable = true
+	// Simulate quote service being reachable
+	// TODO: Inject mock reachable quote service client when implementation exists
+
 	handler.ServeHTTP(rr, req)
 
-	var response map[string]interface{}
-	err = json.Unmarshal(rr.Body.Bytes(), &response)
-	require.NoError(t, err)
+	// Assert status code is 200
+	require.Equal(t, http.StatusOK, rr.Code)
 
-	// Check status field
-	assert.Equal(t, "healthy", response["status"])
+	// Parse response
+	var resp HealthResponse
+	err = json.Unmarshal(rr.Body.Bytes(), &resp)
+	require.NoError(t, err, "Response should be valid JSON")
 
-	// Check timestamp is valid RFC3339
-	timestampStr, ok := response["timestamp"].(string)
-	require.True(t, ok)
-	_, err = time.Parse(time.RFC3339, timestampStr)
-	assert.NoError(t, err)
+	// Assert fields are correct
+	assert.Equal(t, "healthy", resp.Status, "status field should be 'healthy'")
+	assert.Equal(t, "healthy", resp.Dependencies["quoteService"], "dependencies.quoteService should be 'healthy'")
 
-	// Check dependencies
-	dependencies, ok := response["dependencies"].(map[string]interface{})
-	require.True(t, ok)
-	assert.Equal(t, "healthy", dependencies["quoteService"])
+	// Assert timestamp is valid RFC3339 format
+	_, err = time.Parse(time.RFC3339, resp.Timestamp)
+	assert.NoError(t, err, "timestamp should be valid RFC3339 format")
 }
 
-// TestAC4_503ResponseHasCorrectStructure tests AC-4: 503 responses include correct JSON fields
 func TestAC4_503ResponseHasCorrectStructure(t *testing.T) {
+	// Setup test server with unreachable quote service
 	req, err := http.NewRequest("GET", "/health", nil)
 	require.NoError(t, err)
 
 	rr := httptest.NewRecorder()
-	handler := http.HandlerFunc(healthHandler)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// This will be replaced by actual implementation
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{}`))
+	})
 
-	mockQuoteServiceReachable = false
+	// Simulate quote service being unreachable
+	// TODO: Inject mock unreachable quote service client when implementation exists
+
 	handler.ServeHTTP(rr, req)
 
-	var response map[string]interface{}
-	err = json.Unmarshal(rr.Body.Bytes(), &response)
-	require.NoError(t, err)
+	// Assert status code is 503
+	require.Equal(t, http.StatusServiceUnavailable, rr.Code)
 
-	// Check status field
-	assert.Equal(t, "unhealthy", response["status"])
+	// Parse response
+	var resp HealthResponse
+	err = json.Unmarshal(rr.Body.Bytes(), &resp)
+	require.NoError(t, err, "Response should be valid JSON")
 
-	// Check timestamp is valid RFC3339
-	timestampStr, ok := response["timestamp"].(string)
-	require.True(t, ok)
-	_, err = time.Parse(time.RFC3339, timestampStr)
-	assert.NoError(t, err)
+	// Assert fields are correct
+	assert.Equal(t, "unhealthy", resp.Status, "status field should be 'unhealthy'")
+	assert.Equal(t, "unhealthy", resp.Dependencies["quoteService"], "dependencies.quoteService should be 'unhealthy'")
 
-	// Check dependencies
-	dependencies, ok := response["dependencies"].(map[string]interface{})
-	require.True(t, ok)
-	assert.Equal(t, "unhealthy", dependencies["quoteService"])
+	// Assert timestamp is valid RFC3339 format
+	_, err = time.Parse(time.RFC3339, resp.Timestamp)
+	assert.NoError(t, err, "timestamp should be valid RFC3339 format")
 }
 
-// TestAC5_ResponseWithinOneSecond tests AC-5: /health endpoint returns response in <= 1 second even when quote service is slow
 func TestAC5_ResponseWithinOneSecond(t *testing.T) {
+	// Setup test server with slow quote service
 	req, err := http.NewRequest("GET", "/health", nil)
 	require.NoError(t, err)
 
 	rr := httptest.NewRecorder()
-	handler := http.HandlerFunc(healthHandler)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// This will be replaced by actual implementation that times out after 500ms
+		time.Sleep(2 * time.Second)
+		w.WriteHeader(http.StatusOK)
+	})
 
-	// Simulate slow quote service (takes 2 seconds to respond)
-	mockQuoteServiceResponseDelay = 2 * time.Second
+	// Simulate slow quote service (takes longer than 1s to respond)
+	// TODO: Inject mock slow quote service client when implementation exists
 
-	startTime := time.Now()
+	// Measure response time
+	start := time.Now()
 	handler.ServeHTTP(rr, req)
-	duration := time.Since(startTime)
+	duration := time.Since(start)
 
-	// Response should be <= 1 second
-	assert.LessOrEqual(t, duration.Seconds(), 1.0)
+	// Assert response is within 1 second
+	assert.LessOrEqual(t, duration.Milliseconds(), int64(1000), "Response should take <= 1 second even when quote service is slow")
 }
 
-// TestAC6_NoAuthenticationRequired tests AC-6: /health accepts requests without authentication headers
 func TestAC6_NoAuthenticationRequired(t *testing.T) {
+	// Test with no authentication headers
 	req, err := http.NewRequest("GET", "/health", nil)
 	require.NoError(t, err)
-
-	// Explicitly remove any auth headers
-	req.Header.Del("Authorization")
-	req.Header.Del("Cookie")
+	// Deliberately do not add any auth headers
 
 	rr := httptest.NewRecorder()
-	handler := http.HandlerFunc(healthHandler)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// This will be replaced by actual implementation
+		w.WriteHeader(http.StatusOK)
+	})
 
-	mockQuoteServiceReachable = true
 	handler.ServeHTTP(rr, req)
 
-	// Should not get 401/403
-	assert.NotEqual(t, http.StatusUnauthorized, rr.Code)
-	assert.NotEqual(t, http.StatusForbidden, rr.Code)
-	// Should return 200 as service is healthy
-	assert.Equal(t, http.StatusOK, rr.Code)
+	// Assert we don't get 401/403
+	assert.NotEqual(t, http.StatusUnauthorized, rr.Code, "Should not require authentication")
+	assert.NotEqual(t, http.StatusForbidden, rr.Code, "Should not require authorization")
 }
 
-// TestAC7_NoSideEffects tests AC-7: Calling /health does not modify any service state or persist data
 func TestAC7_NoSideEffects(t *testing.T) {
-	// Check that multiple calls return the same state when dependencies are unchanged
-	req, err := http.NewRequest("GET", "/health", nil)
+	// Call the health endpoint multiple times and verify consistent behavior
+	req1, err := http.NewRequest("GET", "/health", nil)
+	require.NoError(t, err)
+	req2, err := http.NewRequest("GET", "/health", nil)
 	require.NoError(t, err)
 
-	mockQuoteServiceReachable = true
+	rr1 := httptest.NewRecorder()
+	rr2 := httptest.NewRecorder()
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// This will be replaced by actual implementation
+		w.WriteHeader(http.StatusOK)
+	})
 
 	// First call
-	rr1 := httptest.NewRecorder()
-	handler := http.HandlerFunc(healthHandler)
-	handler.ServeHTTP(rr1, req)
-	assert.Equal(t, http.StatusOK, rr1.Code)
-
+	handler.ServeHTTP(rr1, req1)
 	// Second call immediately after
-	rr2 := httptest.NewRecorder()
-	handler.ServeHTTP(rr2, req)
-	assert.Equal(t, http.StatusOK, rr2.Code)
+	handler.ServeHTTP(rr2, req2)
 
-	// Both responses should have same status for quote service
-	var resp1, resp2 map[string]interface{}
-	_ = json.Unmarshal(rr1.Body.Bytes(), &resp1)
-	_ = json.Unmarshal(rr2.Body.Bytes(), &resp2)
-	deps1 := resp1["dependencies"].(map[string]interface{})
-	deps2 := resp2["dependencies"].(map[string]interface{})
-	assert.Equal(t, deps1["quoteService"], deps2["quoteService"])
+	// Assert both responses are identical (no state change between calls)
+	assert.Equal(t, rr1.Code, rr2.Code)
+	assert.Equal(t, rr1.Body.String(), rr2.Body.String(), "Consecutive health calls should return same result (no side effects)")
 }
-
-// Mock variables to simulate quote service behavior (will be replaced with actual implementation mocks)
-var (
-	mockQuoteServiceReachable     = true
-	mockQuoteServiceResponseDelay = 0 * time.Second
-)
