@@ -16,6 +16,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -48,15 +49,52 @@ import (
 	flags "github.com/opentelemetry/opentelemetry-demo/src/product-catalog/flags"
 )
 
-type productCatalog struct {
-	pb.UnimplementedProductCatalogServiceServer
-}
-
 var (
 	logger *slog.Logger
 	db     *sql.DB
 	reg    metric.Registration
+	alphanumericRegex = regexp.MustCompile(`^[a-zA-Z0-9]*$`)
 )
+
+func validateGetProductRequest(req *pb.GetProductRequest) error {
+	if req.Id == "" {
+		return status.Error(codes.InvalidArgument, "id must not be empty")
+	}
+	if len(req.Id) > 64 {
+		return status.Errorf(codes.InvalidArgument, "id must not exceed 64 characters, got %d", len(req.Id))
+	}
+	if !alphanumericRegex.MatchString(req.Id) {
+		return status.Error(codes.InvalidArgument, "id must only contain alphanumeric characters")
+	}
+	return nil
+}
+
+func validateListProductsRequest(req *pb.ListProductsRequest) error {
+	if req.PageSize < 1 || req.PageSize > 100 {
+		return status.Errorf(codes.InvalidArgument, "page_size must be between 1 and 100 inclusive, got %d", req.PageSize)
+	}
+	if req.PageToken < 1 {
+		return status.Errorf(codes.InvalidArgument, "page_token must be >= 1, got %d", req.PageToken)
+	}
+	return nil
+}
+
+func validateSearchProductsRequest(req *pb.SearchProductsRequest) error {
+	if len(req.Query) > 256 {
+		return status.Errorf(codes.InvalidArgument, "query must not exceed 256 characters, got %d", len(req.Query))
+	}
+	if req.PageSize < 1 || req.PageSize > 100 {
+		return status.Errorf(codes.InvalidArgument, "page_size must be between 1 and 100 inclusive, got %d", req.PageSize)
+	}
+	if req.PageToken < 1 {
+		return status.Errorf(codes.InvalidArgument, "page_token must be >= 1, got %d", req.PageToken)
+	}
+	return nil
+}
+
+type productCatalog struct {
+	pb.UnimplementedProductCatalogServiceServer
+}
 
 func init() {
 	logger = otelslog.NewLogger("product-catalog")
@@ -344,7 +382,12 @@ func (p *productCatalog) Watch(req *healthpb.HealthCheckRequest, ws healthpb.Hea
 	return status.Errorf(codes.Unimplemented, "health check via Watch not implemented")
 }
 
-func (p *productCatalog) ListProducts(ctx context.Context, req *pb.Empty) (*pb.ListProductsResponse, error) {
+func (p *productCatalog) ListProducts(ctx context.Context, req *pb.ListProductsRequest) (*pb.ListProductsResponse, error) {
+	if err := validateListProductsRequest(req); err != nil {
+		span := trace.SpanFromContext(ctx)
+		span.SetStatus(otelcodes.Error, err.Error())
+		return nil, err
+	}
 	span := trace.SpanFromContext(ctx)
 
 	products, err := loadProductsFromDB(ctx)
@@ -358,10 +401,15 @@ func (p *productCatalog) ListProducts(ctx context.Context, req *pb.Empty) (*pb.L
 	span.SetAttributes(
 		attribute.Int("demo.product.count", len(products)),
 	)
-	return &pb.ListProductsResponse{Products: products}, nil
+	return &pb.ListProductsResponse{Products: products, NextPageToken: 0}, nil
 }
 
 func (p *productCatalog) GetProduct(ctx context.Context, req *pb.GetProductRequest) (*pb.Product, error) {
+	if err := validateGetProductRequest(req); err != nil {
+		span := trace.SpanFromContext(ctx)
+		span.SetStatus(otelcodes.Error, err.Error())
+		return nil, err
+	}
 	span := trace.SpanFromContext(ctx)
 	span.SetAttributes(
 		attribute.String("demo.product.id", req.Id),
@@ -400,6 +448,11 @@ func (p *productCatalog) GetProduct(ctx context.Context, req *pb.GetProductReque
 }
 
 func (p *productCatalog) SearchProducts(ctx context.Context, req *pb.SearchProductsRequest) (*pb.SearchProductsResponse, error) {
+	if err := validateSearchProductsRequest(req); err != nil {
+		span := trace.SpanFromContext(ctx)
+		span.SetStatus(otelcodes.Error, err.Error())
+		return nil, err
+	}
 	span := trace.SpanFromContext(ctx)
 
 	result, err := searchProductsFromDB(ctx, req.Query)
@@ -411,7 +464,7 @@ func (p *productCatalog) SearchProducts(ctx context.Context, req *pb.SearchProdu
 	span.SetAttributes(
 		attribute.Int("demo.product.search.count", len(result)),
 	)
-	return &pb.SearchProductsResponse{Results: result}, nil
+	return &pb.SearchProductsResponse{Results: result, NextPageToken: 0}, nil
 }
 
 func (p *productCatalog) checkProductFailure(ctx context.Context, id string) bool {
