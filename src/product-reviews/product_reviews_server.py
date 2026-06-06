@@ -9,6 +9,10 @@ import os
 import json
 from concurrent import futures
 import random
+import signal
+import asyncio
+from types import FrameType
+from typing import Optional, Any
 
 # Pip
 import grpc
@@ -41,6 +45,10 @@ from metrics import (
 from openai import OpenAI
 
 from google.protobuf.json_format import MessageToJson, MessageToDict
+
+# Global shutdown flag
+shutdown_initiated = False
+logger = logging.getLogger('main')
 
 llm_host = None
 llm_port = None
@@ -329,6 +337,68 @@ def check_feature_flag(flag_name: str):
     client = api.get_client()
     return client.get_boolean_value(flag_name, False)
 
+def handle_shutdown_signal(signum: int, frame: Optional[FrameType]) -> None:
+    global shutdown_initiated
+    if shutdown_initiated:
+        logger.info("Shutdown already in progress, ignoring duplicate signal")
+        return
+    shutdown_initiated = True
+    signal_name = signal.Signals(signum).name
+    logger.info(f"Received shutdown signal ({signal_name}), starting graceful shutdown sequence")
+    # Trigger the graceful shutdown coroutine
+    asyncio.create_task(graceful_shutdown(server, db_connection_pool, pc_channel))
+
+async def graceful_shutdown(
+    server: grpc.aio.Server,
+    db_connection_pool: Any,
+    product_catalog_channel: grpc.aio.Channel,
+    timeout: int = 30
+) -> None:
+    exit_code = 0
+    try:
+        # Stop accepting new connections and wait for in-flight requests to complete
+        logger.info(f"Stopping gRPC server with {timeout}s timeout for in-flight requests")
+        stop_task = asyncio.create_task(server.stop(timeout))
+        done, pending = await asyncio.wait([stop_task], timeout=timeout)
+        if pending:
+            logger.warning(f"Graceful shutdown timed out after {timeout}s, forcing exit")
+            exit_code = 1
+            # Cancel the pending stop task
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+    except Exception as e:
+        logger.error(f"Error stopping gRPC server: {str(e)}", exc_info=True)
+        exit_code = 1
+
+    # Close database connections
+    try:
+        logger.info("Closing all database connections")
+        await db_connection_pool.close()
+        logger.info("Successfully closed all database connections")
+    except Exception as e:
+        logger.error(f"Error closing database connections: {str(e)}", exc_info=True)
+        exit_code = 1
+
+    # Close product catalog channel
+    try:
+        logger.info("Closing product-catalog gRPC channel")
+        await product_catalog_channel.close()
+        logger.info("Successfully closed product-catalog gRPC channel")
+    except Exception as e:
+        logger.error(f"Error closing product-catalog gRPC channel: {str(e)}", exc_info=True)
+        exit_code = 1
+
+    if exit_code == 0:
+        logger.info("Graceful shutdown completed successfully, exiting")
+    else:
+        logger.info(f"Graceful shutdown completed with errors, exiting with code {exit_code}")
+    
+    os._exit(exit_code)
+
 if __name__ == "__main__":
     service_name = must_map_env('OTEL_SERVICE_NAME')
 
@@ -354,11 +424,10 @@ if __name__ == "__main__":
     handler = LoggingHandler(level=logging.NOTSET, logger_provider=logger_provider)
 
     # Attach OTLP handler to logger
-    logger = logging.getLogger('main')
     logger.addHandler(handler)
 
-    # Create gRPC server
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+    # Create async gRPC server
+    server = grpc.aio.server(futures.ThreadPoolExecutor(max_workers=10))
 
     # Add class to gRPC server
     service = ProductReviewService()
@@ -373,12 +442,28 @@ if __name__ == "__main__":
     llm_model = must_map_env('LLM_MODEL')
 
     catalog_addr = must_map_env('PRODUCT_CATALOG_ADDR')
-    pc_channel = grpc.insecure_channel(catalog_addr)
+    pc_channel = grpc.aio.insecure_channel(catalog_addr)
     product_catalog_stub = demo_pb2_grpc.ProductCatalogServiceStub(pc_channel)
+
+    # Dummy database connection pool (current implementation uses per-request connections, no pool)
+    class DummyDBPool:
+        async def close(self):
+            # No-op since we don't have a persistent pool
+            pass
+
+    db_connection_pool = DummyDBPool()
+
+    # Register signal handlers
+    signal.signal(signal.SIGINT, handle_shutdown_signal)
+    signal.signal(signal.SIGTERM, handle_shutdown_signal)
 
     # Start server
     port = must_map_env('PRODUCT_REVIEWS_PORT')
     server.add_insecure_port(f'[::]:{port}')
-    server.start()
-    logger.info(f'Product reviews service started, listening on port {port}')
-    server.wait_for_termination()
+
+    async def serve():
+        await server.start()
+        logger.info(f'Product reviews service started, listening on port {port}')
+        await server.wait_for_termination()
+
+    asyncio.run(serve())
