@@ -9,6 +9,7 @@
 # Python
 import os
 import random
+import json
 from concurrent import futures
 
 # Pip
@@ -37,9 +38,55 @@ from grpc_health.v1 import health_pb2_grpc
 from metrics import (
     init_metrics
 )
-
 cached_ids = []
 first_run = True
+
+# gRPC interceptor to log retry attempts for ProductCatalogService ListProducts calls
+class RetryLoggingInterceptor(grpc.UnaryUnaryClientInterceptor):
+    def __init__(self, logger):
+        self.logger = logger
+
+    def intercept_unary_unary(self, continuation, client_call_details, request):
+        # Only intercept ListProducts calls
+        if client_call_details.method.endswith("oteldemo.ProductCatalogService/ListProducts"):
+            span = trace.get_current_span()
+            attempt = 1
+            def on_retry(call_details, response, error):
+                nonlocal attempt
+                if error is not None:
+                    status_code = error.code().name
+                    status_details = error.details()
+                    # Calculate backoff delay (exponential with jitter: 100ms * 2^(attempt-1) ± 20%)
+                    base_delay = 100 * (2 ** (attempt - 1))
+                    jitter = random.uniform(-0.2, 0.2)
+                    backoff_ms = int(base_delay * (1 + jitter))
+                    
+                    # Get request ID from trace span if available
+                    request_id = span.get_span_context().trace_id if span.is_recording() else None
+                    
+                    self.logger.warning(
+                        f"Product catalog ListProducts retry attempt {attempt} after {status_code} error",
+                        extra={
+                            "event": "product_catalog_retry_attempt",
+                            "attempt_number": attempt,
+                            "error_code": status_code,
+                            "error_message": status_details,
+                            "backoff_delay_ms": backoff_ms,
+                            "request_id": request_id
+                        }
+                    )
+                    attempt += 1
+            # Add retry callback to call options
+            if client_call_details.options is None:
+                client_call_details.options = []
+            client_call_details.options.append(("grpc.on_retry", on_retry))
+        
+        # Add per-call 5s timeout for ListProducts
+        if client_call_details.method.endswith("oteldemo.ProductCatalogService/ListProducts"):
+            if client_call_details.timeout is None:
+                client_call_details.timeout = 5  # 5 seconds per attempt
+        
+        return continuation(client_call_details, request)
 
 class RecommendationService(demo_pb2_grpc.RecommendationServiceServicer):
     def ListRecommendations(self, request, context):
@@ -156,8 +203,39 @@ if __name__ == "__main__":
     logger.addHandler(handler)
 
     catalog_addr = must_map_env('PRODUCT_CATALOG_ADDR')
-    pc_channel = grpc.insecure_channel(catalog_addr)
-    product_catalog_stub = demo_pb2_grpc.ProductCatalogServiceStub(pc_channel)
+    
+    # Configure gRPC channel with resilience settings for ProductCatalogService
+    service_config = json.dumps({
+        "methodConfig": [
+            {
+                "name": [
+                    { "service": "oteldemo.ProductCatalogService", "method": "ListProducts" }
+                ],
+                "timeout": "10s",
+                "retryPolicy": {
+                    "maxAttempts": 3,
+                    "initialBackoff": "0.1s",
+                    "maxBackoff": "1s",
+                    "backoffMultiplier": 2,
+                    "retryableStatusCodes": ["UNAVAILABLE", "RESOURCE_EXHAUSTED", "ABORTED", "INTERNAL", "DEADLINE_EXCEEDED"]
+                }
+            }
+        ]
+    })
+    
+    pc_channel = grpc.insecure_channel(
+        catalog_addr,
+        options=[
+            ("grpc.enable_retries", 1),
+            ("grpc.service_config", service_config),
+            ("grpc.max_receive_message_length", -1),
+        ]
+    )
+    
+    # Add retry logging interceptor
+    retry_interceptor = RetryLoggingInterceptor(logger)
+    intercepted_channel = grpc.intercept_channel(pc_channel, retry_interceptor)
+    product_catalog_stub = demo_pb2_grpc.ProductCatalogServiceStub(intercepted_channel)
 
     # Create gRPC server
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
