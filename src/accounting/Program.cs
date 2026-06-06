@@ -77,7 +77,7 @@ app.MapGet("/ready", async context =>
 
 // Start Kafka consumer in background
 var consumer = app.Services.GetRequiredService<Consumer>();
-_ = Task.Run(() => consumer.StartListening(), app.Lifetime.ApplicationStopping);
+_ = Task.Run(() => consumer.StartListening(app.Lifetime.ApplicationStopping), app.Lifetime.ApplicationStopping);
 
 await app.RunAsync();
 
