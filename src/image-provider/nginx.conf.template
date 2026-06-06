@@ -36,5 +36,18 @@ http {
             access_log  on;           
             allow all;
         }
+
+        location /health {
+            add_header Content-Type text/plain;
+            return 200 "OK\n";
+        }
+
+        location /ready {
+            if (!-f /static/Banner.png) {
+                return 503;
+            }
+            add_header Content-Type text/plain;
+            return 200 "OK\n";
+        }
     }
 }
