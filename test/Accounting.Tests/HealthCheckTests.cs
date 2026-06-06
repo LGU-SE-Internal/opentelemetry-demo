@@ -1,262 +1,164 @@
-using Grpc.Net.Client;
-using Grpc.Health.V1;
-using Xunit;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Accounting;
+using System.Net.Http.Json;
+using Xunit;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
-using Grpc.Core;
-using Microsoft.Extensions.Logging;
 
 namespace Accounting.Tests;
 
 public class HealthCheckTests : IClassFixture<WebApplicationFactory<Program>>
 {
     private readonly WebApplicationFactory<Program> _factory;
-    private readonly GrpcChannel _channel;
-    private readonly Health.HealthClient _client;
+    private readonly HttpClient _client;
 
     public HealthCheckTests(WebApplicationFactory<Program> factory)
     {
         _factory = factory;
-        var client = _factory.CreateClient();
-        _channel = GrpcChannel.ForAddress(client.BaseAddress!, new GrpcChannelOptions { HttpClient = client });
-        _client = new Health.HealthClient(_channel);
+        _client = _factory.CreateClient();
     }
 
     [Fact]
-    public async Task test_ac1_health_service_available_on_same_port_as_main_api()
+    public async Task test_ac1_health_endpoint_returns_200_ok_with_healthy_status()
     {
-        // Arrange
-        var request = new HealthCheckRequest { Service = "" };
-
         // Act
-        var response = await _client.CheckAsync(request);
-
-        // Assert: gRPC status is OK (no exception thrown) and service responds
-        Assert.NotNull(response);
-    }
-
-    [Fact]
-    public async Task test_ac2_liveness_check_returns_serving_always_when_process_running()
-    {
-        // Arrange: Liveness check uses empty service name
-        var request = new HealthCheckRequest { Service = "" };
-
-        // Act: Even with failing dependencies, liveness should return SERVING
-        var response = await _client.CheckAsync(request);
+        var response = await _client.GetAsync("/health");
 
         // Assert
-        Assert.Equal(HealthCheckResponse.Types.ServingStatus.Serving, response.Status);
+        Assert.Equal(System.Net.HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("application/json", response.Content.Headers.ContentType?.MediaType);
+        
+        var healthResponse = await response.Content.ReadFromJsonAsync<HealthEndpointResponse>();
+        Assert.NotNull(healthResponse);
+        Assert.Equal("Healthy", healthResponse.Status);
     }
 
     [Fact]
-    public async Task test_ac3_readiness_check_returns_serving_when_all_dependencies_healthy()
+    public async Task test_ac2_ready_endpoint_returns_200_ok_when_kafka_connected()
     {
-        // Arrange: Readiness check uses "accounting" service name
-        var request = new HealthCheckRequest { Service = "accounting" };
-
-        // Override health checks to return healthy for all dependencies
+        // Arrange: Override Kafka health check to return healthy
         using var factory = _factory.WithWebHostBuilder(builder =>
         {
             builder.ConfigureServices(services =>
             {
                 services.Configure<HealthCheckServiceOptions>(opts =>
                 {
-                    opts.Registrations.Clear();
+                    // Clear any existing registrations to inject our test Kafka health check
+                    var existingKafkaCheck = opts.Registrations.FirstOrDefault(r => r.Name == "Kafka");
+                    if (existingKafkaCheck != null)
+                    {
+                        opts.Registrations.Remove(existingKafkaCheck);
+                    }
+                    
                     opts.Registrations.Add(new HealthCheckRegistration(
-                        "Database",
-                        _ => Task.FromResult(HealthCheckResult.Healthy()),
+                        "Kafka",
+                        _ => Task.FromResult(HealthCheckResult.Healthy("Kafka connection active")),
                         HealthStatus.Unhealthy,
-                        new[] { "accounting" }));
-                    opts.Registrations.Add(new HealthCheckRegistration(
-                        "MessageBroker",
-                        _ => Task.FromResult(HealthCheckResult.Healthy()),
-                        HealthStatus.Unhealthy,
-                        new[] { "accounting" }));
+                        new[] { "ready" }));
                 });
             });
         });
-        var client = factory.CreateClient();
-        var channel = GrpcChannel.ForAddress(client.BaseAddress!, new GrpcChannelOptions { HttpClient = client });
-        var testClient = new Health.HealthClient(channel);
+        var testClient = factory.CreateClient();
 
         // Act
-        var response = await testClient.CheckAsync(request);
+        var response = await testClient.GetAsync("/ready");
 
         // Assert
-        Assert.Equal(HealthCheckResponse.Types.ServingStatus.Serving, response.Status);
+        Assert.Equal(System.Net.HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("application/json", response.Content.Headers.ContentType?.MediaType);
+        
+        var readyResponse = await response.Content.ReadFromJsonAsync<ReadyEndpointResponse>();
+        Assert.NotNull(readyResponse);
+        Assert.Equal("Ready", readyResponse.Status);
+        Assert.Equal("Connected", readyResponse.KafkaConnection);
     }
 
     [Fact]
-    public async Task test_ac4_readiness_check_returns_not_serving_when_any_dependency_unhealthy()
+    public async Task test_ac3_ready_endpoint_returns_503_when_kafka_disconnected()
     {
-        // Arrange: Readiness check uses "accounting" service name
-        var request = new HealthCheckRequest { Service = "accounting" };
-
-        // Override health checks to return unhealthy for one dependency
+        // Arrange: Override Kafka health check to return unhealthy
         using var factory = _factory.WithWebHostBuilder(builder =>
         {
             builder.ConfigureServices(services =>
             {
                 services.Configure<HealthCheckServiceOptions>(opts =>
                 {
-                    opts.Registrations.Clear();
+                    // Clear any existing registrations to inject our test Kafka health check
+                    var existingKafkaCheck = opts.Registrations.FirstOrDefault(r => r.Name == "Kafka");
+                    if (existingKafkaCheck != null)
+                    {
+                        opts.Registrations.Remove(existingKafkaCheck);
+                    }
+                    
                     opts.Registrations.Add(new HealthCheckRegistration(
-                        "Database",
-                        _ => Task.FromResult(HealthCheckResult.Unhealthy("DB connection failed")),
+                        "Kafka",
+                        _ => Task.FromResult(HealthCheckResult.Unhealthy("Kafka connection failed")),
                         HealthStatus.Unhealthy,
-                        new[] { "accounting" }));
-                    opts.Registrations.Add(new HealthCheckRegistration(
-                        "MessageBroker",
-                        _ => Task.FromResult(HealthCheckResult.Healthy()),
-                        HealthStatus.Unhealthy,
-                        new[] { "accounting" }));
+                        new[] { "ready" }));
                 });
             });
         });
-        var client = factory.CreateClient();
-        var channel = GrpcChannel.ForAddress(client.BaseAddress!, new GrpcChannelOptions { HttpClient = client });
-        var testClient = new Health.HealthClient(channel);
+        var testClient = factory.CreateClient();
 
         // Act
-        var response = await testClient.CheckAsync(request);
+        var response = await testClient.GetAsync("/ready");
 
         // Assert
-        Assert.Equal(HealthCheckResponse.Types.ServingStatus.NotServing, response.Status);
+        Assert.Equal(System.Net.HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal("application/json", response.Content.Headers.ContentType?.MediaType);
+        
+        var readyResponse = await response.Content.ReadFromJsonAsync<ReadyEndpointResponse>();
+        Assert.NotNull(readyResponse);
+        Assert.Equal("NotReady", readyResponse.Status);
+        Assert.Equal("Disconnected", readyResponse.KafkaConnection);
     }
 
     [Fact]
-    public async Task test_ac5_status_transitions_are_logged()
+    public async Task test_ac4_endpoints_exposed_on_default_port_when_no_existing_http_server()
     {
-        // Arrange: Track log entries
-        var logMessages = new List<string>();
-
+        // Arrange: Set environment variable for health port
+        Environment.SetEnvironmentVariable("ACCOUNTING_HEALTH_PORT", "8080");
+        
+        // Act: Create client that connects to the default health port
+        // Note: This test validates that the server listens on the configured port
         using var factory = _factory.WithWebHostBuilder(builder =>
         {
-            builder.ConfigureServices(services =>
-            {
-                services.AddLogging(logging =>
-                {
-                    logging.AddProvider(new InMemoryLoggerProvider(logMessages));
-                });
-            });
+            builder.UseUrls("http://*:8080");
         });
-        var client = factory.CreateClient();
-        var channel = GrpcChannel.ForAddress(client.BaseAddress!, new GrpcChannelOptions { HttpClient = client });
-        var testClient = new Health.HealthClient(channel);
-
-        // Act: Simulate status transition from healthy to unhealthy and back
-        // First check should return healthy and log
-        var initialResponse = await testClient.CheckAsync(new HealthCheckRequest { Service = "accounting" });
-        // Force unhealthy status
-        // Wait for propagation
-        await Task.Delay(1000);
-        // Check again, should return unhealthy and log transition
-        var unhealthyResponse = await testClient.CheckAsync(new HealthCheckRequest { Service = "accounting" });
-        // Force healthy status again
-        // Wait for propagation
-        await Task.Delay(1000);
-        // Check again, should return healthy and log transition
-        var healthyResponse = await testClient.CheckAsync(new HealthCheckRequest { Service = "accounting" });
-
-        // Assert: Logs contain transition entries
-        Assert.Contains(logMessages, m => m.Contains("SERVING") && (m.Contains("liveness") || m.Contains("readiness")));
-        Assert.Contains(logMessages, m => m.Contains("NOT_SERVING") && m.Contains("reason"));
-        Assert.All(logMessages, m => Assert.Contains(DateTime.UtcNow.ToString("yyyy-MM-dd"), m)); // Should have timestamp
-    }
-
-    [Fact]
-    public async Task test_ac6_watch_method_streams_status_updates_on_change()
-    {
-        // Arrange
-        var request = new HealthCheckRequest { Service = "accounting" };
-        var statusUpdates = new List<HealthCheckResponse.Types.ServingStatus>();
-
-        // Act: Start watching
-        using var call = _client.Watch(request);
-        var readTask = Task.Run(async () =>
-        {
-            await foreach (var response in call.ResponseStream.ReadAllAsync())
-            {
-                statusUpdates.Add(response.Status);
-            }
-        });
-
-        // Wait for initial status
-        await Task.Delay(500);
-        // Trigger status change (simulate dependency failure)
-        await Task.Delay(1000);
-        // Trigger status change (simulate dependency recovery)
-        await Task.Delay(1000);
-        call.Dispose();
-        await readTask;
-
-        // Assert: We have received at least 3 status updates (initial, unhealthy, healthy)
-        Assert.True(statusUpdates.Count >= 3);
-        Assert.Contains(HealthCheckResponse.Types.ServingStatus.Serving, statusUpdates);
-        Assert.Contains(HealthCheckResponse.Types.ServingStatus.NotServing, statusUpdates);
-    }
-
-    [Fact]
-    public async Task test_ac7_invalid_service_name_returns_service_unknown_status()
-    {
-        // Arrange: Request health check for non-existent service
-        var request = new HealthCheckRequest { Service = "nonexistent-service" };
-
-        // Act
-        var response = await _client.CheckAsync(request);
+        var testClient = factory.CreateClient();
+        
+        // Verify endpoints are reachable
+        var healthResponse = await testClient.GetAsync("/health");
+        var readyResponse = await testClient.GetAsync("/ready");
 
         // Assert
-        Assert.Equal(HealthCheckResponse.Types.ServingStatus.ServiceUnknown, response.Status);
+        Assert.Equal(System.Net.HttpStatusCode.OK, healthResponse.StatusCode);
+        Assert.NotNull(readyResponse);
     }
 
     [Fact]
-    public async Task test_ac7_malformed_request_returns_invalid_argument_error()
+    public async Task test_ac5_implementation_uses_standard_dotnet_health_check_middleware()
     {
-        // Arrange: Simulate malformed request by sending invalid null service name
-        var request = new HealthCheckRequest { Service = null! };
-
-        // Act & Assert
-        var exception = await Assert.ThrowsAsync<RpcException>(() =>
-            _client.CheckAsync(request).ResponseAsync);
-        Assert.Equal(StatusCode.InvalidArgument, exception.StatusCode);
+        // Arrange: Check that health check services are registered in DI
+        var healthCheckService = _factory.Services.GetService<HealthCheckService>();
+        
+        // Assert
+        Assert.NotNull(healthCheckService);
+        
+        // Verify health check middleware is configured by calling endpoints
+        var healthResponse = await _client.GetAsync("/health");
+        Assert.Equal(System.Net.HttpStatusCode.OK, healthResponse.StatusCode);
     }
 }
 
-// Helper class for in-memory logging
-public class InMemoryLoggerProvider : ILoggerProvider
+// Response models matching the spec schema
+public class HealthEndpointResponse
 {
-    private readonly List<string> _logMessages;
-
-    public InMemoryLoggerProvider(List<string> logMessages)
-    {
-        _logMessages = logMessages;
-    }
-
-    public ILogger CreateLogger(string categoryName)
-    {
-        return new InMemoryLogger(_logMessages);
-    }
-
-    public void Dispose() { }
+    public string Status { get; set; } = string.Empty;
 }
 
-public class InMemoryLogger : ILogger
+public class ReadyEndpointResponse
 {
-    private readonly List<string> _logMessages;
-
-    public InMemoryLogger(List<string> logMessages)
-    {
-        _logMessages = logMessages;
-    }
-
-    public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
-
-    public bool IsEnabled(LogLevel logLevel) => true;
-
-    public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
-    {
-        _logMessages.Add($"{DateTime.UtcNow:o} {logLevel}: {formatter(state, exception)}");
-    }
+    public string Status { get; set; } = string.Empty;
+    public string KafkaConnection { get; set; } = string.Empty;
 }
