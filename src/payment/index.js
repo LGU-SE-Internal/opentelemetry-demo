@@ -57,11 +57,108 @@ function getServerCredentials() {
   )
 }
 
+// Luhn algorithm check for credit card number validity
+function luhnCheck(cardNumber) {
+  let sum = 0;
+  let shouldDouble = false;
+  for (let i = cardNumber.length - 1; i >= 0; i--) {
+    let digit = parseInt(cardNumber[i], 10);
+    if (shouldDouble) {
+      digit *= 2;
+      if (digit > 9) digit -= 9;
+    }
+    sum += digit;
+    shouldDouble = !shouldDouble;
+  }
+  return sum % 10 === 0;
+}
+
 async function chargeServiceHandler(call, callback) {
   const span = opentelemetry.trace.getActiveSpan();
 
   try {
-    const amount = call.request.amount
+    const { amount, credit_card_number, credit_card_expiration_month, credit_card_expiration_year, credit_card_cvv } = call.request;
+    
+    // AC-1: Check required fields
+    if (!amount) {
+      const err = new Error("Missing required field: amount");
+      err.code = grpc.status.INVALID_ARGUMENT;
+      throw err;
+    }
+    if (!credit_card_number) {
+      const err = new Error("Missing required field: credit_card_number");
+      err.code = grpc.status.INVALID_ARGUMENT;
+      throw err;
+    }
+    if (credit_card_expiration_month === undefined || credit_card_expiration_month === null) {
+      const err = new Error("Missing required field: credit_card_expiration_month");
+      err.code = grpc.status.INVALID_ARGUMENT;
+      throw err;
+    }
+    if (credit_card_expiration_year === undefined || credit_card_expiration_year === null) {
+      const err = new Error("Missing required field: credit_card_expiration_year");
+      err.code = grpc.status.INVALID_ARGUMENT;
+      throw err;
+    }
+    if (!credit_card_cvv) {
+      const err = new Error("Missing required field: credit_card_cvv");
+      err.code = grpc.status.INVALID_ARGUMENT;
+      throw err;
+    }
+
+    // AC-2: Validate amount units non-negative
+    if (amount.units < 0) {
+      const err = new Error("Invalid amount.units: must be non-negative integer");
+      err.code = grpc.status.INVALID_ARGUMENT;
+      throw err;
+    }
+
+    // AC-3: Validate amount nanos range
+    if (amount.nanos < 0 || amount.nanos > 999999999) {
+      const err = new Error("Invalid amount.nanos: must be between 0 and 999999999 inclusive");
+      err.code = grpc.status.INVALID_ARGUMENT;
+      throw err;
+    }
+
+    // AC-4: Validate credit card number format and Luhn check
+    const cardNumberDigits = credit_card_number.replace(/\D/g, '');
+    if (cardNumberDigits.length < 13 || cardNumberDigits.length > 19) {
+      const err = new Error("Invalid credit_card_number: must be between 13 and 19 digits long");
+      err.code = grpc.status.INVALID_ARGUMENT;
+      throw err;
+    }
+    if (!luhnCheck(cardNumberDigits)) {
+      const err = new Error("Invalid credit_card_number: fails Luhn check");
+      err.code = grpc.status.INVALID_ARGUMENT;
+      throw err;
+    }
+
+    // AC-5: Validate expiration month range
+    if (credit_card_expiration_month < 1 || credit_card_expiration_month > 12) {
+      const err = new Error("Invalid credit_card_expiration_month: must be between 1 and 12 inclusive");
+      err.code = grpc.status.INVALID_ARGUMENT;
+      throw err;
+    }
+
+    // AC-6: Validate expiration date not in past
+    const now = new Date();
+    const currentYear = now.getFullYear();
+    const currentMonth = now.getMonth() + 1; // Months are 0-based in JS
+    if (credit_card_expiration_year < currentYear || 
+        (credit_card_expiration_year === currentYear && credit_card_expiration_month < currentMonth)) {
+      const err = new Error("Invalid credit card expiration date: cannot be in the past");
+      err.code = grpc.status.INVALID_ARGUMENT;
+      throw err;
+    }
+
+    // AC-7: Validate CVV length
+    const cvvDigits = credit_card_cvv.replace(/\D/g, '');
+    if (cvvDigits.length < 3 || cvvDigits.length > 4) {
+      const err = new Error("Invalid credit_card_cvv: must be between 3 and 4 digits long");
+      err.code = grpc.status.INVALID_ARGUMENT;
+      throw err;
+    }
+
     span?.setAttributes({
       'demo.payment.amount': parseFloat(`${amount.units}.${amount.nanos}`).toFixed(2)
     })
