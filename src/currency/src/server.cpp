@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <math.h>
+#include <csignal>
 #include <demo.grpc.pb.h>
 #include <grpc/health/v1/health.grpc.pb.h>
 
@@ -254,6 +255,17 @@ class CurrencyService final : public oteldemo::CurrencyService::Service
   }
 };
 
+// Global server pointer for signal handler access
+std::unique_ptr<Server> g_server;
+
+// Signal handler to trigger graceful shutdown
+void SignalHandler(int signal) {
+  if (g_server) {
+    gpr_timespec timeout = {10, 0, GPR_TIMESPAN};
+    g_server->Shutdown(timeout);
+  }
+}
+
 void RunServer(uint16_t port)
 {
   std::string ip("0.0.0.0");
@@ -275,10 +287,15 @@ void RunServer(uint16_t port)
   builder.RegisterService(&healthService);
   builder.AddListeningPort(address, grpc::InsecureServerCredentials());
 
-  std::unique_ptr<Server> server(builder.BuildAndStart());
+  g_server = std::unique_ptr<Server>(builder.BuildAndStart());
   logger->Info("Currency Server listening on port: " + address);
-  server->Wait();
-  server->Shutdown();
+
+  // Register signal handlers for SIGINT and SIGTERM
+  std::signal(SIGINT, SignalHandler);
+  std::signal(SIGTERM, SignalHandler);
+
+  g_server->Wait();
+  g_server->Shutdown();
 }
 }
 
