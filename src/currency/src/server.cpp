@@ -7,6 +7,9 @@
 #include <csignal>
 #include <demo.grpc.pb.h>
 #include <grpc/health/v1/health.grpc.pb.h>
+#include <thread>
+#include <atomic>
+#include "httplib.h"
 
 #include "opentelemetry/trace/context.h"
 #include "opentelemetry/semconv/incubating/rpc_attributes.h"
@@ -257,9 +260,17 @@ class CurrencyService final : public oteldemo::CurrencyService::Service
 
 // Global server pointer for signal handler access
 std::unique_ptr<Server> g_server;
+std::unique_ptr<httplib::Server> g_http_server;
+std::atomic<bool> g_is_healthy{true};
+std::atomic<bool> g_is_ready{false};
 
 // Signal handler to trigger graceful shutdown
 void SignalHandler(int signal) {
+  g_is_healthy = false;
+  g_is_ready = false;
+  if (g_http_server) {
+    g_http_server->stop();
+  }
   if (g_server) {
     gpr_timespec timeout = {10, 0, GPR_TIMESPAN};
     g_server->Shutdown(timeout);
@@ -268,6 +279,40 @@ void SignalHandler(int signal) {
 
 void RunServer(uint16_t port)
 {
+  // Start HTTP health server first
+  uint16_t health_port = 8081;
+  const char* health_port_env = std::getenv("CURRENCY_SERVICE_HEALTH_PORT");
+  if (health_port_env) {
+    int p = atoi(health_port_env);
+    if (p > 0 && p <= 65535) {
+      health_port = static_cast<uint16_t>(p);
+    }
+  }
+  
+  g_http_server = std::make_unique<httplib::Server>();
+  
+  g_http_server->Get("/health", [](const httplib::Request&, httplib::Response& res) {
+    if (g_is_healthy.load()) {
+      res.status = 200;
+    } else {
+      res.status = 503;
+    }
+  });
+  
+  g_http_server->Get("/ready", [](const httplib::Request&, httplib::Response& res) {
+    if (g_is_ready.load()) {
+      res.status = 200;
+    } else {
+      res.status = 503;
+    }
+  });
+  
+  std::thread http_thread([health_port]() {
+    g_http_server->listen("0.0.0.0", health_port);
+  });
+
+  logger->Info("HTTP health server listening on port: " + std::to_string(health_port));
+
   std::string ip("0.0.0.0");
 
   const char* ipv6_enabled = std::getenv("IPV6_ENABLED");
@@ -289,12 +334,19 @@ void RunServer(uint16_t port)
 
   g_server = std::unique_ptr<Server>(builder.BuildAndStart());
   logger->Info("Currency Server listening on port: " + address);
+  
+  // Service is now ready
+  g_is_ready = true;
 
   // Register signal handlers for SIGINT and SIGTERM
   std::signal(SIGINT, SignalHandler);
   std::signal(SIGTERM, SignalHandler);
 
   g_server->Wait();
+  g_is_ready = false;
+  g_is_healthy = false;
+  g_http_server->stop();
+  http_thread.join();
   g_server->Shutdown();
 }
 }
