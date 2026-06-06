@@ -63,6 +63,7 @@ import dev.openfeature.sdk.EvaluationContext;
 import dev.openfeature.sdk.MutableContext;
 import dev.openfeature.sdk.OpenFeatureAPI;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 
 
 public final class AdService {
@@ -76,6 +77,7 @@ public final class AdService {
   private HealthStatusManager healthMgr;
   private HTTPServer prometheusServer;
   private volatile boolean isReady = false;
+  private final AtomicInteger inFlightRequests = new AtomicInteger(0);
 
   private static class HealthHttpHandler extends ChannelInboundHandlerAdapter {
     private final AdService service;
@@ -222,11 +224,55 @@ public final class AdService {
   }
 
   private void stop() {
-    if (server != null) {
-      healthMgr.clearStatus("");
-      server.shutdown();
+    // Get configured shutdown timeout
+    int shutdownTimeoutSeconds = 10;
+    String timeoutEnv = System.getenv("AD_SERVICE_SHUTDOWN_TIMEOUT_SECONDS");
+    if (timeoutEnv != null && !timeoutEnv.isEmpty()) {
+      try {
+        shutdownTimeoutSeconds = Integer.parseInt(timeoutEnv);
+        if (shutdownTimeoutSeconds < 1) {
+          logger.warn("Invalid AD_SERVICE_SHUTDOWN_TIMEOUT_SECONDS value {}, using default 10s", shutdownTimeoutSeconds);
+          shutdownTimeoutSeconds = 10;
+        }
+      } catch (NumberFormatException e) {
+        logger.warn("Failed to parse AD_SERVICE_SHUTDOWN_TIMEOUT_SECONDS value '{}', using default 10s", timeoutEnv, e);
+        shutdownTimeoutSeconds = 10;
+      }
     }
+    final int finalTimeout = shutdownTimeoutSeconds;
+    int remainingRequests = inFlightRequests.get();
+    logger.info("Shutdown initiated, timeout: {} seconds, remaining in-flight requests: {}", finalTimeout, remainingRequests);
+
+    if (server != null) {
+      // Step 1: Set health check to NOT_SERVING immediately
+      healthMgr.setStatus("", ServingStatus.NOT_SERVING);
+      // Also update readiness status
+      isReady = false;
+      
+      // Step 2: Initiate graceful shutdown
+      server.shutdown();
+      
+      try {
+        // Step 3: Wait for in-flight requests to complete
+        boolean terminated = server.awaitTermination(finalTimeout, java.util.concurrent.TimeUnit.SECONDS);
+        remainingRequests = inFlightRequests.get();
+        if (terminated) {
+          logger.info("Successful graceful shutdown, remaining in-flight requests: {}", remainingRequests);
+        } else {
+          logger.info("Shutdown timeout of {} seconds reached, force terminating with {} remaining in-flight requests", finalTimeout, remainingRequests);
+          server.shutdownNow();
+        }
+      } catch (InterruptedException e) {
+        remainingRequests = inFlightRequests.get();
+        logger.warn("Shutdown interrupted after {} seconds, force terminating with {} remaining in-flight requests", finalTimeout, remainingRequests, e);
+        server.shutdownNow();
+        Thread.currentThread().interrupt();
+      }
+    }
+
+    // Step 4: Shut down prometheus metrics server gracefully
     if (prometheusServer != null) {
+      logger.info("Shutting down prometheus metrics server");
       prometheusServer.stop();
     }
   }
@@ -260,7 +306,9 @@ public final class AdService {
     @Override
     public void getAds(AdRequest req, StreamObserver<AdResponse> responseObserver) {
       AdService service = AdService.getInstance();
-
+      int inFlight = service.inFlightRequests.incrementAndGet();
+      logger.debug("Incremented in-flight requests, current count: {}", inFlight);
+      
       // get the current span in context
       Span span = Span.current();
       try {
@@ -336,6 +384,9 @@ public final class AdService {
         span.setStatus(StatusCode.ERROR);
         logger.log(Level.WARN, "GetAds Failed with status {}", e.getStatus());
         responseObserver.onError(e);
+      } finally {
+        int after = service.inFlightRequests.decrementAndGet();
+        logger.debug("Decremented in-flight requests, current count: {}", after);
       }
     }
   }
