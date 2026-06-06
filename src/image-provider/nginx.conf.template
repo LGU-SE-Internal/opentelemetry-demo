@@ -15,6 +15,17 @@ http {
     otel_service_name ${OTEL_SERVICE_NAME};
     otel_span_name image-provider;
 
+    # Map to get real client IP from X-Forwarded-For or remote_addr
+    map $http_x_forwarded_for $real_client_ip {
+        default $remote_addr;
+        ~^(?P<first_ip>[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+) $first_ip;
+    }
+
+    # Rate limit zone configuration
+    limit_req_zone $real_client_ip zone=image_rate_limit:10m rate=${NGINX_RATE_LIMIT_RPS:-10}r/s;
+
+    # Custom 429 error page handler
+    error_page 429 @rate_limit_exceeded;
 
     include mime.types;
     sendfile on;
@@ -35,6 +46,24 @@ http {
             stub_status on;
             access_log  on;           
             allow all;
+        }
+
+        # Rate limit image assets only
+        location ~* \.(png|jpg|jpeg|gif|webp|svg)$ {
+            limit_req zone=image_rate_limit burst=5 nodelay;
+            try_files $uri =404;
+        }
+
+        # Serve all other static assets without rate limit
+        location / {
+            try_files $uri =404;
+        }
+
+        # Rate limit exceeded response
+        location @rate_limit_exceeded {
+            add_header Retry-After 1 always;
+            default_type text/plain;
+            return 429 "Too Many Requests - Please try again later";
         }
     }
 }
