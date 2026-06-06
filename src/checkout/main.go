@@ -156,6 +156,12 @@ type checkout struct {
 	httpClient              *http.Client
 }
 
+func setupSignalHandler() chan os.Signal {
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	return sigChan
+}
+
 func main() {
 	var port string
 	mustMapEnv(&port, "CHECKOUT_PORT")
@@ -310,6 +316,7 @@ func main() {
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%s", port))
 	if err != nil {
 		logger.Error(err.Error())
+		os.Exit(1)
 	}
 
 	srv := grpc.NewServer(
@@ -321,40 +328,71 @@ func main() {
 	// Mark service as serving once all initialization is complete
 	healthcheck.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
 
-	// Start HTTP server in goroutine
-	go func() {
-		logger.Info(fmt.Sprintf("HTTP health endpoints listening on port %s", httpPort))
-		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error(fmt.Sprintf("HTTP server failed: %v", err))
-		}
-	}()
-
 	logger.Info(fmt.Sprintf("starting to listen on tcp: %q", lis.Addr().String()))
 	logger.Info(fmt.Sprintf("Checkout service started on port %s", port))
-	err = srv.Serve(lis)
-	logger.Error(err.Error())
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGKILL)
-	defer cancel()
-
+	// Start gRPC server in goroutine
 	go func() {
 		if err := srv.Serve(lis); err != nil {
-			logger.Error(err.Error())
+			logger.Error(fmt.Sprintf("gRPC server failed: %v", err))
 		}
 	}()
 
-	<-ctx.Done()
+	// Wait for shutdown signal
+	sigChan := setupSignalHandler()
+	<-sigChan
+	logger.Info("Received shutdown signal, initiating graceful shutdown")
 
-	srv.GracefulStop()
-	logger.Info("Checkout gRPC server stopped")
+	// Create shutdown context with 15 second timeout
+	ctxShutdown, cancelShutdown := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancelShutdown()
+
+	// Stop gRPC server gracefully
+	gracefulStopChan := make(chan struct{})
+	go func() {
+		srv.GracefulStop()
+		close(gracefulStopChan)
+	}()
 
 	// Shutdown HTTP server gracefully
-	ctxShutdown, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancelShutdown()
-	if err := httpServer.Shutdown(ctxShutdown); err != nil {
-		logger.Error(fmt.Sprintf("HTTP server shutdown failed: %v", err))
+	var httpShutdownErr error
+	httpShutdownChan := make(chan struct{})
+	go func() {
+		httpShutdownErr = httpServer.Shutdown(ctxShutdown)
+		close(httpShutdownChan)
+	}()
+
+	// Wait for either shutdown complete or timeout
+	select {
+	case <-gracefulStopChan:
+		<-httpShutdownChan
+		logger.Info("All in-flight requests completed, closing resources")
+	case <-ctxShutdown.Done():
+		logger.Warn("Shutdown timeout reached, force closing active connections")
+		srv.Stop()
+		if httpShutdownErr == nil {
+			httpShutdownErr = httpServer.Close()
+		}
 	}
-	logger.Info("Checkout HTTP server stopped")
+
+	if httpShutdownErr != nil {
+		logger.Error(fmt.Sprintf("HTTP server shutdown failed: %v", httpShutdownErr))
+	}
+
+	// Close Kafka producer if it exists
+	if svc.KafkaProducerClient != nil {
+		if err := svc.KafkaProducerClient.Close(); err != nil {
+			logger.Error(fmt.Sprintf("Failed to close Kafka connection: %v", err))
+		}
+	}
+
+	logger.Info("Graceful shutdown completed successfully")
+
+	// Exit with appropriate code
+	if ctxShutdown.Err() == context.DeadlineExceeded {
+		os.Exit(1)
+	}
+	os.Exit(0)
 }
 
 func mustMapEnv(target *string, envKey string) {
