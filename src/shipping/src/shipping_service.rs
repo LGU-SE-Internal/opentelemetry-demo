@@ -1,7 +1,12 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use actix_web::{post, web, HttpResponse, Responder};
+use actix_web::{get, post, web, HttpResponse, Responder};
+use chrono::Utc;
+use serde::Serialize;
+use std::time::Duration;
+use awc::Client;
+use std::env;
 use open_feature::provider::FeatureProvider;
 use open_feature::EvaluationContext;
 use tracing::{info, warn};
@@ -155,7 +160,7 @@ struct Dependencies {
 }
 
 #[get("/health")]
-async fn health() -> impl Responder {
+pub async fn health() -> impl Responder {
     let quote_service_healthy = check_quote_service().await;
     
     let (status, http_status, quote_status) = if quote_service_healthy {
@@ -178,10 +183,19 @@ async fn health() -> impl Responder {
 }
 
 async fn check_quote_service() -> bool {
-    // TODO: Implement actual gRPC health check to quote service with 500ms timeout
+    let quote_service_addr: String = env::var("QUOTE_ADDR")
+        .unwrap_or_else(|_| "http://quote:8090".to_string());
+    
+    let client = Client::builder()
+        .timeout(Duration::from_millis(400))
+        .finish();
+    
+    // Send a simple HEAD request to check if the service is reachable
     tokio::time::timeout(Duration::from_millis(500), async {
-        // Placeholder - will replace with actual gRPC call
-        true
+        match client.head(quote_service_addr).send().await {
+            Ok(_) => true,
+            Err(_) => false
+        }
     }).await.unwrap_or(false)
 }
 
