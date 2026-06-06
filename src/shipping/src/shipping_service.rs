@@ -1,19 +1,47 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use actix_web::{post, web, HttpResponse, Responder};
+use actix_web::{get, post, web, HttpResponse, Responder};
+use serde::Serialize;
 use open_feature::provider::FeatureProvider;
 use open_feature::EvaluationContext;
 use tracing::{info, warn};
 
 mod quote;
-use quote::create_quote_from_count;
+use quote::{check_quote_service_health, create_quote_from_count};
 
 mod tracking;
 use tracking::create_tracking_id;
-
 mod shipping_types;
 pub use shipping_types::*;
+
+#[derive(Serialize)]
+struct HealthResponse {
+    status: &'static str,
+    dependencies: Dependencies,
+}
+
+#[derive(Serialize)]
+struct Dependencies {
+    quote_service: &'static str,
+}
+
+#[get("/health")]
+pub async fn health_check() -> impl Responder {
+    let quote_up = check_quote_service_health().await;
+    let (status, quote_status, http_status) = if quote_up {
+        ("healthy", "up", HttpResponse::Ok())
+    } else {
+        ("unhealthy", "down", HttpResponse::ServiceUnavailable())
+    };
+
+    http_status.json(HealthResponse {
+        status,
+        dependencies: Dependencies {
+            quote_service: quote_status,
+        },
+    })
+}
 
 const NANOS_MULTIPLE: u32 = 10000000u32;
 
