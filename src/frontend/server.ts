@@ -36,7 +36,7 @@ function createShutdownEvent(subtype: ShutdownEvent['event_subtype'], details: R
 export function setupShutdownHandlers(server: NextServer, config: ShutdownConfig): void {
   let isShuttingDown = false;
   let activeRequests = 0;
-  const startTime = Date.now();
+  let completedRequests = 0;
 
   const upstreamClients = [
     (global as any).productCatalogClient,
@@ -47,12 +47,13 @@ export function setupShutdownHandlers(server: NextServer, config: ShutdownConfig
   const shutdown = async (signal: string) => {
     if (isShuttingDown) return;
     isShuttingDown = true;
+    const startTime = Date.now();
 
     config.logger.info(createShutdownEvent("signal_received", { signal }), `Received ${signal}, starting graceful shutdown`);
 
     // Stop accepting new connections
     config.logger.info(createShutdownEvent("new_connections_blocked"), "Stopping accepting new connections");
-    server.server?.close();
+    (server as any).server?.close();
 
     // Set up hard timeout
     const timeout = setTimeout(() => {
@@ -91,7 +92,7 @@ export function setupShutdownHandlers(server: NextServer, config: ShutdownConfig
     config.logger.info(
       createShutdownEvent("shutdown_complete", {
         durationMs,
-        completedRequests: 0
+        completedRequests
       }),
       `Shutdown complete after ${durationMs}ms`
     );
@@ -100,11 +101,12 @@ export function setupShutdownHandlers(server: NextServer, config: ShutdownConfig
   };
 
   // Track active requests
-  server.server?.on('request', (req, res) => {
+  (server as any).server?.on('request', (req: any, res: any) => {
     if (!isShuttingDown) {
       activeRequests++;
       res.on('finish', () => {
         activeRequests--;
+        completedRequests++;
       });
       res.on('close', () => {
         activeRequests--;
@@ -123,6 +125,9 @@ app.prepare().then(() => {
   }).listen(port);
 
   console.log(`> Server listening at http://localhost:${port} as ${dev ? 'development' : process.env.NODE_ENV}`);
+
+  // Assign the http server to the Next.js app instance
+  (app as any).server = httpServer;
 
   // Set up shutdown handlers
   const logger = {
