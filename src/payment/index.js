@@ -309,5 +309,8 @@ process.once('SIGTERM', closeGracefully)
 
 module.exports = {
   getServerCredentials,
-  app: app
+  app: app,
+  rateLimitInterceptor,
+  configuredRateLimit,
+  rateLimiter
 }
