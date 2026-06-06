@@ -60,3 +60,4 @@ src/shipping/target/
 test/tracetesting/tracetesting-vars.yaml
 
 !src/currency/build
+.agentm/
