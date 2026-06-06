@@ -222,11 +222,52 @@ public final class AdService {
   }
 
   private void stop() {
-    if (server != null) {
-      healthMgr.clearStatus("");
-      server.shutdown();
+    // Get configured shutdown timeout
+    int shutdownTimeoutSeconds = 10;
+    String timeoutEnv = System.getenv("AD_SERVICE_SHUTDOWN_TIMEOUT_SECONDS");
+    if (timeoutEnv != null && !timeoutEnv.isEmpty()) {
+      try {
+        shutdownTimeoutSeconds = Integer.parseInt(timeoutEnv);
+        if (shutdownTimeoutSeconds < 1) {
+          logger.warn("Invalid AD_SERVICE_SHUTDOWN_TIMEOUT_SECONDS value {}, using default 10s", shutdownTimeoutSeconds);
+          shutdownTimeoutSeconds = 10;
+        }
+      } catch (NumberFormatException e) {
+        logger.warn("Failed to parse AD_SERVICE_SHUTDOWN_TIMEOUT_SECONDS value '{}', using default 10s", timeoutEnv, e);
+        shutdownTimeoutSeconds = 10;
+      }
     }
+    final int finalTimeout = shutdownTimeoutSeconds;
+    logger.info("Shutdown initiated, timeout: {} seconds", finalTimeout);
+
+    if (server != null) {
+      // Step 1: Set health check to NOT_SERVING immediately
+      healthMgr.setStatus("", ServingStatus.NOT_SERVING);
+      // Also update readiness status
+      isReady = false;
+      
+      // Step 2: Initiate graceful shutdown
+      server.shutdown();
+      
+      try {
+        // Step 3: Wait for in-flight requests to complete
+        boolean terminated = server.awaitTermination(finalTimeout, java.util.concurrent.TimeUnit.SECONDS);
+        if (terminated) {
+          logger.info("Successful graceful shutdown, 0 remaining in-flight requests");
+        } else {
+          logger.info("Shutdown timeout reached, force terminating remaining requests");
+          server.shutdownNow();
+        }
+      } catch (InterruptedException e) {
+        logger.warn("Shutdown interrupted, force terminating server", e);
+        server.shutdownNow();
+        Thread.currentThread().interrupt();
+      }
+    }
+
+    // Step 4: Shut down prometheus metrics server gracefully
     if (prometheusServer != null) {
+      logger.info("Shutting down prometheus metrics server");
       prometheusServer.stop();
     }
   }
