@@ -6,9 +6,56 @@ const health = require('grpc-js-health-check')
 const opentelemetry = require('@opentelemetry/api')
 const express = require('express')
 const fs = require('fs')
+const { RateLimiterMemory } = require('rate-limiter-flexible')
 
 const charge = require('./charge')
 const logger = require('./logger')
+
+// Rate limit configuration
+const RATE_LIMIT_ENV_VAR = 'PAYMENT_SERVICE_CHARGE_RATE_LIMIT_RPS'
+const rateLimitRps = parseInt(process.env[RATE_LIMIT_ENV_VAR], 10)
+const configuredRateLimit = isNaN(rateLimitRps) ? 10 : rateLimitRps
+const rateLimiter = configuredRateLimit > 0 ? new RateLimiterMemory({
+  points: configuredRateLimit,
+  duration: 1, // per second
+}) : null
+
+function getClientIp(call) {
+  const peer = call.getPeer()
+  // Peer format is typically ipv4:address:port or ipv6:[address]:port
+  if (peer.startsWith('ipv4:')) {
+    return peer.split(':')[1]
+  } else if (peer.startsWith('ipv6:')) {
+    return peer.split(']:')[0].substring(5)
+  }
+  return peer
+}
+
+async function rateLimitInterceptor(call, callback, next) {
+  const endpoint = call.getPath()
+  // Only apply rate limit to Charge endpoint
+  if (endpoint !== '/oteldemo.PaymentService/Charge' || !rateLimiter) {
+    return next(call, callback)
+  }
+
+  const clientIp = getClientIp(call)
+  try {
+    await rateLimiter.consume(clientIp)
+    return next(call, callback)
+  } catch (rejRes) {
+    // Rate limit exceeded
+    logger.warn({
+      event: 'rate_limit_exceeded',
+      client_ip: clientIp,
+      endpoint: endpoint,
+      limit_rps: configuredRateLimit,
+      timestamp: new Date().toISOString()
+    })
+    const err = new Error("Rate limit exceeded. Try again later.")
+    err.code = grpc.status.RESOURCE_EXHAUSTED
+    return callback(err)
+  }
+}
 
 function getServerCredentials() {
   const tlsCertPath = process.env.PAYMENT_SERVICE_TLS_CERT_PATH
@@ -181,7 +228,9 @@ async function closeGracefully(signal) {
 }
 
 const otelDemoPackage = grpc.loadPackageDefinition(protoLoader.loadSync('demo.proto'))
-const server = new grpc.Server()
+const server = new grpc.Server({
+  interceptors: [rateLimitInterceptor]
+})
 
 server.addService(health.service, new health.Implementation({
   '': health.servingStatus.SERVING
