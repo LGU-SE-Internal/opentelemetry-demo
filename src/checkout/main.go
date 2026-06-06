@@ -159,6 +159,11 @@ type checkout struct {
 func main() {
 	var port string
 	mustMapEnv(&port, "CHECKOUT_PORT")
+	// Get HTTP port for health endpoints, default to 8080 if not set
+	httpPort := os.Getenv("CHECKOUT_HTTP_PORT")
+	if httpPort == "" {
+		httpPort = "8080"
+	}
 
 	tp := initTracerProvider()
 	defer func() {
@@ -264,6 +269,54 @@ func main() {
 
 	healthcheck := health.NewServer()
 	healthpb.RegisterHealthServer(srv, healthcheck)
+	// Mark service as serving once all initialization is complete
+	healthcheck.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+
+	// Set up HTTP health endpoints
+	mux := http.NewServeMux()
+
+	// Health endpoint - always returns 200 when service is running
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
+
+	// Ready endpoint - uses gRPC health check status
+	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+
+		resp, err := healthcheck.Check(ctx, &healthpb.HealthCheckRequest{})
+		if err != nil || resp.Status != healthpb.HealthCheckResponse_SERVING {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte("NOT_READY"))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("READY"))
+	})
+
+	httpServer := &http.Server{
+		Addr:    fmt.Sprintf(":%s", httpPort),
+		Handler: mux,
+	}
+
+	// Start HTTP server in goroutine
+	go func() {
+		logger.Info(fmt.Sprintf("HTTP health endpoints listening on port %s", httpPort))
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error(fmt.Sprintf("HTTP server failed: %v", err))
+		}
+	}()
+
 	logger.Info(fmt.Sprintf("starting to listen on tcp: %q", lis.Addr().String()))
 	logger.Info(fmt.Sprintf("Checkout service started on port %s", port))
 	err = srv.Serve(lis)
@@ -282,6 +335,14 @@ func main() {
 
 	srv.GracefulStop()
 	logger.Info("Checkout gRPC server stopped")
+
+	// Shutdown HTTP server gracefully
+	ctxShutdown, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelShutdown()
+	if err := httpServer.Shutdown(ctxShutdown); err != nil {
+		logger.Error(fmt.Sprintf("HTTP server shutdown failed: %v", err))
+	}
+	logger.Info("Checkout HTTP server stopped")
 }
 
 func mustMapEnv(target *string, envKey string) {
