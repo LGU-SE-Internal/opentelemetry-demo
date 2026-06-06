@@ -5,7 +5,7 @@ use actix_web::{get, post, web, HttpResponse, Responder};
 use serde::Serialize;
 use open_feature::provider::FeatureProvider;
 use open_feature::EvaluationContext;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 mod quote;
 use quote::{check_quote_service_health, create_quote_from_count};
@@ -48,10 +48,24 @@ const NANOS_MULTIPLE: u32 = 10000000u32;
 #[post("/get-quote")]
 pub async fn get_quote(req: web::Json<GetQuoteRequest>) -> impl Responder {
     let itemct: u32 = req.items.iter().map(|item| item.quantity as u32).sum();
+    
+    // Log incoming quote request (AC-1)
+    info!(
+        event = "quote_request_received",
+        item_count = itemct,
+        currency = "USD",
+        "Quote request received"
+    );
 
     let quote = match create_quote_from_count(itemct).await {
         Ok(q) => q,
         Err(e) => {
+            // Log quote error (AC-3)
+            error!(
+                event = "quote_request_failed",
+                error = %e,
+                "Quote request failed"
+            );
             return HttpResponse::InternalServerError().body(format!("Failed to get quote: {}", e));
         }
     };
@@ -63,6 +77,15 @@ pub async fn get_quote(req: web::Json<GetQuoteRequest>) -> impl Responder {
             nanos: quote.cents * NANOS_MULTIPLE,
         }),
     };
+
+    // Log quote response (AC-2)
+    let price_cents = quote.dollars * 100 + quote.cents as u64;
+    info!(
+        event = "quote_response_sent",
+        price_cents = price_cents,
+        currency = "USD",
+        "Quote response sent"
+    );
 
     info!(
         name = "SendingQuoteValue",
