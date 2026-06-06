@@ -4,7 +4,13 @@
   "repository": "https://github.com/opentelemetry/opentelemetry-demo",
   "main": "index.js",
   "scripts": {
-    "start": "node --require ./opentelemetry.js index.js"
+    "start": "node --require ./opentelemetry.js index.js",
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js test/**/*.test.js"
+  },
+  "jest": {
+    "transformIgnorePatterns": [
+      "node_modules/(?!uuid)"
+    ]
   },
   "author": "Jonathan Lui",
   "license": "ISC",
@@ -26,6 +32,7 @@
     "@opentelemetry/resources": "2.7.1",
     "@opentelemetry/sdk-metrics": "2.7.1",
     "@opentelemetry/sdk-node": "0.218.0",
+    "express": "^5.2.1",
     "grpc-js-health-check": "1.2.2",
     "pino": "^10.3.1",
     "pino-opentelemetry-transport": "^3.0.0",
@@ -36,5 +43,9 @@
     "@opentelemetry/otlp-transformer": {
       "protobufjs": "8.2.0"
     }
+  },
+  "devDependencies": {
+    "jest": "^30.4.2",
+    "supertest": "^7.2.2"
   }
 }
