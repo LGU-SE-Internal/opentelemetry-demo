@@ -41,10 +41,40 @@ private val logger: Logger = LogManager.getLogger(groupID)
 private val lastSuccessfulPollTime = AtomicLong(0)
 private var kafkaConsumerConnected = false
 
+data class FlagdClientConfig(
+    val connectionTimeoutMs: Int,
+    val requestTimeoutMs: Int,
+    val maxRetryAttempts: Int
+) {
+    companion object {
+        fun load(): FlagdClientConfig {
+            return FlagdClientConfig(
+                connectionTimeoutMs = System.getProperty("FLAGD_CONNECTION_TIMEOUT_MS")?.toIntOrNull() 
+                    ?: System.getenv("FLAGD_CONNECTION_TIMEOUT_MS")?.toIntOrNull() 
+                    ?: 2000,
+                requestTimeoutMs = System.getProperty("FLAGD_REQUEST_TIMEOUT_MS")?.toIntOrNull() 
+                    ?: System.getenv("FLAGD_REQUEST_TIMEOUT_MS")?.toIntOrNull() 
+                    ?: 1000,
+                maxRetryAttempts = System.getProperty("FLAGD_RETRY_MAX_ATTEMPTS")?.toIntOrNull() 
+                    ?: System.getenv("FLAGD_RETRY_MAX_ATTEMPTS")?.toIntOrNull() 
+                    ?: 2
+            )
+        }
+    }
+}
+
 fun main() {
+    val flagdConfig = FlagdClientConfig.load()
+    
     val options = FlagdOptions.builder()
-    .withGlobalTelemetry(true)
-    .build()
+        .withGlobalTelemetry(true)
+        .withDeadline(flagdConfig.requestTimeoutMs)
+        .withConnectTimeout(flagdConfig.connectionTimeoutMs)
+        .withMaxRetries(flagdConfig.maxRetryAttempts)
+        .withRetryBackoffMultiplier(2.0) // Exponential backoff
+        .withInitialRetryDelay(100) // Initial delay 100ms
+        .withMaxRetryDelay(1000) // Max delay 1s
+        .build()
     val flagdProvider = FlagdProvider(options)
     OpenFeatureAPI.getInstance().setProvider(flagdProvider)
 
@@ -152,6 +182,18 @@ fun getFeatureFlagValue(ff: String): Int {
     val clientAttrs = mutableMapOf<String, Value>()
     clientAttrs["session"] = Value(uuid.toString())
     client.evaluationContext = ImmutableContext(clientAttrs)
-    val intValue = client.getIntegerValue(ff, 0)
-    return intValue
+    
+    return try {
+        val intValue = client.getIntegerValue(ff, 0)
+        intValue
+    } catch (ex: Exception) {
+        logger.error(
+            "Flag evaluation failed for flag '{}', error: {}. {} retries attempted, falling back to default value 0.",
+            ff,
+            ex.message,
+            FlagdClientConfig.load().maxRetryAttempts,
+            ex
+        )
+        0
+    }
 }
