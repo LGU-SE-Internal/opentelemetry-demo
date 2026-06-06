@@ -19,6 +19,7 @@
 .codex/
 .cursor/
 .cursorrules
+.agentm/
 
 # Build artifacts
 bin/
@@ -59,9 +60,3 @@ src/shipping/target/
 test/tracetesting/tracetesting-vars.yaml
 
 !src/currency/build
-.agentm/
-.agentm/
-.agentm/
-.agentm/
-.agentm/
-.agentm/

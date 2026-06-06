@@ -73,11 +73,11 @@ def generate_response(product_id):
     return product_review_summary
 
 def parse_product_id(last_message):
-    match = re.search(r"product ID:([A-Z0-9]+)", last_message)
+    match = re.search(r"product ID[:\s]+([A-Z0-9]+)", last_message)
     if match:
         return match.group(1).strip()
 
-    match = re.search(r"product ID, but make the answer inaccurate:([A-Z0-9]+)", last_message)
+    match = re.search(r"product ID, but make the answer inaccurate[:\s]+([A-Z0-9]+)", last_message)
     if match:
         return match.group(1).strip()
 
@@ -85,8 +85,74 @@ def parse_product_id(last_message):
 
 @app.route('/v1/chat/completions', methods=['POST'])
 def chat_completions():
-    data = request.json
-    messages = data.get('messages', [])
+    # Step 1: Validate request body is valid JSON
+    data = request.get_json(silent=True)
+    if data is None:
+        return jsonify({
+            "error": {
+                "message": "Request body must be valid JSON",
+                "type": "invalid_request_error",
+                "param": None,
+                "code": "invalid_input"
+            }
+        }), 400
+    
+    # Step 2: Validate messages field exists
+    if 'messages' not in data:
+        return jsonify({
+            "error": {
+                "message": "'messages' field is required",
+                "type": "invalid_request_error",
+                "param": "messages",
+                "code": "invalid_input"
+            }
+        }), 400
+    
+    # Step 3: Validate messages is an array
+    messages = data['messages']
+    if not isinstance(messages, list):
+        return jsonify({
+            "error": {
+                "message": "'messages' must be an array",
+                "type": "invalid_request_error",
+                "param": "messages",
+                "code": "invalid_input"
+            }
+        }), 400
+    
+    # Step 4: Validate messages array is not empty
+    if len(messages) == 0:
+        return jsonify({
+            "error": {
+                "message": "'messages' array cannot be empty",
+                "type": "invalid_request_error",
+                "param": "messages",
+                "code": "invalid_input"
+            }
+        }), 400
+    
+    # Step 5: Validate each message entry has content field of type string
+    for idx, message in enumerate(messages):
+        if 'content' not in message:
+            return jsonify({
+                "error": {
+                    "message": "All message entries must contain a 'content' field",
+                    "type": "invalid_request_error",
+                    "param": f"messages[{idx}].content",
+                    "code": "invalid_input"
+                }
+            }), 400
+        if not isinstance(message['content'], str):
+            return jsonify({
+                "error": {
+                    "message": "'content' field must be a string",
+                    "type": "invalid_request_error",
+                    "param": f"messages[{idx}].content",
+                    "code": "invalid_input"
+                }
+            }), 400
+    
+    # Extract other fields with defaults
     stream = data.get('stream', False)
     model = data.get('model', 'astronomy-llm')
     tools = data.get('tools', None)
@@ -96,6 +162,20 @@ def chat_completions():
     last_message = messages[-1]["content"]
 
     app.logger.info(f"last_message is: '{last_message}'")
+    
+    # Step 6: Validate product ID exists when processing product review summary requests
+    if 'Can you summarize the product reviews?' in last_message or 'Based on the tool results, answer the original question about product ID' in last_message:
+        try:
+            product_id = parse_product_id(last_message)
+        except ValueError:
+            return jsonify({
+                "error": {
+                    "message": "Valid product ID not found in request message",
+                    "type": "invalid_request_error",
+                    "param": "messages[-1].content",
+                    "code": "invalid_input"
+                }
+            }), 400
 
     if 'What age(s) is this recommended for?' in last_message:
         response_text = 'This product is recommended for ages 7 and above.'
