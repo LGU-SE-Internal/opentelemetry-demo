@@ -204,6 +204,19 @@ def list_models():
         ]
     })
 
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Liveness check endpoint"""
+    return jsonify({"status": "UP"}), 200
+
+@app.route('/ready', methods=['GET'])
+def readiness_check():
+    """Readiness check endpoint"""
+    global product_review_summaries
+    if product_review_summaries is None:
+        return jsonify({"status": "NOT_READY"}), 503
+    return jsonify({"status": "READY"}), 200
+
 def check_feature_flag(flag_name: str):
     # Initialize OpenFeature
     client = api.get_client()
