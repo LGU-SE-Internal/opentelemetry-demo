@@ -63,9 +63,31 @@ post "/send_order_confirmation" do
 
 end
 
-error do
-  OpenTelemetry::Trace.current_span.record_exception(env['sinatra.error'])
+# Health probe endpoints for Kubernetes
+get "/health/live" do
+  status 200
 end
+
+get "/health/ready" do
+  provider = OpenFeature::SDK.configuration.provider
+  
+  # Check if we are using the flagd provider
+  if provider.is_a?(OpenFeature::Flagd::Provider::Client)
+    begin
+      # Attempt to fetch a dummy flag to verify connection health
+      client = OpenFeature::SDK.build_client
+      client.fetch_boolean_value(flag_key: "health_check", default_value: false)
+      status 200
+    rescue
+      status 503
+    end
+  else
+    # No valid flagd provider, service is not ready
+    status 503
+  end
+end
+
+error do
 
 def send_email(data)
   # create and start a manual span
