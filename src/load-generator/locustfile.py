@@ -288,3 +288,22 @@ async def add_baggage_header(route: Route, request: Request):
         'baggage': ', '.join(filter(None, (existing_baggage, 'synthetic_request=true')))
     }
     await route.continue_(headers=headers)
+
+# Add health and readiness probe endpoints
+from locust import events
+from flask import Response
+
+@events.init.add_listener
+def add_health_probe_endpoints(environment, **kwargs):
+    if environment.web_ui:
+        app = environment.web_ui.app
+
+        @app.route("/health/liveness")
+        def liveness_probe():
+            return Response("OK", status=200, mimetype="text/plain")
+
+        @app.route("/health/readiness")
+        def readiness_probe():
+            if environment.runner is not None:
+                return Response("READY", status=200, mimetype="text/plain")
+            return Response("NOT_READY", status=503, mimetype="text/plain")
