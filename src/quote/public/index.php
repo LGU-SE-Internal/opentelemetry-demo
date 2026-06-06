@@ -40,12 +40,12 @@ $container = $containerBuilder->build();
 AppFactory::setContainer($container);
 $app = Bridge::create($container);
 
-// Register middleware
-$app->addRoutingMiddleware();
-
 // Register routes
 $routes = require __DIR__ . '/../app/routes.php';
 $routes($app);
+
+// Register middleware
+$app->addRoutingMiddleware();
 
 // Add Body Parsing Middleware
 $app->addBodyParsingMiddleware();
