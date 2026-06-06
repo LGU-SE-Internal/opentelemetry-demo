@@ -66,6 +66,7 @@ server.bindAsync(address, grpc.ServerCredentials.createInsecure(), (err, port) =
   // Setup HTTP health endpoint
   const HEALTH_PORT = process.env.PAYMENT_HEALTH_PORT || 8080;
   const app = express();
+  module.exports.app = app;
 
   // Create gRPC health client to check local server
   const healthClient = new health.HealthClient(`localhost:${process.env['PAYMENT_PORT']}`, grpc.credentials.createInsecure());
