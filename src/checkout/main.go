@@ -165,6 +165,56 @@ func main() {
 		httpPort = "8080"
 	}
 
+	// Initialize health check server first, set to NOT_SERVING during initialization
+	healthcheck := health.NewServer()
+	healthcheck.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
+
+	// Set up HTTP health endpoints first so they are available during initialization
+	mux := http.NewServeMux()
+
+	// Health endpoint - always returns 200 when service is running
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
+
+	// Ready endpoint - uses gRPC health check status
+	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+
+		resp, err := healthcheck.Check(ctx, &healthpb.HealthCheckRequest{})
+		if err != nil || resp.Status != healthpb.HealthCheckResponse_SERVING {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte("NOT_READY"))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("READY"))
+	})
+
+	httpServer := &http.Server{
+		Addr:    fmt.Sprintf(":%s", httpPort),
+		Handler: mux,
+	}
+
+	// Start HTTP server immediately so health endpoints are available during initialization
+	go func() {
+		logger.Info(fmt.Sprintf("HTTP server starting on port %s", httpPort))
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error(fmt.Sprintf("failed to start HTTP server: %v", err))
+			os.Exit(1)
+		}
+	}()
+
 	tp := initTracerProvider()
 	defer func() {
 		if err := tp.Shutdown(context.Background()); err != nil {
@@ -267,47 +317,9 @@ func main() {
 	)
 	pb.RegisterCheckoutServiceServer(srv, svc)
 
-	healthcheck := health.NewServer()
 	healthpb.RegisterHealthServer(srv, healthcheck)
 	// Mark service as serving once all initialization is complete
 	healthcheck.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
-
-	// Set up HTTP health endpoints
-	mux := http.NewServeMux()
-
-	// Health endpoint - always returns 200 when service is running
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
-	})
-
-	// Ready endpoint - uses gRPC health check status
-	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-		defer cancel()
-
-		resp, err := healthcheck.Check(ctx, &healthpb.HealthCheckRequest{})
-		if err != nil || resp.Status != healthpb.HealthCheckResponse_SERVING {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte("NOT_READY"))
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("READY"))
-	})
-
-	httpServer := &http.Server{
-		Addr:    fmt.Sprintf(":%s", httpPort),
-		Handler: mux,
-	}
 
 	// Start HTTP server in goroutine
 	go func() {
