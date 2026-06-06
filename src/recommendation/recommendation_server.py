@@ -9,8 +9,10 @@
 # Python
 import os
 import random
+import signal
+import types
 from concurrent import futures
-
+from typing import Optional
 # Pip
 import grpc
 from opentelemetry import trace, metrics
@@ -35,11 +37,35 @@ from grpc_health.v1 import health_pb2
 from grpc_health.v1 import health_pb2_grpc
 
 from metrics import (
-    init_metrics
-)
-
 cached_ids = []
 first_run = True
+_server_instance: Optional[grpc.Server] = None
+logger: logging.Logger = logging.getLogger('main')
+
+
+def handle_shutdown_signal(signal_num: int, frame: Optional[types.FrameType]) -> None:
+    """Triggers graceful shutdown flow when SIGINT/SIGTERM is received."""
+    signal_name = signal.Signals(signal_num).name
+    logger.info(f"Shutdown signal {signal_name} received")
+    if _server_instance is not None:
+        graceful_shutdown(_server_instance, 30)
+
+
+def graceful_shutdown(server: grpc.Server, grace_period_seconds: int = 30) -> None:
+    """
+    Stops accepting new connections, waits for in-flight requests to complete up to grace period,
+    then terminates the server and closes all connections.
+    """
+    logger.info(f"Waiting up to {grace_period_seconds}s for in-flight requests to complete")
+    shutdown_event = server.stop(grace_period_seconds)
+    shutdown_completed = shutdown_event.wait()
+    if shutdown_completed:
+        logger.info("All in-flight requests completed, shutting down server")
+        exit(0)
+    else:
+        logger.info(f"Shutdown timed out after {grace_period_seconds}s, forcing server termination")
+        exit(1)
+
 
 class RecommendationService(demo_pb2_grpc.RecommendationServiceServicer):
     def ListRecommendations(self, request, context):
@@ -102,33 +128,7 @@ def get_product_list(request_product_ids):
         # Create a filtered list of products excluding the products received as input
         filtered_products = list(set(product_ids) - set(request_product_ids))
         num_products = len(filtered_products)
-        span.set_attribute("demo.product.filtered.count", num_products)
-        num_return = min(max_responses, num_products)
-
-        # Sample list of indicies to return
-        indices = random.sample(range(num_products), num_return)
-        # Fetch product ids from indices
-        prod_list = [filtered_products[i] for i in indices]
-
-        span.set_attribute("demo.product.filtered.list", prod_list)
-
-        return prod_list
-
-
-def must_map_env(key: str):
-    value = os.environ.get(key)
-    if value is None:
-        raise Exception(f'{key} environment variable must be set')
-    return value
-
-
-def check_feature_flag(flag_name: str):
-    # Initialize OpenFeature
-    client = api.get_client()
-    return client.get_boolean_value("recommendationCacheFailure", False)
-
-
-if __name__ == "__main__":
+def serve():
     service_name = must_map_env('OTEL_SERVICE_NAME')
     api.set_provider(FlagdProvider(host=os.environ.get('FLAGD_HOST', 'flagd'), port=os.environ.get('FLAGD_PORT', 8013)))
     api.add_hooks([TracingHook()])
@@ -152,6 +152,7 @@ if __name__ == "__main__":
     handler = LoggingHandler(level=logging.NOTSET, logger_provider=logger_provider)
 
     # Attach OTLP handler to logger
+    global logger
     logger = logging.getLogger('main')
     logger.addHandler(handler)
 
@@ -167,9 +168,19 @@ if __name__ == "__main__":
     demo_pb2_grpc.add_RecommendationServiceServicer_to_server(service, server)
     health_pb2_grpc.add_HealthServicer_to_server(service, server)
 
+    # Register signal handlers
+    signal.signal(signal.SIGINT, handle_shutdown_signal)
+    signal.signal(signal.SIGTERM, handle_shutdown_signal)
+    global _server_instance
+    _server_instance = server
+
     # Start server
     port = must_map_env('RECOMMENDATION_PORT')
     server.add_insecure_port(f'[::]:{port}')
     server.start()
     logger.info(f'Recommendation service started, listening on port {port}')
     server.wait_for_termination()
+
+
+if __name__ == "__main__":
+    serve()
