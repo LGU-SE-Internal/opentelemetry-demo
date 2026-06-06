@@ -82,6 +82,36 @@ async fn request_quote(count: u32) -> Result<f64, anyhow::Error> {
     Ok(f)
 }
 
+pub async fn check_quote_service_health() -> bool {
+    let quote_service_addr: String = format!(
+        "{}{}",
+        env::var("QUOTE_ADDR")
+            .unwrap_or_else(|_| "http://quote:8090".to_string())
+            .parse::<String>()
+            .expect("Invalid quote service address"),
+        "/getquote"
+    );
+
+    let client = awc::Client::builder()
+        .timeout(std::time::Duration::from_millis(500))
+        .finish();
+
+    let mut reqbody = HashMap::new();
+    reqbody.insert("numberOfItems", 1);
+
+    match client
+        .post(quote_service_addr)
+        .trace_request()
+        .send_json(&reqbody)
+        .await
+    {
+        Ok(mut response) => {
+            response.status().is_success()
+        }
+        Err(_) => false
+    }
+}
+
 pub fn create_quote_from_float(value: f64) -> Quote {
     Quote {
         dollars: value.floor() as u64,
