@@ -138,6 +138,15 @@ receivers:
           system.uptime:
             enabled: true
 
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+    path: "/"
+    check_collector_pipeline:
+      enabled: true
+      interval: 5s
+      failure_threshold: 3
+
 exporters:
   debug:
 
@@ -237,6 +246,7 @@ connectors:
   span_metrics:
 
 service:
+  extensions: [health_check]
   pipelines:
     traces:
       receivers: [otlp]

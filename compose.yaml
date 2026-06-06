@@ -780,6 +780,7 @@ services:
     ports:
       - "${OTEL_COLLECTOR_PORT_GRPC}"
       - "${OTEL_COLLECTOR_PORT_HTTP}"
+      - "13133:13133"
     logging: *logging
     environment:
       - AD_PROMETHEUS_PORT
