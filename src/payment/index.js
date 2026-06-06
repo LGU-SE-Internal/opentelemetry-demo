@@ -160,3 +160,8 @@ server.bindAsync(address, serverCredentials, (err, port) => {
 
 process.once('SIGINT', closeGracefully)
 process.once('SIGTERM', closeGracefully)
+
+module.exports = {
+  getServerCredentials,
+  app: app
+}
