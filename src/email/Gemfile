@@ -10,6 +10,7 @@ gem "pony",     "~> 1.13"
 gem "puma",     "~> 8.0"
 gem "sinatra",  "~> 4.2"
 gem "rackup",   "~> 2.3"
+gem "rack-attack"
 
 gem "google-protobuf", "~> 4.35.0"
 gem "ostruct"

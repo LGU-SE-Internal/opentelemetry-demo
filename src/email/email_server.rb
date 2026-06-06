@@ -5,6 +5,7 @@ require "ostruct"
 require "pony"
 require "sinatra"
 require "json"
+require "rack/attack"
 require "open_feature/sdk"
 require "openfeature/flagd/provider"
 
@@ -70,6 +71,64 @@ otlp_metric_exporter = OpenTelemetry::Exporter::OTLP::Metrics::MetricsExporter.n
 OpenTelemetry.meter_provider.add_metric_reader(otlp_metric_exporter)
 meter = OpenTelemetry.meter_provider.meter("email")
 $confirmation_counter = meter.create_counter("demo.notification.confirmations", unit: "1", description: "Counts the number of order confirmation emails sent")
+$rate_limited_counter = meter.create_counter("email_service_rate_limited_requests_total", unit: "1", description: "Counts the number of rate-limited email requests")
+
+# Rate limit configuration
+RATE_LIMIT_THRESHOLD = ENV.fetch("EMAIL_RATE_LIMIT_THRESHOLD", 100).to_i
+RATE_LIMIT_WINDOW = ENV.fetch("EMAIL_RATE_LIMIT_WINDOW_SECONDS", 60).to_i
+RATE_LIMIT_SCOPE = ENV.fetch("EMAIL_RATE_LIMIT_SCOPE", "global")
+
+# Configure Rack::Attack
+use Rack::Attack
+
+Rack::Attack.throttle("email_send_confirmation", limit: RATE_LIMIT_THRESHOLD, period: RATE_LIMIT_WINDOW) do |req|
+  if req.post? && req.path == "/send_order_confirmation"
+    if RATE_LIMIT_SCOPE == "ip"
+      req.ip
+    else
+      "global"
+    end
+  end
+end
+
+# Custom response for throttled requests
+Rack::Attack.throttled_responder = lambda do |request|
+  match_data = request.env['rack.attack.match_data']
+  retry_after = match_data[:period] - (Time.now.to_i % match_data[:period])
+  
+  # Increment metric
+  labels = { scope: RATE_LIMIT_SCOPE }
+  labels[:ip] = request.ip if RATE_LIMIT_SCOPE == "ip"
+  $rate_limited_counter.add(1, labels)
+  
+  # Emit structured log
+  $logger.on_emit(
+    timestamp: Time.now,
+    severity_text: 'WARN',
+    body: 'Request rate limited',
+    attributes: {
+      client_ip: request.ip,
+      rate_limit_scope: RATE_LIMIT_SCOPE,
+      rate_limit_threshold: RATE_LIMIT_THRESHOLD,
+      rate_limit_window_seconds: RATE_LIMIT_WINDOW,
+      retry_after_seconds: retry_after
+    }
+  )
+  
+  [
+    429,
+    {
+      'Content-Type' => 'application/json',
+      'Retry-After' => retry_after.to_s
+    },
+    [
+      JSON.generate({
+        error: "Too many requests",
+        retry_after: retry_after
+      })
+    ]
+  ]
+end
 
 post "/send_order_confirmation" do
   data = JSON.parse(request.body.read, object_class: OpenStruct)
