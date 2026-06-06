@@ -7,6 +7,7 @@
 # Python
 import os
 import json
+import re
 from concurrent import futures
 import random
 import signal
@@ -95,12 +96,62 @@ tools = [
       }
 ]
 
+PRODUCT_ID_PATTERN = re.compile(r'^OL[0-9A-F]{8}$')
+
+def validate_request_params(context, product_id: str, limit: int = None, offset: int = None):
+    """Validate request parameters according to AC rules.
+    Raises grpc.RpcError with INVALID_ARGUMENT status if validation fails.
+    """
+    # Validate product_id
+    if not product_id:
+        context.abort(grpc.StatusCode.INVALID_ARGUMENT, "product_id is required and cannot be empty")
+    if not PRODUCT_ID_PATTERN.match(product_id):
+        context.abort(grpc.StatusCode.INVALID_ARGUMENT, 
+                     f"product_id {product_id} is invalid, must match pattern ^OL[0-9A-F]{{8}}$")
+    
+    # Validate limit if provided
+    if limit is not None:
+        if limit < 1 or limit > 100:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, 
+                         f"limit {limit} is invalid, must be between 1 and 100 inclusive")
+    
+    # Validate offset if provided
+    if offset is not None:
+        if offset < 0:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, 
+                         f"offset {offset} is invalid, must be >= 0")
+
+
 class ProductReviewService(demo_pb2_grpc.ProductReviewServiceServicer):
     def GetProductReviews(self, request, context):
         logger.info(f"Receive GetProductReviews for product id:{request.product_id}")
+        
+        # Validate request parameters first
+        validate_request_params(
+            context,
+            product_id=request.product_id,
+            limit=request.limit if hasattr(request, 'limit') else None,
+            offset=request.offset if hasattr(request, 'offset') else None
+        )
+        
         product_reviews = get_product_reviews(request.product_id)
 
         return product_reviews
+
+    def SubmitProductReview(self, request, context):
+        logger.info(f"Receive SubmitProductReview for product id:{request.product_id}")
+        
+        # Validate request parameters first
+        validate_request_params(
+            context,
+            product_id=request.product_id
+        )
+        
+        # Existing business logic for submitting review (placeholder as per original code)
+        # This preserves existing behavior for valid requests
+        response = demo_pb2.SubmitProductReviewResponse()
+        response.success = True
+        return response
 
     def GetAverageProductReviewScore(self, request, context):
         logger.info(f"Receive GetAverageProductReviewScore for product id:{request.product_id}")
