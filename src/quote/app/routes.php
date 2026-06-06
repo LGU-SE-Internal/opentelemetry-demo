@@ -81,7 +81,88 @@ return function (App $app) {
         $span = Span::getCurrent();
         $span->addEvent('Received get quote request, processing it');
 
+        $rawPayload = $request->getBody()->__toString();
         $jsonObject = $request->getParsedBody();
+        
+        // Validate JSON payload
+        if ($jsonObject === null) {
+            $errorMsg = 'Invalid JSON payload';
+            // Log invalid request
+            $logger->warning($errorMsg, [
+                'timestamp' => date('Y-m-d H:i:sP'),
+                'client_ip' => $request->getServerParams()['REMOTE_ADDR'] ?? 'unknown',
+                'error_type' => 'invalid_json',
+                'raw_payload' => substr($rawPayload, 0, 100) . (strlen($rawPayload) > 100 ? '...' : ''),
+                'request_id' => $request->getAttribute('request_id') ?? $request->getHeaderLine('X-Request-ID') ?: 'unknown',
+            ]);
+            
+            $payload = json_encode(['error' => $errorMsg]);
+            $response->getBody()->write($payload);
+            return $response
+                ->withHeader('Content-Type', 'application/json')
+                ->withStatus(400);
+        }
+        
+        // Validate presence of numberOfItems
+        if (!array_key_exists('numberOfItems', $jsonObject)) {
+            $errorMsg = 'Missing required field: numberOfItems';
+            // Log invalid request
+            $logger->warning($errorMsg, [
+                'timestamp' => date('Y-m-d H:i:sP'),
+                'client_ip' => $request->getServerParams()['REMOTE_ADDR'] ?? 'unknown',
+                'error_type' => 'missing_field',
+                'raw_payload' => substr($rawPayload, 0, 100) . (strlen($rawPayload) > 100 ? '...' : ''),
+                'request_id' => $request->getAttribute('request_id') ?? $request->getHeaderLine('X-Request-ID') ?: 'unknown',
+            ]);
+            
+            $payload = json_encode(['error' => $errorMsg]);
+            $response->getBody()->write($payload);
+            return $response
+                ->withHeader('Content-Type', 'application/json')
+                ->withStatus(400);
+        }
+        
+        $numberOfItems = $jsonObject['numberOfItems'];
+        // Validate numberOfItems is integer
+        if (!is_int($numberOfItems)) {
+            $errorMsg = 'numberOfItems must be an integer';
+            // Log invalid request
+            $logger->warning($errorMsg, [
+                'timestamp' => date('Y-m-d H:i:sP'),
+                'client_ip' => $request->getServerParams()['REMOTE_ADDR'] ?? 'unknown',
+                'error_type' => 'invalid_type',
+                'raw_payload' => substr($rawPayload, 0, 100) . (strlen($rawPayload) > 100 ? '...' : ''),
+                'request_id' => $request->getAttribute('request_id') ?? $request->getHeaderLine('X-Request-ID') ?: 'unknown',
+                'provided_type' => gettype($numberOfItems),
+                'provided_value' => $numberOfItems,
+            ]);
+            
+            $payload = json_encode(['error' => $errorMsg]);
+            $response->getBody()->write($payload);
+            return $response
+                ->withHeader('Content-Type', 'application/json')
+                ->withStatus(400);
+        }
+        
+        // Validate numberOfItems is positive
+        if ($numberOfItems <= 0) {
+            $errorMsg = 'numberOfItems must be greater than 0';
+            // Log invalid request
+            $logger->warning($errorMsg, [
+                'timestamp' => date('Y-m-d H:i:sP'),
+                'client_ip' => $request->getServerParams()['REMOTE_ADDR'] ?? 'unknown',
+                'error_type' => 'invalid_value',
+                'raw_payload' => substr($rawPayload, 0, 100) . (strlen($rawPayload) > 100 ? '...' : ''),
+                'request_id' => $request->getAttribute('request_id') ?? $request->getHeaderLine('X-Request-ID') ?: 'unknown',
+                'provided_value' => $numberOfItems,
+            ]);
+            
+            $payload = json_encode(['error' => $errorMsg]);
+            $response->getBody()->write($payload);
+            return $response
+                ->withHeader('Content-Type', 'application/json')
+                ->withStatus(400);
+        }
 
         $data = calculateQuote($jsonObject);
 
