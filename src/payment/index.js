@@ -5,9 +5,57 @@ const protoLoader = require('@grpc/proto-loader')
 const health = require('grpc-js-health-check')
 const opentelemetry = require('@opentelemetry/api')
 const express = require('express')
+const fs = require('fs')
 
 const charge = require('./charge')
 const logger = require('./logger')
+
+function getServerCredentials() {
+  const tlsCertPath = process.env.PAYMENT_SERVICE_TLS_CERT_PATH
+  const tlsKeyPath = process.env.PAYMENT_SERVICE_TLS_KEY_PATH
+  const clientCaPath = process.env.PAYMENT_SERVICE_TLS_CLIENT_CA_PATH
+
+  // No TLS variables set: return insecure credentials
+  if (!tlsCertPath && !tlsKeyPath && !clientCaPath) {
+    return grpc.ServerCredentials.createInsecure()
+  }
+
+  // Check if both cert and key paths are set if any TLS config exists
+  if (!tlsCertPath || !tlsKeyPath) {
+    throw new Error("Both PAYMENT_SERVICE_TLS_CERT_PATH and PAYMENT_SERVICE_TLS_KEY_PATH must be set when configuring TLS")
+  }
+
+  // Read certificate and key files
+  let cert, key
+  try {
+    cert = fs.readFileSync(tlsCertPath)
+    key = fs.readFileSync(tlsKeyPath)
+  } catch (err) {
+    throw new Error(`Failed to read TLS certificate/key file: ${err.message}`)
+  }
+
+  // If client CA is set, enable mTLS
+  if (clientCaPath) {
+    let clientCa
+    try {
+      clientCa = fs.readFileSync(clientCaPath)
+    } catch (err) {
+      throw new Error(`Failed to read client CA certificate file: ${err.message}`)
+    }
+    return grpc.ServerCredentials.createSsl(
+      clientCa,
+      [{ cert_chain: cert, private_key: key }],
+      true // require client certificate
+    )
+  }
+
+  // Regular TLS without client auth
+  return grpc.ServerCredentials.createSsl(
+    null,
+    [{ cert_chain: cert, private_key: key }],
+    false // no client cert required
+  )
+}
 
 async function chargeServiceHandler(call, callback) {
   const span = opentelemetry.trace.getActiveSpan();
@@ -56,7 +104,15 @@ if (ipv6_enabled == "true") {
 
 const address = ip + `:${process.env['PAYMENT_PORT']}`;
 
-server.bindAsync(address, grpc.ServerCredentials.createInsecure(), (err, port) => {
+let serverCredentials
+try {
+  serverCredentials = getServerCredentials()
+} catch (err) {
+  logger.error({ err }, "Failed to initialize server credentials")
+  process.exit(1)
+}
+
+server.bindAsync(address, serverCredentials, (err, port) => {
   if (err) {
     return logger.error({ err })
   }
@@ -69,7 +125,8 @@ server.bindAsync(address, grpc.ServerCredentials.createInsecure(), (err, port) =
   module.exports.app = app;
 
   // Create gRPC health client to check local server
-  const healthClient = new health.HealthClient(`localhost:${process.env['PAYMENT_PORT']}`, grpc.credentials.createInsecure());
+  const healthClientCreds = serverCredentials._isSecure ? grpc.credentials.createSsl() : grpc.credentials.createInsecure();
+  const healthClient = new health.HealthClient(`localhost:${process.env['PAYMENT_PORT']}`, healthClientCreds);
 
   app.get('/health', async (req, res) => {
     try {
@@ -103,3 +160,8 @@ server.bindAsync(address, grpc.ServerCredentials.createInsecure(), (err, port) =
 
 process.once('SIGINT', closeGracefully)
 process.once('SIGTERM', closeGracefully)
+
+module.exports = {
+  getServerCredentials,
+  app: app
+}
