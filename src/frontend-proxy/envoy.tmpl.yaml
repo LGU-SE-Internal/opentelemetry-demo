@@ -37,6 +37,72 @@ static_resources:
                       domains:
                         - "*"
                       routes:
+                        - match: { path: "/healthz" }
+                          direct_response:
+                            status: 200
+                            body:
+                              inline_string: "ok"
+                          response_headers_to_add:
+                            - append: false
+                              header:
+                                key: "Content-Type"
+                                value: "text/plain"
+                          typed_per_filter_config:
+                            envoy.filters.http.rbac:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBACPerRoute
+                              rbac:
+                                rules:
+                                  action: ALLOW
+                                  policies:
+                                    internal-ips-only:
+                                      permissions:
+                                        - any: true
+                                      principals:
+                                        - source_ip:
+                                            address_prefix: "10.0.0.0"
+                                            prefix_len: 8
+                                        - source_ip:
+                                            address_prefix: "172.16.0.0"
+                                            prefix_len: 12
+                                        - source_ip:
+                                            address_prefix: "192.168.0.0"
+                                            prefix_len: 16
+                                        - source_ip:
+                                            address_prefix: "127.0.0.0"
+                                            prefix_len: 8
+                        - match: { path: "/readyz" }
+                          direct_response:
+                            status: 200
+                            body:
+                              inline_string: "ok"
+                          response_headers_to_add:
+                            - append: false
+                              header:
+                                key: "Content-Type"
+                                value: "text/plain"
+                          typed_per_filter_config:
+                            envoy.filters.http.rbac:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBACPerRoute
+                              rbac:
+                                rules:
+                                  action: ALLOW
+                                  policies:
+                                    internal-ips-only:
+                                      permissions:
+                                        - any: true
+                                      principals:
+                                        - source_ip:
+                                            address_prefix: "10.0.0.0"
+                                            prefix_len: 8
+                                        - source_ip:
+                                            address_prefix: "172.16.0.0"
+                                            prefix_len: 12
+                                        - source_ip:
+                                            address_prefix: "192.168.0.0"
+                                            prefix_len: 16
+                                        - source_ip:
+                                            address_prefix: "127.0.0.0"
+                                            prefix_len: 8
                         - match: { path: "/loadgen" }
                           redirect: { path_redirect: "/loadgen/" }
                         - match: { prefix: "/loadgen/" }
@@ -72,6 +138,38 @@ static_resources:
                         - match: { prefix: "/" }  # Default/catch-all route - keep last since prefix:"/" matches everything
                           route: { cluster: frontend }
                 http_filters:
+                  - name: envoy.filters.http.rbac
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBAC
+                      rules:
+                        action: DENY
+                        policies:
+                          deny-external-health-requests:
+                            permissions:
+                              - or_rules:
+                                  rules:
+                                    - header:
+                                        name: ":path"
+                                        exact_match: "/healthz"
+                                    - header:
+                                        name: ":path"
+                                        exact_match: "/readyz"
+                            principals:
+                              - not_id:
+                                  or_ids:
+                                    ids:
+                                      - source_ip:
+                                          address_prefix: "10.0.0.0"
+                                          prefix_len: 8
+                                      - source_ip:
+                                          address_prefix: "172.16.0.0"
+                                          prefix_len: 12
+                                      - source_ip:
+                                          address_prefix: "192.168.0.0"
+                                          prefix_len: 16
+                                      - source_ip:
+                                          address_prefix: "127.0.0.0"
+                                          prefix_len: 8
                   - name: envoy.filters.http.fault
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.fault.v3.HTTPFault
@@ -80,6 +178,24 @@ static_resources:
                         header_delay: {}
                         percentage:
                           numerator: 100
+                  - name: envoy.filters.http.health_check
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.health_check.v3.HealthCheck
+                      pass_through_mode: false
+                      cluster_min_healthy_percentages:
+                        "*": { value: 100 }
+                      headers:
+                        - name: ":path"
+                          exact_match: "/readyz"
+                      response_headers_to_add:
+                        - append: false
+                          header:
+                            key: "Content-Type"
+                            value: "text/plain"
+                      healthy_status: 200
+                      healthy_body:
+                        inline_string: "ok"
+                      unhealthy_status: 503
                   - name: envoy.filters.http.router
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
