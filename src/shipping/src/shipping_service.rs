@@ -137,9 +137,56 @@ mod tests {
     }
 
     fn make_address(country: &str) -> Address {
-        Address {
-            street_address: "123 Main St".into(),
-            city: "Anytown".into(),
+use actix_web::{get, HttpResponse, Responder};
+use chrono::Utc;
+use serde::Serialize;
+use std::time::Duration;
+
+#[derive(Serialize)]
+struct HealthResponse {
+    status: String,
+    timestamp: String,
+    dependencies: Dependencies,
+}
+
+#[derive(Serialize)]
+struct Dependencies {
+    quoteService: String,
+}
+
+#[get("/health")]
+async fn health() -> impl Responder {
+    let quote_service_healthy = check_quote_service().await;
+    
+    let (status, http_status, quote_status) = if quote_service_healthy {
+        ("healthy", 200, "healthy")
+    } else {
+        ("unhealthy", 503, "unhealthy")
+    };
+    
+    let response = HealthResponse {
+        status: status.to_string(),
+        timestamp: Utc::now().to_rfc3339(),
+        dependencies: Dependencies {
+            quoteService: quote_status.to_string(),
+        },
+    };
+    
+    HttpResponse::build(http_status)
+        .content_type("application/json")
+        .json(response)
+}
+
+async fn check_quote_service() -> bool {
+    // TODO: Implement actual gRPC health check to quote service with 500ms timeout
+    tokio::time::timeout(Duration::from_millis(500), async {
+        // Placeholder - will replace with actual gRPC call
+        true
+    }).await.unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
             state: "CA".into(),
             country: country.into(),
             zip_code: "00000".into(),

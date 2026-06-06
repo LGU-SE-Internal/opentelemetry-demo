@@ -16,6 +16,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 tonic = "0.14.6"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+chrono = { version = "0.4", features = ["serde", "rkyv"] }
 
 opentelemetry = "0.32.0"
 opentelemetry_sdk = "0.32.0"
