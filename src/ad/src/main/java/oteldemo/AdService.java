@@ -9,8 +9,23 @@ import com.google.common.collect.ImmutableListMultimap;
 import com.google.common.collect.Iterables;
 import io.grpc.*;
 import io.grpc.health.v1.HealthCheckResponse.ServingStatus;
+import io.grpc.netty.NettyServerBuilder;
 import io.grpc.protobuf.services.*;
 import io.grpc.stub.StreamObserver;
+import io.netty.buffer.Unpooled;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.channel.ChannelInitializer;
+import io.netty.channel.socket.SocketChannel;
+import io.netty.handler.codec.http.DefaultFullHttpResponse;
+import io.netty.handler.codec.http.FullHttpResponse;
+import io.netty.handler.codec.http.HttpMethod;
+import io.netty.handler.codec.http.HttpObjectAggregator;
+import io.netty.handler.codec.http.HttpRequest;
+import io.netty.handler.codec.http.HttpResponseStatus;
+import io.netty.handler.codec.http.HttpServerCodec;
+import io.netty.handler.codec.http.HttpUtil;
+import io.netty.util.CharsetUtil;
 import io.opentelemetry.api.GlobalOpenTelemetry;
 import io.opentelemetry.api.OpenTelemetry;
 import io.opentelemetry.api.baggage.Baggage;
@@ -60,6 +75,59 @@ public final class AdService {
   private Server server;
   private HealthStatusManager healthMgr;
   private HTTPServer prometheusServer;
+  private volatile boolean isReady = false;
+
+  private static class HealthHttpHandler extends ChannelInboundHandlerAdapter {
+    private final AdService service;
+
+    public HealthHttpHandler(AdService service) {
+      this.service = service;
+    }
+
+    @Override
+    public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+      if (msg instanceof HttpRequest req) {
+        if (req.method() != HttpMethod.GET) {
+          sendResponse(ctx, HttpResponseStatus.METHOD_NOT_ALLOWED, "METHOD_NOT_ALLOWED");
+          return;
+        }
+
+        String path = req.uri();
+        if (path.equals("/liveness")) {
+          // Liveness: return UP if JVM is running
+          sendResponse(ctx, HttpResponseStatus.OK, "OK");
+        } else if (path.equals("/readiness")) {
+          // Readiness: return READY only if service is fully initialized
+          if (service.isReady) {
+            sendResponse(ctx, HttpResponseStatus.OK, "READY");
+          } else {
+            sendResponse(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "NOT_READY");
+          }
+        } else {
+          // Pass through to gRPC handler
+          ctx.fireChannelRead(msg);
+        }
+      } else {
+        ctx.fireChannelRead(msg);
+      }
+    }
+
+    private void sendResponse(ChannelHandlerContext ctx, HttpResponseStatus status, String content) {
+      FullHttpResponse response = new DefaultFullHttpResponse(
+        io.netty.handler.codec.http.HttpVersion.HTTP_1_1,
+        status,
+        Unpooled.copiedBuffer(content, CharsetUtil.UTF_8)
+      );
+      HttpUtil.setContentLength(response, response.content().readableBytes());
+      response.headers().set("Content-Type", "text/plain; charset=UTF-8");
+      ctx.writeAndFlush(response);
+    }
+
+    @Override
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+      ctx.close();
+    }
+  }
 
   // DEMO: this counter and its `/metrics` HTTP exporter use the Prometheus
   // Java client library rather than the OpenTelemetry SDK. It is here to
@@ -120,9 +188,20 @@ public final class AdService {
     OpenFeatureAPI.getInstance().setProvider(flagdProvider);
   
     server =
-        ServerBuilder.forPort(port)
+        NettyServerBuilder.forPort(port)
             .addService(new AdServiceImpl())
             .addService(healthMgr.getHealthService())
+            .withChildChannelInitializer(new ChannelInitializer<SocketChannel>() {
+              @Override
+              protected void initChannel(SocketChannel ch) throws Exception {
+                ch.pipeline()
+                  .addLast(new HttpServerCodec())
+                  .addLast(new HttpObjectAggregator(1024))
+                  .addLast(new HealthHttpHandler(AdService.this))
+                  // Default gRPC handlers will be added automatically after our custom handler
+                  ;
+              }
+            })
             .build()
             .start();
     logger.info("Ad service started, listening on " + port);
@@ -137,6 +216,9 @@ public final class AdService {
                   System.err.println("*** server shut down");
                 }));
     healthMgr.setStatus("", ServingStatus.SERVING);
+    // Mark service as ready after all initialization is complete
+    isReady = true;
+    logger.info("Ad service initialized and ready to serve traffic");
   }
 
   private void stop() {
