@@ -108,3 +108,22 @@ def send_email(data)
   # check out the OpenTelemetry Ruby docs at: 
   # https://opentelemetry.io/docs/instrumentation/ruby/manual/#creating-new-spans 
 end
+
+# Add gRPC Health Check implementation
+health_checker = Grpc::Health::Checker.new
+health_checker.add_status("", Grpc::Health::V1::HealthCheckResponse::ServingStatus::SERVING)
+
+# Override check method to return INVALID_ARGUMENT for non-empty service names
+class << health_checker
+  alias :original_check :check
+
+  def check(req, call)
+    unless req.service.empty?
+      raise GRPC::InvalidArgument.new("service name parameter is not supported")
+    end
+    original_check(req, call)
+  end
+end
+
+# Register health servicer with the gRPC server
+server.handle(health_checker)
