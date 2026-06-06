@@ -36,6 +36,7 @@
     "grpc-js-health-check": "1.2.2",
     "pino": "^10.3.1",
     "pino-opentelemetry-transport": "^3.0.0",
+    "rate-limiter-flexible": "^11.1.1",
     "simple-card-validator": "1.1.0",
     "uuid": "14.0.0"
   },
