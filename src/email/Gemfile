@@ -26,3 +26,7 @@ gem "opentelemetry-instrumentation-all",   "~> 0.94"
 
 gem "openfeature-sdk", "~> 0.6"
 gem "openfeature-flagd-provider", "~> 0.1"
+
+group :test do
+  gem "rack-test"
+end
