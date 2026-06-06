@@ -91,6 +91,26 @@ builder.Services.AddSingleton<readinessCheck>();
 builder.Services.AddGrpcHealthChecks()
     .AddCheck<readinessCheck>("oteldemo.CartService");
 
+// Add HTTP health checks
+builder.Services.AddHealthChecks()
+    .AddCheck<readinessCheck>("readiness")
+    .AddCheck("valkey", () =>
+    {
+        try
+        {
+            var store = builder.Services.BuildServiceProvider().GetRequiredService<ICartStore>();
+            if (store.Ping())
+            {
+                return HealthCheckResult.Healthy();
+            }
+            return HealthCheckResult.Unhealthy("Connection to Redis failed: Ping returned false");
+        }
+        catch (Exception ex)
+        {
+            return HealthCheckResult.Unhealthy($"Connection to Redis failed: {ex.Message}");
+        }
+    }, tags: new[] { "health", "ready" });
+
 builder.Services.AddSingleton<HealthServiceImpl>();
 
 var app = builder.Build();
@@ -105,6 +125,49 @@ app.MapGet("/", async context =>
 {
     await context.Response.WriteAsync("Communication with gRPC endpoints must be made through a gRPC client. To learn how to create a client, visit: https://go.microsoft.com/fwlink/?linkid=2086909");
 });
+
+// Map HTTP health endpoints
+app.MapHealthChecks("/health", new HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("health"),
+    ResultStatusCodes =
+    {
+        [HealthStatus.Healthy] = StatusCodes.Status200OK,
+        [HealthStatus.Unhealthy] = StatusCodes.Status503ServiceUnavailable,
+        [HealthStatus.Degraded] = StatusCodes.Status503ServiceUnavailable
+    },
+    ResponseWriter = async (context, report) =>
+    {
+        context.Response.ContentType = "application/json";
+        var response = new
+        {
+            status = report.Status == HealthStatus.Healthy ? "Healthy" : "Unhealthy",
+            errors = report.Entries.SelectMany(e => e.Value.Errors.Select(err => err.Message)).ToList()
+        };
+        await context.Response.WriteAsJsonAsync(response);
+    }
+}).AllowAnonymous();
+
+app.MapHealthChecks("/ready", new HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("ready") || check.Name == "readiness",
+    ResultStatusCodes =
+    {
+        [HealthStatus.Healthy] = StatusCodes.Status200OK,
+        [HealthStatus.Unhealthy] = StatusCodes.Status503ServiceUnavailable,
+        [HealthStatus.Degraded] = StatusCodes.Status503ServiceUnavailable
+    },
+    ResponseWriter = async (context, report) =>
+    {
+        context.Response.ContentType = "application/json";
+        var response = new
+        {
+            status = report.Status == HealthStatus.Healthy ? "Ready" : "NotReady",
+            errors = report.Entries.SelectMany(e => e.Value.Errors.Select(err => err.Message)).ToList()
+        };
+        await context.Response.WriteAsJsonAsync(response);
+    }
+}).AllowAnonymous();
 
 app.Run();
 
