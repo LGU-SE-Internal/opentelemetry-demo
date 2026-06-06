@@ -6,6 +6,7 @@
 package frauddetection
 
 import org.apache.kafka.clients.consumer.ConsumerConfig.*
+import org.apache.kafka.clients.consumer.ConsumerRecord
 import org.apache.kafka.clients.consumer.KafkaConsumer
 import org.apache.kafka.common.serialization.ByteArrayDeserializer
 import org.apache.kafka.common.serialization.StringDeserializer
@@ -28,6 +29,9 @@ import io.grpc.protobuf.services.HealthStatusManager
 import io.grpc.health.v1.HealthCheckResponse.ServingStatus
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
+import com.google.protobuf.InvalidProtocolBufferException
+import io.opentelemetry.api.GlobalOpenTelemetry
+import io.opentelemetry.api.metrics.LongCounter
 
 const val topic = "orders"
 const val groupID = "fraud-detection"
@@ -40,6 +44,51 @@ const val SHUTDOWN_WAIT_MS = 5000L // 5 seconds
 private val logger: Logger = LogManager.getLogger(groupID)
 private val lastSuccessfulPollTime = AtomicLong(0)
 private var kafkaConsumerConnected = false
+private val invalidMessagesCounter: LongCounter = GlobalOpenTelemetry.getMeter("fraud-detection")
+    .counterBuilder("app_fraud_detection_invalid_kafka_messages_total")
+    .setDescription("Total number of invalid Kafka messages received on the orders topic")
+    .build()
+
+fun processOrderRecord(record: ConsumerRecord<String, ByteArray>): Unit {
+    val orders = try {
+        OrderResult.parseFrom(record.value())
+    } catch (e: InvalidProtocolBufferException) {
+        invalidMessagesCounter.add(1)
+        logger.error(
+            "Invalid protobuf message received on topic=${record.topic()}, partition=${record.partition()}, offset=${record.offset()}, key=${record.key()}",
+            e
+        )
+        return
+    } catch (e: Exception) {
+        // Catch any other parsing-related exceptions
+        invalidMessagesCounter.add(1)
+        logger.error(
+            "Failed to parse message on topic=${record.topic()}, partition=${record.partition()}, offset=${record.offset()}, key=${record.key()}",
+            e
+        )
+        return
+    }
+
+    // Existing processing logic remains unchanged
+    // Validate order amount per AC-1: check if total amount is negative or zero
+    var totalNanos: Long = 0
+    for (item in orders.itemsList) {
+        val cost = item.cost
+        totalNanos += cost.units * 1_000_000_000L + cost.nanos
+    }
+    totalNanos += orders.shippingCost.units * 1_000_000_000L + orders.shippingCost.nanos
+
+    if (totalNanos <= 0) {
+        logger.warn("Order ID {} has invalid amount (null or negative). Skipping further processing.", orders.orderId)
+        return
+    }
+
+    if (getFeatureFlagValue("kafkaQueueProblems") > 0) {
+        logger.info("FeatureFlag 'kafkaQueueProblems' is enabled, sleeping 1 second")
+        Thread.sleep(1000)
+    }
+    logger.info("Consumed record with orderId: ${orders.orderId}")
+}
 
 fun main() {
     val options = FlagdOptions.builder()
@@ -111,28 +160,8 @@ fun main() {
             }
             totalCount = records
                 .fold(totalCount) { accumulator, record ->
-                    val orders = OrderResult.parseFrom(record.value())
-                    
-                    // Validate order amount per AC-1: check if total amount is negative or zero
-                    var totalNanos: Long = 0
-                    for (item in orders.itemsList) {
-                        val cost = item.cost
-                        totalNanos += cost.units * 1_000_000_000L + cost.nanos
-                    }
-                    totalNanos += orders.shippingCost.units * 1_000_000_000L + orders.shippingCost.nanos
-                    
-                    if (totalNanos <= 0) {
-                        logger.warn("Order ID {} has invalid amount (null or negative). Skipping further processing.", orders.orderId)
-                        return@fold accumulator + 1
-                    }
-                    
-                    val newCount = accumulator + 1
-                    if (getFeatureFlagValue("kafkaQueueProblems") > 0) {
-                        logger.info("FeatureFlag 'kafkaQueueProblems' is enabled, sleeping 1 second")
-                        Thread.sleep(1000)
-                    }
-                    logger.info("Consumed record with orderId: ${orders.orderId}, and updated total count to: $newCount")
-                    newCount
+                    processOrderRecord(record)
+                    accumulator + 1
                 }
         }
     }
