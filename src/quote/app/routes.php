@@ -49,6 +49,34 @@ function calculateQuote($jsonObject): float
 }
 
 return function (App $app) {
+    $app->get('/health', function (Request $request, Response $response) {
+        $payload = json_encode([
+            'status' => 'healthy',
+            'service' => 'quote',
+            'timestamp' => time(),
+        ]);
+        $response->getBody()->write($payload);
+        
+        return $response
+            ->withHeader('Content-Type', 'application/json')
+            ->withStatus(200);
+    });
+    
+    $app->get('/ready', function (Request $request, Response $response) {
+        // For quote service, all initialization completes before server starts
+        // So service is always ready when endpoints are reachable
+        $payload = json_encode([
+            'status' => 'ready',
+            'service' => 'quote',
+            'timestamp' => time(),
+        ]);
+        $response->getBody()->write($payload);
+        
+        return $response
+            ->withHeader('Content-Type', 'application/json')
+            ->withStatus(200);
+    });
+
     $app->post('/getquote', function (Request $request, Response $response, LoggerInterface $logger) {
         $span = Span::getCurrent();
         $span->addEvent('Received get quote request, processing it');
