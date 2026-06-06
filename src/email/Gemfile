@@ -12,7 +12,7 @@ gem "sinatra",  "~> 4.2"
 gem "rackup",   "~> 2.3"
 
 gem "google-protobuf", "~> 4.35.0"
-
+gem "grpc-health-check"
 gem "ostruct"
 
 gem "opentelemetry-sdk",                   "~> 1.12"
