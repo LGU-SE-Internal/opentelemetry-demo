@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/open-telemetry/opentelemetry-demo/src/kafka-collector"
+	kafka_collector "github.com/open-telemetry/opentelemetry-demo/src/kafka-collector"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/stretchr/testify/assert"
 )
@@ -38,9 +38,8 @@ func (m mockReadinessChecker) Check() error {
 // When service runtime is operating normally, GET /health returns 200 OK with body "OK"
 func Test_AC1_HealthEndpoint_Returns200WhenRuntimeNormal(t *testing.T) {
 	t.Parallel()
-	// Setup mux with health endpoint handler (implementation will provide this)
 	mux := http.NewServeMux()
-	// TODO: Replace with actual handler from kafka-collector implementation
+	healthChecker := mockHealthChecker{shouldFail: false}
 	mux.HandleFunc("/health", kafka_collector.HealthHandler(healthChecker))
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
@@ -59,16 +58,15 @@ func Test_AC2_HealthEndpoint_Returns503WhenRuntimeFailed(t *testing.T) {
 	mux := http.NewServeMux()
 	healthChecker := mockHealthChecker{shouldFail: true}
 
-	// TODO: Replace with actual handler from kafka-collector implementation
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		if err := healthChecker.Check(); err != nil {
-			http.Error(w, "Service Unhealthy", http.StatusServiceUnavailable)
-			return
-		}
-		w.Header().Set("Content-Type", "text/plain")
-		w.WriteHeader(http.StatusOK)
-	// TODO: Replace with actual handler from kafka-collector implementation
 	mux.HandleFunc("/health", kafka_collector.HealthHandler(healthChecker))
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Equal(t, "text/plain", w.Header().Get("Content-Type"))
+	assert.Equal(t, "Service Unhealthy", w.Body.String())
 }
 
 // Test_AC3_ReadyEndpoint_Returns200WhenKafkaConnected verifies AC-3:
@@ -78,43 +76,33 @@ func Test_AC3_ReadyEndpoint_Returns200WhenKafkaConnected(t *testing.T) {
 	mux := http.NewServeMux()
 	readinessChecker := mockReadinessChecker{shouldFail: false}
 
-	// TODO: Replace with actual handler from kafka-collector implementation
-	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
-		if err := readinessChecker.Check(); err != nil {
-			http.Error(w, "Kafka Consumer Not Ready", http.StatusServiceUnavailable)
-			return
-		}
-		w.Header().Set("Content-Type", "text/plain")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
-	})
+	mux.HandleFunc("/ready", kafka_collector.ReadyHandler(readinessChecker))
 
 	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
-	// TODO: Replace with actual handler from kafka-collector implementation
-	mux.HandleFunc("/ready", kafka_collector.ReadyHandler(readinessChecker))
+	assert.Equal(t, "text/plain", w.Header().Get("Content-Type"))
+	assert.Equal(t, "OK", w.Body.String())
+}
 
-	// TODO: Replace with actual handler from kafka-collector implementation
-	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
-		if err := readinessChecker.Check(); err != nil {
-			http.Error(w, "Kafka Consumer Not Ready", http.StatusServiceUnavailable)
-			return
-		}
-		w.Header().Set("Content-Type", "text/plain")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
-	})
+// Test_AC4_ReadyEndpoint_Returns503WhenKafkaDisconnected verifies AC-4:
+// When Kafka consumer connection is disconnected/failed, GET /ready returns 503
+func Test_AC4_ReadyEndpoint_Returns503WhenKafkaDisconnected(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	readinessChecker := mockReadinessChecker{shouldFail: true}
+
+	mux.HandleFunc("/ready", kafka_collector.ReadyHandler(readinessChecker))
 
 	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
-	assert.Equal(t, "text/plain; charset=utf-8", w.Header().Get("Content-Type"))
-	assert.Contains(t, w.Body.String(), "Kafka Consumer Not Ready")
+	assert.Equal(t, "text/plain", w.Header().Get("Content-Type"))
+	assert.Equal(t, "Kafka Consumer Not Ready", w.Body.String())
 }
 
 // Test_AC5_MetricsEndpoint_Unchanged verifies AC-5:
@@ -123,13 +111,7 @@ func Test_AC5_MetricsEndpoint_Unchanged(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()
 
-	// TODO: Register actual metrics handler from kafka-collector implementation
-	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		// Sample metrics content expected
-		w.Write([]byte("# HELP go_gc_duration_seconds A summary of the pause duration of garbage collection cycles.\n# TYPE go_gc_duration_seconds summary"))
-	})
+	mux.Handle("/metrics", promhttp.Handler())
 
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	w := httptest.NewRecorder()
@@ -149,10 +131,13 @@ func Test_AC6_AllEndpoints_SamePort8080(t *testing.T) {
 	// Setup mux with all endpoints (this should be the same server instance in implementation)
 	mux := http.NewServeMux()
 
+	healthChecker := mockHealthChecker{shouldFail: false}
+	readinessChecker := mockReadinessChecker{shouldFail: false}
+
 	// Register all three endpoints to the same mux (same server = same port)
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("/health", kafka_collector.HealthHandler(healthChecker))
+	mux.HandleFunc("/ready", kafka_collector.ReadyHandler(readinessChecker))
+	mux.Handle("/metrics", promhttp.Handler())
 
 	// Test all endpoints respond on the same server instance
 	testPaths := []string{"/health", "/ready", "/metrics"}
