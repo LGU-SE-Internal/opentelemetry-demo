@@ -4,6 +4,7 @@ const grpc = require('@grpc/grpc-js')
 const protoLoader = require('@grpc/proto-loader')
 const health = require('grpc-js-health-check')
 const opentelemetry = require('@opentelemetry/api')
+const express = require('express')
 
 const charge = require('./charge')
 const logger = require('./logger')
@@ -61,6 +62,37 @@ server.bindAsync(address, grpc.ServerCredentials.createInsecure(), (err, port) =
   }
 
   logger.info(`payment gRPC server started on ${address}`)
+  
+  // Setup HTTP health endpoint
+  const HEALTH_PORT = process.env.PAYMENT_HEALTH_PORT || 8080;
+  const app = express();
+
+  // Create gRPC health client to check local server
+  const healthClient = new health.HealthClient(`localhost:${process.env['PAYMENT_PORT']}`, grpc.credentials.createInsecure());
+
+  app.get('/health', async (req, res) => {
+    try {
+      await new Promise((resolve, reject) => {
+        healthClient.check({ service: '' }, (err, response) => {
+          if (err) {
+            return reject(err);
+          }
+          if (response.status !== health.servingStatus.SERVING) {
+            return reject(new Error('gRPC server not serving'));
+          }
+          resolve();
+        });
+      });
+      res.status(200).json({ status: 'ok' });
+    } catch (err) {
+      res.status(503).json({ status: 'unhealthy', error: 'gRPC server not reachable' });
+    }
+  });
+
+  // Start health server
+  app.listen(HEALTH_PORT, () => {
+    logger.info(`Payment service health endpoint listening on port ${HEALTH_PORT}`);
+  });
 })
 
 process.once('SIGINT', closeGracefully)
