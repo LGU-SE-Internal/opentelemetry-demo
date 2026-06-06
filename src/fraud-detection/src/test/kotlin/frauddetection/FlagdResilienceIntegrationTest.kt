@@ -11,10 +11,7 @@ import kotlin.test.assertTimeoutPreemptively
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import org.slf4j.LoggerFactory
-import dev.openfeature.contrib.providers.flagd.FlagdProvider
-import dev.openfeature.sdk.Client
-import dev.openfeature.sdk.EvaluationContext
-import dev.openfeature.sdk.Value
+import frauddetection.FlagdClientConfig
 
 internal class FlagdResilienceIntegrationTest {
     private lateinit var flagdClient: Client
@@ -203,29 +200,3 @@ internal class FlagdResilienceIntegrationTest {
         assertEquals(2000, customConfig.requestTimeoutMs, "Custom request timeout should be applied")
         assertEquals(3, customConfig.maxRetryAttempts, "Custom retry count should be applied")
     }
-
-    // Dummy data classes for config and service (not part of implementation, just for test compilation)
-    data class FlagdClientConfig(
-        val connectionTimeoutMs: Int,
-        val requestTimeoutMs: Int,
-        val maxRetryAttempts: Int
-    ) {
-        companion object {
-            fun load(): FlagdClientConfig {
-                return FlagdClientConfig(
-                    connectionTimeoutMs = System.getProperty("FLAGD_CONNECTION_TIMEOUT_MS", "2000").toInt(),
-                    requestTimeoutMs = System.getProperty("FLAGD_REQUEST_TIMEOUT_MS", "1000").toInt(),
-                    maxRetryAttempts = System.getProperty("FLAGD_RETRY_MAX_ATTEMPTS", "2").toInt()
-                )
-            }
-        }
-    }
-
-    class FraudDetectionService(tracer: Tracer) {
-        @WithSpan
-        fun processTransaction(transactionId: String, userId: String, amount: Double): Boolean {
-            // Dummy implementation
-            return true
-        }
-    }
-}
