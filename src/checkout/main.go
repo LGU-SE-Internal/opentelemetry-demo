@@ -342,6 +342,9 @@ func main() {
 	sigChan := setupSignalHandler()
 	<-sigChan
 	logger.Info("Received shutdown signal, initiating graceful shutdown")
+	
+	// Immediately mark service as not serving to stop receiving new requests
+	healthcheck.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
 
 	// Create shutdown context with 15 second timeout
 	ctxShutdown, cancelShutdown := context.WithTimeout(context.Background(), 15*time.Second)
