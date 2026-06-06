@@ -106,6 +106,58 @@ pub async fn ship_order(
     HttpResponse::Ok().json(ShipOrderResponse { tracking_id: tid })
 }
 
+#[derive(Serialize)]
+struct HealthResponse {
+    status: String,
+    timestamp: String,
+    dependencies: Dependencies,
+}
+
+#[derive(Serialize)]
+struct Dependencies {
+    quoteService: String,
+}
+
+#[get("/health")]
+pub async fn health() -> impl Responder {
+    let quote_service_healthy = check_quote_service().await;
+    
+    let (status, http_status, quote_status) = if quote_service_healthy {
+        ("healthy", actix_web::http::StatusCode::OK, "healthy")
+    } else {
+        ("unhealthy", actix_web::http::StatusCode::SERVICE_UNAVAILABLE, "unhealthy")
+    };
+    
+    let response = HealthResponse {
+        status: status.to_string(),
+        timestamp: Utc::now().to_rfc3339(),
+        dependencies: Dependencies {
+            quoteService: quote_status.to_string(),
+        },
+    };
+    
+    HttpResponse::build(http_status)
+        .content_type("application/json")
+        .json(response)
+}
+
+async fn check_quote_service() -> bool {
+    let quote_service_addr: String = env::var("QUOTE_ADDR")
+        .unwrap_or_else(|_| "http://quote:8090".to_string());
+    
+    let client = Client::builder()
+        .timeout(Duration::from_millis(400))
+        .finish();
+    
+    // Send a simple HEAD request to check if the service is reachable
+    tokio::time::timeout(Duration::from_millis(500), async {
+        match client.head(format!("{}/health", quote_service_addr)).send().await {
+            Ok(resp) => resp.status().is_success(),
+            Err(_) => false
+        }
+    }).await.unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use actix_web::{http::header::ContentType, test, App};
@@ -142,65 +194,9 @@ mod tests {
     }
 
     fn make_address(country: &str) -> Address {
-use actix_web::{get, HttpResponse, Responder};
-use chrono::Utc;
-use serde::Serialize;
-use std::time::Duration;
-
-#[derive(Serialize)]
-struct HealthResponse {
-    status: String,
-    timestamp: String,
-    dependencies: Dependencies,
-}
-
-#[derive(Serialize)]
-struct Dependencies {
-    quoteService: String,
-}
-
-#[get("/health")]
-pub async fn health() -> impl Responder {
-    let quote_service_healthy = check_quote_service().await;
-    
-    let (status, http_status, quote_status) = if quote_service_healthy {
-        ("healthy", 200, "healthy")
-    } else {
-        ("unhealthy", 503, "unhealthy")
-    };
-    
-    let response = HealthResponse {
-        status: status.to_string(),
-        timestamp: Utc::now().to_rfc3339(),
-        dependencies: Dependencies {
-            quoteService: quote_status.to_string(),
-        },
-    };
-    
-    HttpResponse::build(http_status)
-        .content_type("application/json")
-        .json(response)
-}
-
-async fn check_quote_service() -> bool {
-    let quote_service_addr: String = env::var("QUOTE_ADDR")
-        .unwrap_or_else(|_| "http://quote:8090".to_string());
-    
-    let client = Client::builder()
-        .timeout(Duration::from_millis(400))
-        .finish();
-    
-    // Send a simple HEAD request to check if the service is reachable
-    tokio::time::timeout(Duration::from_millis(500), async {
-        match client.head(quote_service_addr).send().await {
-            Ok(_) => true,
-            Err(_) => false
-        }
-    }).await.unwrap_or(false)
-}
-
-#[cfg(test)]
-mod tests {
+        Address {
+            street_address: "123 Main St".into(),
+            city: "Anytown".into(),
             state: "CA".into(),
             country: country.into(),
             zip_code: "00000".into(),
