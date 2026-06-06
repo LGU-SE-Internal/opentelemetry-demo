@@ -10,6 +10,7 @@
 import os
 import random
 import json
+import re
 from concurrent import futures
 
 # Pip
@@ -90,8 +91,55 @@ class RetryLoggingInterceptor(grpc.UnaryUnaryClientInterceptor):
 
 class RecommendationService(demo_pb2_grpc.RecommendationServiceServicer):
     def ListRecommendations(self, request, context):
-        prod_list = get_product_list(request.product_ids)
+        # Validation logic
+        product_ids = request.product_ids
         span = trace.get_current_span()
+        trace_id = format(span.get_span_context().trace_id, '016x') if span.is_recording() else None
+        
+        # Validate list is not empty
+        if len(product_ids) == 0:
+            error_msg = "product_ids list cannot be empty"
+            logger.warning(
+                "Invalid recommendation request received",
+                extra={
+                    "error": error_msg,
+                    "trace_id": trace_id,
+                    "request_product_ids_count": 0
+                }
+            )
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, error_msg)
+            
+        # Validate list size <= 100
+        if len(product_ids) > 100:
+            error_msg = "product_ids list exceeds maximum allowed size of 100"
+            logger.warning(
+                "Invalid recommendation request received",
+                extra={
+                    "error": error_msg,
+                    "trace_id": trace_id,
+                    "request_product_ids_count": len(product_ids)
+                }
+            )
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, error_msg)
+            
+        # Validate each product ID format
+        id_pattern = re.compile(r'^[a-zA-Z0-9]{3,12}$')
+        for idx, product_id in enumerate(product_ids):
+            if not id_pattern.match(product_id):
+                error_msg = f"product ID at index {idx}: invalid format, must be alphanumeric 3-12 characters"
+                logger.warning(
+                    "Invalid recommendation request received",
+                    extra={
+                        "error": error_msg,
+                        "trace_id": trace_id,
+                        "request_product_ids_count": len(product_ids),
+                        "invalid_product_id": product_id,
+                        "invalid_product_index": idx
+                    }
+                )
+                context.abort(grpc.StatusCode.INVALID_ARGUMENT, error_msg)
+
+        prod_list = get_product_list(request.product_ids)
         span.set_attribute("demo.product.recommended.count", len(prod_list))
         logger.info(f"Receive ListRecommendations for product ids:{prod_list}")
 
