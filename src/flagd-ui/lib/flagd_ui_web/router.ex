@@ -17,6 +17,14 @@ defmodule FlagdUiWeb.Router do
     plug :accepts, ["json"]
   end
 
+  # Health check endpoints, no authentication required
+  scope "/health", FlagdUiWeb do
+    pipe_through :api
+
+    get "/liveness", HealthController, :liveness
+    get "/readiness", HealthController, :readiness
+  end
+
   scope "/", FlagdUiWeb do
     pipe_through :browser
 
