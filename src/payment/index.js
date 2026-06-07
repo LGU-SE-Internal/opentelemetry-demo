@@ -690,10 +690,120 @@ server.bindAsync(address, serverCredentials, (err, port) => {
     }
   });
 
-  // Catch all other routes return 404
-  app.all('*', (req, res) => {
-    res.status(404).send();
+/**
+ * Registers shutdown handlers for SIGINT/SIGTERM signals
+ * @param server - Node.js HTTP server instance handling payment requests
+ * @param cleanupHooks - Ordered array of async functions that perform resource cleanup
+ * @param gracePeriodMs - Maximum time to wait for in-flight requests (default 30000 ms)
+ * @param logger - Structured logger instance for observability events
+ */
+function registerShutdownHandlers(
+  server,
+  cleanupHooks,
+  gracePeriodMs = 30000,
+  logger
+) {
+  let isShuttingDown = false;
+  let inFlightRequests = 0;
+  let shutdownStartTime;
+  let graceTimeout;
+
+  // Track in-flight requests
+  server.on('request', (req, res) => {
+    if (isShuttingDown) {
+      res.statusCode = 503;
+      res.end('Service Unavailable');
+      return;
+    }
+
+    inFlightRequests++;
+    res.on('finish', () => {
+      inFlightRequests--;
+      if (isShuttingDown && inFlightRequests === 0) {
+        if (graceTimeout) clearTimeout(graceTimeout);
+        runCleanup();
+      }
+    });
   });
+
+  async function runCleanup() {
+    let exitCode = 0;
+    try {
+      for (const hook of cleanupHooks) {
+        try {
+          await hook();
+        } catch (err) {
+          exitCode = 1;
+          logger.error({
+            event: 'service.shutdown.cleanup_failed',
+            error: err.message,
+            resourceType: err.resourceType || 'unknown'
+          });
+        }
+      }
+
+      const durationMs = Date.now() - shutdownStartTime;
+      logger.info({
+        event: 'service.shutdown.completed',
+        durationMs
+      });
+    } catch (err) {
+      exitCode = 1;
+      logger.error({
+        event: 'shutdown.unexpected_error',
+        error: err.message
+      });
+    } finally {
+      process.exit(exitCode);
+    }
+  }
+
+  function handleSignal(signal) {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    shutdownStartTime = Date.now();
+
+    logger.info({
+      event: 'service.shutdown.started',
+      signal,
+      gracePeriodMs
+    });
+
+    // Stop accepting new connections
+    server.close((err) => {
+      if (err) {
+        logger.error({
+          event: 'server.close.error',
+          error: err.message
+        });
+      }
+    });
+
+    // Set up grace period timeout
+    graceTimeout = setTimeout(() => {
+      logger.info({
+        event: 'service.shutdown.forced',
+        reason: 'grace_period_exceeded',
+        inFlightRequestsCount: inFlightRequests
+      });
+      runCleanup();
+    }, gracePeriodMs);
+
+    // If no in-flight requests, run cleanup immediately
+    if (inFlightRequests === 0) {
+      clearTimeout(graceTimeout);
+      runCleanup();
+    }
+  }
+
+  process.on('SIGINT', () => handleSignal('SIGINT'));
+  process.on('SIGTERM', () => handleSignal('SIGTERM'));
+}
+
+// Catch all other routes return 404
+app.all('*', (req, res) => {
+  res.status(404).send();
+});
 
   // Create combined HTTP server that handles both gRPC and HTTP requests
   const httpServer = require('http').createServer((req, res) => {
