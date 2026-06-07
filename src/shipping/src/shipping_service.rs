@@ -47,6 +47,12 @@ const NANOS_MULTIPLE: u32 = 10000000u32;
 
 #[post("/get-quote")]
 pub async fn get_quote(req: web::Json<GetQuoteRequest>) -> impl Responder {
+    if let Err(validation_errors) = req.validate() {
+        let first_error = validation_errors.errors().values().next().and_then(|v| v.first()).unwrap();
+        let message = first_error.message.as_ref().unwrap_or(&"Invalid request".into()).to_string();
+        return HttpResponse::BadRequest().json(serde_json::json!({ "message": message }));
+    }
+
     let itemct: u32 = req.items.iter().map(|item| item.quantity as u32).sum();
     
     // Log incoming quote request (AC-1)
@@ -102,6 +108,12 @@ pub async fn ship_order(
     req: web::Json<ShipOrderRequest>,
     flag_provider: web::Data<dyn FeatureProvider>,
 ) -> impl Responder {
+    if let Err(validation_errors) = req.validate() {
+        let first_error = validation_errors.errors().values().next().and_then(|v| v.first()).unwrap();
+        let message = first_error.message.as_ref().unwrap_or(&"Invalid request".into()).to_string();
+        return HttpResponse::BadRequest().json(serde_json::json!({ "message": message }));
+    }
+
     let is_outside_us = req
         .address
         .as_ref()

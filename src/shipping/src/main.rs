@@ -95,6 +95,19 @@ pub async fn init_flagd_provider_concrete() -> FlagdProvider {
     FlagdProvider::new(options).await.unwrap()
 }
 
+pub async fn app() -> App {
+    let provider = init_flagd_provider().await;
+    let flag_provider = web::Data::from(provider);
+    
+    App::new()
+        .app_data(flag_provider.clone())
+        .wrap(RequestTracing::new())
+        .wrap(RequestMetrics::default())
+        .service(get_quote)
+        .service(ship_order)
+        .service(health_check)
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     match init_otel() {
@@ -127,20 +140,8 @@ async fn main() -> std::io::Result<()> {
         message = "Shipping service is running"
     );
 
-    let provider = init_flagd_provider().await;
-
-    let flag_provider = web::Data::from(provider);
-
-    HttpServer::new(move || {
-        App::new()
-            .app_data(flag_provider.clone())
-            .wrap(RequestTracing::new())
-            .wrap(RequestMetrics::default())
-            .service(get_quote)
-            .service(ship_order)
-            .service(health_check)
-    })
-    .bind(&addr)?
-    .run()
-    .await
+    HttpServer::new(move || app())
+        .bind(&addr)?
+        .run()
+        .await
 }
