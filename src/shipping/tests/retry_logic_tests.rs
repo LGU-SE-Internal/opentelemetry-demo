@@ -7,7 +7,7 @@ use tracing::warn;
 use tracing_test::traced_test;
 
 // Import the retry types from the shipping service as defined in the spec
-use shipping_service::retry::{RetryConfig, with_retry, RetryableError};
+use shipping::retry::{RetryConfig, with_retry, RetryableError};
 
 // Test error type for use in tests
 #[derive(Debug, PartialEq)]
