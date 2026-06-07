@@ -81,3 +81,48 @@ to stay compatible with the old version of Flagd-ui:
 
 * `/read-file` (`GET`)
 * `/write-to-file` (`POST`)
+
+## Production TLS Configuration
+
+For production deployments, you can enable encrypted HTTPS communication for the flagd-ui service using the following environment variables:
+
+### Environment Variables
+| Variable Name | Type | Required | Default | Description |
+|---------------|------|----------|---------|-------------|
+| `FLAGD_UI_TLS_ENABLED` | Boolean | No | `false` | Toggles TLS support for the flagd-ui HTTP server. Valid values: `true`, `false` |
+| `FLAGD_UI_TLS_CERT_PATH` | String | Yes (if TLS enabled) | `` | Absolute file path to PEM-encoded TLS server certificate file |
+| `FLAGD_UI_TLS_KEY_PATH` | String | Yes (if TLS enabled) | `` | Absolute file path to PEM-encoded TLS server private key file |
+| `FLAGD_UI_TLS_CLIENT_CA_PATH` | String | No | `` | Absolute file path to PEM-encoded CA certificate bundle. If provided, mTLS client authentication is enabled |
+| `FLAGD_UI_TLS_CLIENT_REQUIRE` | Boolean | No | `true` (if client CA path provided) | Controls whether client certificate is mandatory when mTLS is enabled |
+
+### Basic TLS Setup (HTTPS only)
+1. Ensure you have a valid TLS certificate and private key in PEM format accessible to the service process
+2. Set the following environment variables:
+```bash
+FLAGD_UI_TLS_ENABLED=true
+FLAGD_UI_TLS_CERT_PATH=/path/to/server.crt
+FLAGD_UI_TLS_KEY_PATH=/path/to/server.key
+```
+3. Restart the service. The service will now listen for HTTPS connections on port 4000 (default) instead of HTTP.
+
+### mTLS Setup (Mutual Authentication)
+To require clients to present a valid certificate to connect to the service:
+1. Complete the basic TLS setup above
+2. Add your CA certificate bundle path:
+```bash
+FLAGD_UI_TLS_CLIENT_CA_PATH=/path/to/ca.crt
+# Optional: Make client certificates optional
+# FLAGD_UI_TLS_CLIENT_REQUIRE=false
+```
+
+### Certificate Management Best Practices
+- Use certificates issued by a trusted public CA or internal PKI system
+- Ensure certificate files have restrictive file permissions (recommended: 0600 for private keys, 0644 for certificates)
+- Implement certificate rotation processes before certificates expire
+- Private keys should never be stored in version control or container images, mount them at runtime using secrets management systems
+- For automatic certificate issuance and renewal, use tools like cert-manager in Kubernetes or Let's Encrypt clients with automated reload workflows
+
+### Troubleshooting
+- If the service fails to start with "Missing required TLS configuration" error: Verify both `FLAGD_UI_TLS_CERT_PATH` and `FLAGD_UI_TLS_KEY_PATH` are set and non-empty when `FLAGD_UI_TLS_ENABLED=true`
+- If the service fails to start with invalid file errors: Verify the certificate/key/CA files exist, are readable by the service user, and are valid PEM format
+- If clients cannot connect with TLS handshake errors: Verify the client trusts the server certificate CA, and for mTLS, the client certificate is signed by the configured CA and not expired

@@ -45,20 +45,74 @@ if config_env() == :prod do
   host = System.get_env("PHX_HOST") || "example.com"
   port = String.to_integer(System.get_env("FLAGD_UI_PORT") || "4000")
 
+  # TLS Configuration
+  tls_enabled = System.get_env("FLAGD_UI_TLS_ENABLED") == "true"
+  tls_cert_path = System.get_env("FLAGD_UI_TLS_CERT_PATH") || ""
+  tls_key_path = System.get_env("FLAGD_UI_TLS_KEY_PATH") || ""
+  tls_client_ca_path = System.get_env("FLAGD_UI_TLS_CLIENT_CA_PATH") || ""
+  tls_client_require = if System.get_env("FLAGD_UI_TLS_CLIENT_REQUIRE") do
+    System.get_env("FLAGD_UI_TLS_CLIENT_REQUIRE") == "true"
+  else
+    tls_client_ca_path != ""
+  end
+
+  if tls_enabled do
+    if tls_cert_path == "" or tls_key_path == "" do
+      raise "Missing required TLS configuration: FLAGD_UI_TLS_CERT_PATH and FLAGD_UI_TLS_KEY_PATH must be set when TLS is enabled"
+    end
+
+    # Validate certificate and key files exist and are readable
+    unless File.exists?(tls_cert_path) and File.readable?(tls_cert_path) do
+      raise "Invalid TLS certificate file: #{tls_cert_path} does not exist or is not readable"
+    end
+
+    unless File.exists?(tls_key_path) and File.readable?(tls_key_path) do
+      raise "Invalid TLS private key file: #{tls_key_path} does not exist or is not readable"
+    end
+
+    # Base HTTPS config
+    https_opts = [
+      ip: {0, 0, 0, 0, 0, 0, 0, 0},
+      port: port,
+      cipher_suite: :strong,
+      keyfile: tls_key_path,
+      certfile: tls_cert_path
+    ]
+
+    # Add mTLS config if client CA is provided
+    https_opts = if tls_client_ca_path != "" do
+      unless File.exists?(tls_client_ca_path) and File.readable?(tls_client_ca_path) do
+        raise "Invalid client CA certificate file: #{tls_client_ca_path} does not exist or is not readable"
+      end
+
+      https_opts ++ [
+        cacertfile: tls_client_ca_path,
+        verify: if tls_client_require, do: :verify_peer, else: :verify_none,
+        fail_if_no_peer_cert: tls_client_require
+      ]
+    else
+      https_opts
+    end
+  end
+
   config :flagd_ui, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 
-  config :flagd_ui, FlagdUiWeb.Endpoint,
-    url: [host: host, port: 443, scheme: "https"],
-    http: [
-      # Enable IPv6 and bind on all interfaces.
-      # Set it to  {0, 0, 0, 0, 0, 0, 0, 1} for local network only access.
-      # See the documentation on https://hexdocs.pm/bandit/Bandit.html#t:options/0
-      # for details about using IPv6 vs IPv4 and loopback vs public addresses.
-      ip: {0, 0, 0, 0, 0, 0, 0, 0},
-      port: port
-    ],
+  endpoint_config = [
+    url: [host: host, port: if tls_enabled, do: 443, else: port, scheme: if tls_enabled, do: "https", else: "http"],
     check_origin: false,
     secret_key_base: secret_key_base
+  ]
+
+  endpoint_config = if tls_enabled do
+    Keyword.put(endpoint_config, :https, https_opts)
+  else
+    Keyword.put(endpoint_config, :http, [
+      ip: {0, 0, 0, 0, 0, 0, 0, 0},
+      port: port
+    ])
+  end
+
+  config :flagd_ui, FlagdUiWeb.Endpoint, endpoint_config
 
   config :opentelemetry, :processors,
     otel_batch_processor: %{
