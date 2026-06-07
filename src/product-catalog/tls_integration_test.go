@@ -10,34 +10,10 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	grpctls "google.golang.org/grpc/credentials/tls"
+	"google.golang.org/grpc/credentials"
 
-	pb "github.com/open-telemetry/opentelemetry-demo/src/product-catalog/genproto/oteldemo/product/v1"
+	pb "github.com/opentelemetry/opentelemetry-demo/src/product-catalog/genproto/oteldemo"
 )
-
-var (
-	ErrTLSConfigMissingCert = errors.New("TLS config missing certificate path")
-	ErrTLSConfigMissingKey  = errors.New("TLS config missing private key path")
-	ErrTLSConfigMissingCA   = errors.New("TLS config missing CA bundle path for client auth")
-	ErrTLSInvalidCert       = errors.New("invalid TLS certificate/key")
-	ErrTLSInvalidCA         = errors.New("invalid CA bundle")
-)
-
-type TLSConfig struct {
-	Enabled            bool
-	CertPath           string
-	KeyPath            string
-	CAPath             string
-	ClientAuthRequired bool
-}
-
-func LoadTLSConfigFromEnv() (TLSConfig, error) {
-	return TLSConfig{}, nil
-}
-
-func NewGRPCServerWithTLS(cfg TLSConfig) (*grpc.Server, error) {
-	return nil, nil
-}
 
 func TestAC1_TLSDisabledAcceptsPlaintextConnections(t *testing.T) {
 	// Unset all TLS env vars, TLS should be disabled by default
@@ -166,7 +142,7 @@ func TestAC4_MTLSClientAuthRequiredRejectsUnauthenticatedClients(t *testing.T) {
 	tlsConfig := &tls.Config{
 		InsecureSkipVerify: true,
 	}
-	clientCreds := grpctls.New(tlsConfig)
+	clientCreds := credentials.NewTLS(tlsConfig)
 	conn, err := grpc.NewClient("localhost:0", grpc.WithTransportCredentials(clientCreds))
 	if err != nil {
 		t.Fatalf("failed to create TLS client without cert: %v", err)
@@ -223,7 +199,7 @@ func TestAC6_TLSEnabledClientAuthOptionalAcceptsAnyTLSClient(t *testing.T) {
 	tlsConfig := &tls.Config{
 		InsecureSkipVerify: true,
 	}
-	clientCreds := grpctls.New(tlsConfig)
+	clientCreds := credentials.NewTLS(tlsConfig)
 	conn, err := grpc.NewClient("localhost:0", grpc.WithTransportCredentials(clientCreds))
 	if err != nil {
 		t.Fatalf("failed to create TLS client without cert: %v", err)

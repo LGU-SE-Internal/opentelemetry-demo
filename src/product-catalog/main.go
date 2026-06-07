@@ -10,7 +10,10 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -40,6 +43,7 @@ import (
 	pb "github.com/opentelemetry/opentelemetry-demo/src/product-catalog/genproto/oteldemo"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
@@ -54,7 +58,102 @@ var (
 	db     *sql.DB
 	reg    metric.Registration
 	alphanumericRegex = regexp.MustCompile(`^[a-zA-Z0-9]*$`)
+	
+	// TLS errors
+	ErrTLSConfigMissingCert = errors.New("TLS config missing certificate path")
+	ErrTLSConfigMissingKey  = errors.New("TLS config missing private key path")
+	ErrTLSConfigMissingCA   = errors.New("TLS config missing CA bundle path for client auth")
+	ErrTLSInvalidCert       = errors.New("invalid TLS certificate/key")
+	ErrTLSInvalidCA         = errors.New("invalid CA bundle")
 )
+
+// TLSConfig holds validated TLS configuration for the gRPC server
+type TLSConfig struct {
+	Enabled              bool
+	CertPath             string
+	KeyPath              string
+	CAPath               string
+	ClientAuthRequired   bool
+}
+
+// LoadTLSConfigFromEnv reads and validates TLS configuration from environment variables
+// Returns error if configuration is invalid
+func LoadTLSConfigFromEnv() (TLSConfig, error) {
+	var cfg TLSConfig
+	
+	enabledStr := os.Getenv("PRODUCT_CATALOG_GRPC_TLS_ENABLED")
+	cfg.Enabled = strings.ToLower(enabledStr) == "true"
+	
+	cfg.CertPath = os.Getenv("PRODUCT_CATALOG_GRPC_TLS_CERT_PATH")
+	cfg.KeyPath = os.Getenv("PRODUCT_CATALOG_GRPC_TLS_KEY_PATH")
+	cfg.CAPath = os.Getenv("PRODUCT_CATALOG_GRPC_TLS_CA_PATH")
+	
+	clientAuthStr := os.Getenv("PRODUCT_CATALOG_GRPC_TLS_CLIENT_AUTH_REQUIRED")
+	cfg.ClientAuthRequired = strings.ToLower(clientAuthStr) == "true"
+	
+	// Validate config
+	if cfg.Enabled {
+		if cfg.CertPath == "" {
+			return cfg, ErrTLSConfigMissingCert
+		}
+		if cfg.KeyPath == "" {
+			return cfg, ErrTLSConfigMissingKey
+		}
+	}
+	
+	if cfg.ClientAuthRequired && cfg.CAPath == "" {
+		return cfg, ErrTLSConfigMissingCA
+	}
+	
+	return cfg, nil
+}
+
+// NewGRPCServerWithTLS creates a gRPC server configured with TLS/mTLS as per the provided config
+// Returns plaintext gRPC server if TLS is disabled
+// Returns error if TLS configuration is invalid or cannot be loaded
+func NewGRPCServerWithTLS(cfg TLSConfig) (*grpc.Server, error) {
+	// Base server options with OTel handler
+	opts := []grpc.ServerOption{
+		grpc.StatsHandler(otelgrpc.NewServerHandler()),
+	}
+	
+	if !cfg.Enabled {
+		// Return plaintext server
+		return grpc.NewServer(opts...), nil
+	}
+	
+	// Load server cert and key
+	cert, err := tls.LoadX509KeyPair(cfg.CertPath, cfg.KeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrTLSInvalidCert, err)
+	}
+	
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	}
+	
+	if cfg.ClientAuthRequired {
+		// Load CA certs for client authentication
+		caCert, err := os.ReadFile(cfg.CAPath)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrTLSInvalidCA, err)
+		}
+		
+		certPool := x509.NewCertPool()
+		if !certPool.AppendCertsFromPEM(caCert) {
+			return nil, ErrTLSInvalidCA
+		}
+		
+		tlsConfig.ClientCAs = certPool
+		tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+	}
+	
+	// Add TLS credentials to server options
+	opts = append(opts, grpc.Creds(credentials.NewTLS(tlsConfig)))
+	
+	return grpc.NewServer(opts...), nil
+}
 
 func validateGetProductRequest(req *pb.GetProductRequest) error {
 	if req.Id == "" {
@@ -199,7 +298,14 @@ func main() {
 	svc := &productCatalog{}
 	var port string
 	mustMapEnv(&port, "PRODUCT_CATALOG_PORT")
-
+	
+	// Load TLS configuration
+	tlsCfg, err := LoadTLSConfigFromEnv()
+	if err != nil {
+		logger.Error(fmt.Sprintf("Invalid TLS configuration: %v", err))
+		os.Exit(1)
+	}
+	
 	logger.Info(fmt.Sprintf("Product Catalog gRPC server started on port: %s", port))
 
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%s", port))
@@ -207,9 +313,11 @@ func main() {
 		logger.Error(fmt.Sprintf("TCP Listen: %v", err))
 	}
 
-	srv := grpc.NewServer(
-		grpc.StatsHandler(otelgrpc.NewServerHandler()),
-	)
+	srv, err := NewGRPCServerWithTLS(tlsCfg)
+	if err != nil {
+		logger.Error(fmt.Sprintf("Failed to create gRPC server with TLS config: %v", err))
+		os.Exit(1)
+	}
 
 	reflection.Register(srv)
 
