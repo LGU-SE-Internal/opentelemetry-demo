@@ -5,6 +5,7 @@ require "ostruct"
 require "pony"
 require "sinatra"
 require "json"
+require "uri"
 require "rack/attack"
 require "open_feature/sdk"
 require "openfeature/flagd/provider"
@@ -171,16 +172,86 @@ Rack::Attack.throttled_responder = lambda do |request|
   ]
 end
 
-post "/send_order_confirmation" do
+post "/send" do
   data = JSON.parse(request.body.read, object_class: OpenStruct)
+  request_id = request.uuid
+  invalid_fields = []
 
   # Input validation
   if data.email.nil? || data.email.to_s.strip.empty?
-    raise ArgumentError.new("Email address cannot be empty or nil")
+    invalid_fields << "email"
+  else
+    # Validate email format with RFC 5322 compliant regex
+    unless data.email.match?(URI::MailTo::EMAIL_REGEXP)
+      invalid_fields << "email"
+    end
   end
 
   if data.order.nil?
-    raise ArgumentError.new("Order cannot be nil")
+    invalid_fields << "order.order_id"
+  else
+    if data.order.order_id.nil? || data.order.order_id.to_s.strip.empty?
+      invalid_fields << "order.order_id"
+    end
+  end
+
+  # If any validation errors, return 400 and log
+  unless invalid_fields.empty?
+    # Mask email for logging: keep first character and domain
+    masked_email = if data.email && !data.email.empty?
+      parts = data.email.split('@')
+      if parts.length == 2
+        "#{parts[0][0]}***@#{parts[1]}"
+      else
+        "***"
+      end
+    else
+      nil
+    end
+
+    order_id_provided = data.order&.order_id ? data.order.order_id : nil
+
+    # Emit structured error log
+    $logger.on_emit(
+      timestamp: Time.now.utc.iso8601,
+      severity_text: 'ERROR',
+      body: 'Request validation failed for email send endpoint',
+      attributes: {
+        level: 'error',
+        service: 'email-service',
+        endpoint: 'POST /send',
+        request_id: request_id,
+        invalid_fields: invalid_fields,
+        context: {
+          email_provided: masked_email,
+          order_id_provided: order_id_provided
+        }
+      }
+    )
+
+    # Also write to stderr as JSON for test capture
+    log_entry = {
+      level: "error",
+      timestamp: Time.now.utc.iso8601,
+      message: "Request validation failed for email send endpoint",
+      service: "email-service",
+      endpoint: "POST /send",
+      request_id: request_id,
+      invalid_fields: invalid_fields,
+      context: {
+        email_provided: masked_email,
+        order_id_provided: order_id_provided
+      }
+    }
+    $stderr.puts log_entry.to_json
+
+    content_type :json
+    status 400
+    return {
+      error: "Invalid request parameters",
+      invalid_fields: invalid_fields,
+      request_id: request_id
+    }.to_json
   end
 
   # get the current auto-instrumented span
