@@ -222,6 +222,104 @@ async function chargeServiceHandler(call, callback) {
   }
 }
 
+function registerShutdownHandlers(
+  server,
+  cleanupHooks,
+  gracePeriodMs = 30000,
+  logger
+) {
+  let isShuttingDown = false;
+  let inFlightRequests = 0;
+  let shutdownStartTime;
+
+  // Track in-flight requests
+  server.on('request', (req, res) => {
+    if (isShuttingDown) {
+      // Return 503 for new requests during shutdown
+      res.statusCode = 503;
+      res.end('Service Unavailable');
+      return;
+    }
+
+    inFlightRequests++;
+    res.on('finish', () => {
+      inFlightRequests--;
+      if (isShuttingDown && inFlightRequests === 0) {
+        runCleanupAndExit();
+      }
+    });
+    res.on('close', () => {
+      inFlightRequests--;
+      if (isShuttingDown && inFlightRequests === 0) {
+        runCleanupAndExit();
+      }
+    });
+  });
+
+  async function runCleanupAndExit() {
+    let exitCode = 0;
+    for (let i = 0; i < cleanupHooks.length; i++) {
+      try {
+        await cleanupHooks[i]();
+      } catch (err) {
+        exitCode = 1;
+        logger.error({
+          event: 'service.shutdown.cleanup_failed',
+          error: err.message,
+          resourceType: i === 0 ? 'database' : i === 1 ? 'stripe' : 'other'
+        });
+      }
+    }
+
+    const durationMs = Date.now() - shutdownStartTime;
+    logger.info({
+      event: 'service.shutdown.completed',
+      durationMs
+    });
+
+    process.exit(exitCode);
+  }
+
+  function handleShutdown(signal) {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    shutdownStartTime = Date.now();
+
+    logger.info({
+      event: 'service.shutdown.started',
+      signal,
+      gracePeriodMs
+    });
+
+    // Stop accepting new connections
+    server.close((err) => {
+      if (err) {
+        logger.error({ err }, 'Error closing server');
+      }
+    });
+
+    // Set grace period timeout
+    setTimeout(() => {
+      if (inFlightRequests > 0) {
+        logger.info({
+          event: 'service.shutdown.forced',
+          reason: 'grace_period_exceeded',
+          inFlightRequestsCount: inFlightRequests
+        });
+      }
+      runCleanupAndExit();
+    }, gracePeriodMs);
+
+    // If no in-flight requests, run cleanup immediately
+    if (inFlightRequests === 0) {
+      runCleanupAndExit();
+    }
+  }
+
+  process.on('SIGINT', () => handleShutdown('SIGINT'));
+  process.on('SIGTERM', () => handleShutdown('SIGTERM'));
+}
+
 async function closeGracefully(signal) {
   server.forceShutdown()
   process.kill(process.pid, signal)
@@ -609,16 +707,34 @@ server.bindAsync(address, serverCredentials, (err, port) => {
   // Start combined server on payment port
   httpServer.listen(port, ip, () => {
     logger.info(`Payment service combined gRPC + HTTP health endpoint listening on port ${port}`);
+
+    // Register shutdown handlers for the combined HTTP server
+    const cleanupHooks = [
+      // Database cleanup first (placeholder for actual DB connection close)
+      async () => {
+        logger.info('Closing database connections...');
+        // Add actual DB close logic here when implemented
+      },
+      // Stripe/Payment processor cleanup next
+      async () => {
+        logger.info('Cleaning up payment processor connections...');
+        // Add actual Stripe client destroy logic here when implemented
+      }
+    ];
+
+    registerShutdownHandlers(httpServer, cleanupHooks, 30000, logger);
   });
 })
 
-process.once('SIGINT', closeGracefully)
-process.once('SIGTERM', closeGracefully)
+// Remove old immediate shutdown handlers
+// process.once('SIGINT', closeGracefully)
+// process.once('SIGTERM', closeGracefully)
 
 module.exports = {
   getServerCredentials,
   app: app,
   rateLimitInterceptor,
   configuredRateLimit,
-  rateLimiter
+  rateLimiter,
+  registerShutdownHandlers
 }
