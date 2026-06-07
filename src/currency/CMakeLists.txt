@@ -18,6 +18,7 @@ add_executable(currency src/server.cpp)
 add_dependencies(currency demo-proto)
 target_link_libraries(
     currency demo-proto protobuf::libprotobuf
-     ${OPENTELEMETRY_CPP_LIBRARIES} gRPC::grpc++)
+     ${OPENTELEMETRY_CPP_LIBRARIES} gRPC::grpc++ absl::time absl::base
+)
 
 install(TARGETS currency DESTINATION bin)

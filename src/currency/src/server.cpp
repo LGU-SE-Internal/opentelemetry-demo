@@ -9,7 +9,11 @@
 #include <grpc/health/v1/health.grpc.pb.h>
 #include <thread>
 #include <atomic>
+#include <mutex>
+#include <unordered_map>
 #include "httplib.h"
+#include "absl/time/clock.h"
+#include "absl/time/time.h"
 
 #include "opentelemetry/trace/context.h"
 #include "opentelemetry/semconv/incubating/rpc_attributes.h"
@@ -91,6 +95,15 @@ namespace
 
   nostd::unique_ptr<metrics_api::Counter<uint64_t>> currency_counter;
   nostd::shared_ptr<opentelemetry::logs::Logger> logger;
+  nostd::unique_ptr<metrics_api::Counter<uint64_t>> rate_limited_counter;
+
+  // Rate limiting configuration
+  bool rate_limit_enabled = true;
+  int rate_limit_rpm = 100;
+
+  // Rate limiter state: map of client IP to (window start time, request count)
+  std::unordered_map<std::string, std::pair<absl::Time, int>> rate_limit_state;
+  std::mutex rate_limit_mutex;
 
 class HealthServer final : public grpc::health::v1::Health::Service
 {
@@ -171,6 +184,15 @@ class CurrencyService final : public oteldemo::CurrencyService::Service
   	const CurrencyConversionRequest* request,
   	Money* response) override
   {
+    // Rate limiting check
+    std::string client_ip = GetClientIp(context);
+    if (IsRateLimited(client_ip)) {
+      IncrementRateLimitedMetric(client_ip, "Convert");
+      std::string error_msg = "Rate limit exceeded. Maximum " + std::to_string(rate_limit_rpm) + " requests per minute per IP address.";
+      logger->Warn(std::string(__func__) + " rate limited client: " + client_ip);
+      return Status(grpc::RESOURCE_EXHAUSTED, error_msg);
+    }
+
     StartSpanOptions options;
     options.kind = SpanKind::kServer;
     GrpcServerCarrier carrier(context);
@@ -255,6 +277,66 @@ class CurrencyService final : public oteldemo::CurrencyService::Service
       std::map<std::string, std::string> labels = { {"currency_code", currency_code} };
       auto labelkv = common::KeyValueIterableView<decltype(labels)>{ labels };
       currency_counter->Add(1, labelkv);
+  }
+
+  // Helper function to extract client IP from ServerContext
+  std::string GetClientIp(ServerContext* context) {
+    auto peer = context->peer();
+    // Peer format is typically "ipv4:127.0.0.1:port" or "ipv6:[::1]:port"
+    size_t colon_pos = peer.find(':');
+    if (colon_pos == std::string::npos) return "";
+    std::string ip_part = peer.substr(colon_pos + 1);
+    // Remove port part
+    size_t port_colon_pos = ip_part.rfind(':');
+    if (port_colon_pos != std::string::npos) {
+      ip_part = ip_part.substr(0, port_colon_pos);
+    }
+    // Remove brackets for IPv6
+    if (!ip_part.empty() && ip_part[0] == '[' && ip_part.back() == ']') {
+      ip_part = ip_part.substr(1, ip_part.size() - 2);
+    }
+    return ip_part;
+  }
+
+  // Check if request from client IP is rate limited
+  bool IsRateLimited(const std::string& client_ip) {
+    if (!rate_limit_enabled || client_ip.empty()) return false;
+
+    std::lock_guard<std::mutex> lock(rate_limit_mutex);
+    absl::Time now = absl::Now();
+    auto it = rate_limit_state.find(client_ip);
+
+    if (it == rate_limit_state.end()) {
+      // New client, create entry
+      rate_limit_state[client_ip] = {now, 1};
+      return false;
+    }
+
+    auto& [window_start, count] = it->second;
+    // Check if window has expired
+    if (absl::ToInt64Seconds(now - window_start) >= 60) {
+      window_start = now;
+      count = 1;
+      return false;
+    }
+
+    if (count < rate_limit_rpm) {
+      count++;
+      return false;
+    }
+
+    // Rate limit exceeded
+    return true;
+  }
+
+  // Increment rate limited counter metric
+  void IncrementRateLimitedMetric(const std::string& client_ip, const std::string& method) {
+    std::map<std::string, std::string> labels = {
+      {"client_ip", client_ip},
+      {"method", method}
+    };
+    auto labelkv = common::KeyValueIterableView<decltype(labels)>{ labels };
+    rate_limited_counter->Add(1, labelkv);
   }
 };
 
@@ -364,7 +446,26 @@ int main(int argc, char **argv) {
   initMeter();
   initLogger();
   currency_counter = initIntCounter("demo.exchange.conversions", version);
+  rate_limited_counter = initIntCounter("currency_service_rate_limited_requests_total", version);
   logger = getLogger(name);
+
+  // Read rate limiting configuration from environment variables
+  const char* rate_limit_enabled_env = std::getenv("CURRENCY_SERVICE_RATE_LIMIT_ENABLED");
+  if (rate_limit_enabled_env != nullptr) {
+    std::string env_val(rate_limit_enabled_env);
+    if (env_val == "false" || env_val == "0") {
+      rate_limit_enabled = false;
+    }
+  }
+
+  const char* rate_limit_rpm_env = std::getenv("CURRENCY_SERVICE_RATE_LIMIT_RPM");
+  if (rate_limit_rpm_env != nullptr) {
+    int rpm = atoi(rate_limit_rpm_env);
+    if (rpm > 0) {
+      rate_limit_rpm = rpm;
+    }
+  }
+
   RunServer(port);
 
   return 0;
