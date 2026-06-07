@@ -11,6 +11,7 @@ import os
 import random
 import json
 import re
+from typing import Optional
 from concurrent import futures
 
 # Pip
@@ -223,6 +224,84 @@ def check_feature_flag(flag_name: str):
     return client.get_boolean_value("recommendationCacheFailure", False)
 
 
+def load_tls_credentials(
+    cert_path: str,
+    key_path: str,
+    ca_cert_path: Optional[str] = None
+) -> grpc.ServerCredentials:
+    """
+    Loads, validates, and constructs gRPC TLS server credentials from provided paths.
+
+    Args:
+        cert_path: Filesystem path to server TLS certificate
+        key_path: Filesystem path to server private key
+        ca_cert_path: Optional filesystem path to CA certificate bundle for mTLS
+
+    Returns:
+        Configured gRPC ServerCredentials object for TLS connections
+
+    Raises:
+        FileNotFoundError: If any provided path does not exist
+        PermissionError: If any provided file is not readable by the service process
+        ValueError: If any provided file contains invalid PEM formatted data
+    """
+    # Read and validate certificate file
+    try:
+        with open(cert_path, 'rb') as f:
+            cert_data = f.read()
+    except FileNotFoundError:
+        raise FileNotFoundError(f"TLS certificate file not found at path: {cert_path}")
+    except PermissionError:
+        raise PermissionError(f"Insufficient permissions to read TLS certificate file at path: {cert_path}")
+    except Exception as e:
+        raise ValueError(f"Failed to read TLS certificate file: {str(e)}") from e
+    
+    # Validate certificate is PEM formatted
+    if b"-----BEGIN CERTIFICATE-----" not in cert_data:
+        raise ValueError("invalid certificate format: not a valid PEM certificate")
+
+    # Read and validate private key file
+    try:
+        with open(key_path, 'rb') as f:
+            key_data = f.read()
+    except FileNotFoundError:
+        raise FileNotFoundError(f"TLS private key file not found at path: {key_path}")
+    except PermissionError:
+        raise PermissionError(f"Insufficient permissions to read TLS private key file at path: {key_path}")
+    except Exception as e:
+        raise ValueError(f"Failed to read TLS private key file: {str(e)}") from e
+    
+    # Validate private key is PEM formatted
+    if b"-----BEGIN PRIVATE KEY-----" not in key_data and b"-----BEGIN RSA PRIVATE KEY-----" not in key_data:
+        raise ValueError("invalid private key format: not a valid PEM private key")
+
+    # Handle mTLS if CA cert path is provided
+    if ca_cert_path is not None:
+        try:
+            with open(ca_cert_path, 'rb') as f:
+                ca_cert_data = f.read()
+        except FileNotFoundError:
+            raise FileNotFoundError(f"TLS CA certificate file not found at path: {ca_cert_path}")
+        except PermissionError:
+            raise PermissionError(f"Insufficient permissions to read TLS CA certificate file at path: {ca_cert_path}")
+        except Exception as e:
+            raise ValueError(f"Failed to read TLS CA certificate file: {str(e)}") from e
+        
+        # Validate CA cert is PEM formatted
+        if b"-----BEGIN CERTIFICATE-----" not in ca_cert_data:
+            raise ValueError("invalid CA certificate format: not a valid PEM certificate")
+        
+        # Create mTLS credentials requiring client certificate
+        return grpc.ssl_server_credentials(
+            [(key_data, cert_data)],
+            root_certificates=ca_cert_data,
+            require_client_auth=True
+        )
+    else:
+        # Create standard one-way TLS credentials
+        return grpc.ssl_server_credentials([(key_data, cert_data)])
+
+
 if __name__ == "__main__":
     service_name = must_map_env('OTEL_SERVICE_NAME')
     api.set_provider(FlagdProvider(host=os.environ.get('FLAGD_HOST', 'flagd'), port=os.environ.get('FLAGD_PORT', 8013)))
@@ -295,7 +374,27 @@ if __name__ == "__main__":
 
     # Start server
     port = must_map_env('RECOMMENDATION_PORT')
-    server.add_insecure_port(f'[::]:{port}')
+    
+    # TLS Configuration
+    tls_cert_path = os.environ.get('RECOMMENDATION_SERVICE_TLS_CERT_PATH')
+    tls_key_path = os.environ.get('RECOMMENDATION_SERVICE_TLS_KEY_PATH')
+    tls_ca_cert_path = os.environ.get('RECOMMENDATION_SERVICE_TLS_CA_CERT_PATH')
+    
+    if tls_cert_path or tls_key_path:
+        # Both must be provided if either is provided
+        if not tls_cert_path or not tls_key_path:
+            raise ValueError("both certificate and key path must be provided together when enabling TLS")
+        
+        # Load TLS credentials
+        server_credentials = load_tls_credentials(tls_cert_path, tls_key_path, tls_ca_cert_path)
+        server.add_secure_port(f'[::]:{port}', server_credentials)
+        logger.info(f'Recommendation service started with TLS enabled, listening on port {port}')
+        if tls_ca_cert_path:
+            logger.info('Mutual TLS (mTLS) client authentication is enabled')
+    else:
+        # Fall back to insecure mode
+        server.add_insecure_port(f'[::]:{port}')
+        logger.info(f'Recommendation service started in insecure mode, listening on port {port}')
+    
     server.start()
-    logger.info(f'Recommendation service started, listening on port {port}')
     server.wait_for_termination()
