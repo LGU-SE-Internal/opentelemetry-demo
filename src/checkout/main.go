@@ -13,10 +13,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"strconv"
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/log/global"
@@ -58,6 +60,156 @@ import (
 	"github.com/open-telemetry/opentelemetry-demo/src/checkout/kafka"
 	"github.com/open-telemetry/opentelemetry-demo/src/checkout/money"
 )
+
+// Validation helper functions
+
+// ValidateUserID checks if user ID is a valid UUID v4
+func ValidateUserID(userID string) error {
+	if userID == "" {
+		return status.Errorf(codes.InvalidArgument, "invalid field user_id: required field is empty")
+	}
+	_, err := uuid.Parse(userID)
+	if err != nil {
+		return status.Errorf(codes.InvalidArgument, "invalid field user_id: must be valid UUID v4")
+	}
+	return nil
+}
+
+// ValidateItemQuantities checks that all order items have quantity >= 1
+func ValidateItemQuantities(items []*pb.OrderItem) error {
+	if len(items) == 0 {
+		return status.Errorf(codes.InvalidArgument, "invalid field items: required field is empty")
+	}
+	for i, item := range items {
+		if item.Quantity <= 0 {
+			return status.Errorf(codes.InvalidArgument, "invalid field items[%d].quantity: must be greater than 0", i)
+		}
+	}
+	return nil
+}
+
+var (
+	usZipRegex = regexp.MustCompile(`^\d{5}(-\d{4})?$`)
+	euZipRegex = regexp.MustCompile(`^[a-zA-Z0-9]{2,10}$`)
+)
+
+// ValidateAddress checks that all required address fields are present and formatted correctly
+func ValidateAddress(addr *pb.Address) error {
+	if addr == nil {
+		return status.Errorf(codes.InvalidArgument, "invalid field address: required field is missing")
+	}
+	if addr.StreetAddress == "" {
+		return status.Errorf(codes.InvalidArgument, "invalid field address.street: required field is empty")
+	}
+	if addr.City == "" {
+		return status.Errorf(codes.InvalidArgument, "invalid field address.city: required field is empty")
+	}
+	if addr.State == "" {
+		return status.Errorf(codes.InvalidArgument, "invalid field address.state: required field is empty")
+	}
+	if addr.Country == "" {
+		return status.Errorf(codes.InvalidArgument, "invalid field address.country: required field is empty")
+	}
+	if addr.ZipCode == "" {
+		return status.Errorf(codes.InvalidArgument, "invalid field address.zip_code: required field is empty")
+	}
+
+	// Validate zip code based on country
+	switch addr.Country {
+	case "US":
+		if !usZipRegex.MatchString(addr.ZipCode) {
+			return status.Errorf(codes.InvalidArgument, "invalid field address.zip_code: invalid format for country US")
+		}
+	default:
+		// Assume EU/other alphanumeric zip
+		if !euZipRegex.MatchString(addr.ZipCode) {
+			return status.Errorf(codes.InvalidArgument, "invalid field address.zip_code: invalid format for country %s", addr.Country)
+		}
+	}
+	return nil
+}
+
+// luhnCheck performs Luhn algorithm validation for credit card numbers
+func luhnCheck(cardNumber string) bool {
+	var sum int
+	alternate := false
+	for i := len(cardNumber) - 1; i >= 0; i-- {
+		d := int(cardNumber[i] - '0')
+		if alternate {
+			d *= 2
+			if d > 9 {
+				d -= 9
+			}
+		}
+		sum += d
+		alternate = !alternate
+	}
+	return sum%10 == 0
+}
+
+var cvvRegex = regexp.MustCompile(`^\d{3,4}$`)
+
+// ValidateCreditCard checks credit card number (Luhn check), expiration date (not past), CVV (valid length)
+func ValidateCreditCard(cc *pb.CreditCardInfo) error {
+	if cc == nil {
+		return status.Errorf(codes.InvalidArgument, "invalid field credit_card: required field is missing")
+	}
+	if cc.Number == "" {
+		return status.Errorf(codes.InvalidArgument, "invalid field credit_card.number: required field is empty")
+	}
+	// Remove any non-digit characters from card number
+	cleanNumber := ""
+	for _, c := range cc.Number {
+		if unicode.IsDigit(c) {
+			cleanNumber += string(c)
+		}
+	}
+	if len(cleanNumber) < 13 || len(cleanNumber) > 19 {
+		return status.Errorf(codes.InvalidArgument, "invalid field credit_card.number: invalid card number")
+	}
+	if !luhnCheck(cleanNumber) {
+		return status.Errorf(codes.InvalidArgument, "invalid field credit_card.number: invalid card number")
+	}
+
+	if cc.ExpirationMonth < 1 || cc.ExpirationMonth > 12 {
+		return status.Errorf(codes.InvalidArgument, "invalid field credit_card.expiration_month: must be between 1 and 12")
+	}
+	if cc.ExpirationYear < 1900 {
+		return status.Errorf(codes.InvalidArgument, "invalid field credit_card.expiration_year: invalid year")
+	}
+	// Check if expiration is in past
+	now := time.Now()
+	currentYear, currentMonth, _ := now.Date()
+	if cc.ExpirationYear < int(currentYear) || (cc.ExpirationYear == int(currentYear) && cc.ExpirationMonth < int(currentMonth)) {
+		return status.Errorf(codes.InvalidArgument, "invalid field credit_card.expiration: date is in the past")
+	}
+
+	if cc.Cvv == "" {
+		return status.Errorf(codes.InvalidArgument, "invalid field credit_card.cvv: required field is empty")
+	}
+	if !cvvRegex.MatchString(cc.Cvv) {
+		return status.Errorf(codes.InvalidArgument, "invalid field credit_card.cvv: must be 3 or 4 digits")
+	}
+
+	return nil
+}
+
+// ValidatePlaceOrderRequest runs all validations on a full PlaceOrderRequest
+func ValidatePlaceOrderRequest(req *pb.PlaceOrderRequest) error {
+	if err := ValidateUserID(req.UserId); err != nil {
+		return err
+	}
+	if err := ValidateItemQuantities(req.Items); err != nil {
+		return err
+	}
+	if err := ValidateAddress(req.Address); err != nil {
+		return err
+	}
+	if err := ValidateCreditCard(req.CreditCard); err != nil {
+		return err
+	}
+	return nil
+}
 
 //go:generate go install google.golang.org/protobuf/cmd/protoc-gen-go
 //go:generate go install google.golang.org/grpc/cmd/protoc-gen-go-grpc
@@ -403,6 +555,11 @@ func (cs *checkout) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (
 		slog.String("user_id", req.UserId),
 		slog.String("user_currency", req.UserCurrency),
 	)
+
+	// Validate request before processing
+	if err := ValidatePlaceOrderRequest(req); err != nil {
+		return nil, err
+	}
 
 	var err error
 	defer func() {
