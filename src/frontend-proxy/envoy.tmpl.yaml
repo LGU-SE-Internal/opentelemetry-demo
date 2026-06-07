@@ -6,6 +6,14 @@
 {{ $upstreamTlsMaxVersion := getenv "FRONTEND_PROXY_UPSTREAM_TLS_MAX_VERSION" "TLSv1_3" }}
 {{ $upstreamCaPath := getenv "FRONTEND_PROXY_UPSTREAM_TLS_CA_BUNDLE_PATH" "" }}
 
+{{ $retryMaxAttempts := getenv "ENVOY_RETRY_MAX_ATTEMPTS" "2" | toInt }}
+{{ $retryOn := getenv "ENVOY_RETRY_ON" "5xx,gateway-error,connect-failure,refused-stream" }}
+{{ $circuitBreakerMaxConnections := getenv "ENVOY_CIRCUIT_BREAKER_MAX_CONNECTIONS" "1024" | toInt }}
+{{ $circuitBreakerMaxPendingRequests := getenv "ENVOY_CIRCUIT_BREAKER_MAX_PENDING_REQUESTS" "1024" | toInt }}
+{{ $circuitBreakerMaxRetries := getenv "ENVOY_CIRCUIT_BREAKER_MAX_RETRIES" "512" | toInt }}
+{{ $retryBudgetFraction := getenv "ENVOY_RETRY_BUDGET_FRACTION" "0.2" | toFloat }}
+{{ $retryBudgetMinRetryConcurrency := getenv "ENVOY_RETRY_BUDGET_MIN_RETRY_CONCURRENCY" "10" | toInt }}
+
 static_resources:
   listeners:
     - address:
@@ -61,6 +69,14 @@ static_resources:
                     - name: frontend
                       domains:
                         - "*"
+                      retry_policy:
+                        retry_on: "{{ $retryOn }}"
+                        num_retries: {{ $retryMaxAttempts }}
+                        retriable_request_headers:
+                          - name: ":method"
+                            exact_match: "GET"
+                          - name: ":method"
+                            exact_match: "HEAD"
                       routes:
                         - match: { path: "/healthz" }
                           direct_response:
@@ -221,6 +237,12 @@ static_resources:
                       healthy_body:
                         inline_string: "ok"
                       unhealthy_status: 503
+                  - name: envoy.filters.http.retry_budget
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.retry_budget.v3.RetryBudget
+                      budget_percent:
+                        value: {{ mul $retryBudgetFraction 100 }}
+                      min_retry_concurrency: {{ $retryBudgetMinRetryConcurrency }}
                   - name: envoy.filters.http.router
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
@@ -342,6 +364,12 @@ static_resources:
     - name: frontend
       type: STRICT_DNS
       lb_policy: ROUND_ROBIN
+      circuit_breakers:
+        thresholds:
+          - priority: DEFAULT
+            max_connections: {{ $circuitBreakerMaxConnections }}
+            max_pending_requests: {{ $circuitBreakerMaxPendingRequests }}
+            max_retries: {{ $circuitBreakerMaxRetries }}
 {{ if $upstreamTlsEnabled }}
       transport_socket:
         name: envoy.transport_sockets.tls
@@ -367,6 +395,12 @@ static_resources:
     - name: image-provider
       type: STRICT_DNS
       lb_policy: ROUND_ROBIN
+      circuit_breakers:
+        thresholds:
+          - priority: DEFAULT
+            max_connections: {{ $circuitBreakerMaxConnections }}
+            max_pending_requests: {{ $circuitBreakerMaxPendingRequests }}
+            max_retries: {{ $circuitBreakerMaxRetries }}
 {{ if $upstreamTlsEnabled }}
       transport_socket:
         name: envoy.transport_sockets.tls
