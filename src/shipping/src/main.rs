@@ -11,10 +11,15 @@ use opentelemetry::{global, metrics::{Counter, Meter}};
 use opentelemetry_instrumentation_actix_web::{RequestMetrics, RequestTracing};
 use serde::Serialize;
 use std::env;
+use std::fs::File;
+use std::io::BufReader;
 use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::signal::unix::{signal, SignalKind};
 use tracing::{info, warn, error};
+use rustls::{Certificate, PrivateKey, ServerConfig, RootCertStore};
+use rustls_pemfile::{certs, pkcs8_private_keys, rsa_private_keys};
+use actix_web::rustls::RustlsConfig;
 mod telemetry_conf;
 use telemetry_conf::init_otel;
 mod shipping_service;
@@ -170,6 +175,99 @@ pub fn get_flagd_options() -> FlagdOptions {
     }
 }
 
+/// Load TLS configuration from environment variables
+fn load_tls_config() -> anyhow::Result<Option<RustlsConfig>> {
+    let tls_enabled = env::var("SHIPPING_SERVICE_TLS_ENABLED")
+        .map(|v| v.to_lowercase() == "true")
+        .unwrap_or(false);
+    
+    if !tls_enabled {
+        return Ok(None);
+    }
+    
+    // Get required TLS config paths
+    let cert_path = env::var("SHIPPING_SERVICE_TLS_CERT_PATH")
+        .map_err(|_| anyhow::anyhow!("SHIPPING_SERVICE_TLS_CERT_PATH is required when TLS is enabled"))?;
+    let key_path = env::var("SHIPPING_SERVICE_TLS_KEY_PATH")
+        .map_err(|_| anyhow::anyhow!("SHIPPING_SERVICE_TLS_KEY_PATH is required when TLS is enabled"))?;
+    
+    // Load certificate
+    let cert_file = File::open(&cert_path)
+        .map_err(|e| anyhow::anyhow!("Failed to load TLS certificates: {}: {}", cert_path, e))?;
+    let mut cert_reader = BufReader::new(cert_file);
+    let cert_chain = certs(&mut cert_reader)
+        .map_err(|e| anyhow::anyhow!("Invalid TLS certificate format: {}", e))?
+        .into_iter()
+        .map(Certificate)
+        .collect::<Vec<_>>();
+    
+    if cert_chain.is_empty() {
+        return Err(anyhow::anyhow!("No certificates found in {}", cert_path));
+    }
+    
+    // Load private key
+    let key_file = File::open(&key_path)
+        .map_err(|e| anyhow::anyhow!("Failed to load TLS private key: {}: {}", key_path, e))?;
+    let mut key_reader = BufReader::new(key_file);
+    
+    // Try PKCS8 first, then RSA
+    let mut keys = pkcs8_private_keys(&mut key_reader)
+        .map_err(|e| anyhow::anyhow!("Invalid TLS private key format: {}", e))?;
+    
+    if keys.is_empty() {
+        let mut key_reader = BufReader::new(File::open(&key_path)?);
+        keys = rsa_private_keys(&mut key_reader)
+            .map_err(|e| anyhow::anyhow!("Invalid TLS private key format: {}", e))?;
+    }
+    
+    if keys.is_empty() {
+        return Err(anyhow::anyhow!("No private keys found in {}", key_path));
+    }
+    
+    let private_key = PrivateKey(keys.remove(0));
+    
+    // Check if mTLS is enabled
+    let mtls_enabled = env::var("SHIPPING_SERVICE_MTLS_ENABLED")
+        .map(|v| v.to_lowercase() == "true")
+        .unwrap_or(false);
+    
+    let config = if mtls_enabled {
+        let ca_cert_path = env::var("SHIPPING_SERVICE_TLS_CA_CERT_PATH")
+            .map_err(|_| anyhow::anyhow!("SHIPPING_SERVICE_TLS_CA_CERT_PATH is required when mTLS is enabled"))?;
+        
+        // Load CA certs
+        let ca_file = File::open(&ca_cert_path)
+            .map_err(|e| anyhow::anyhow!("Failed to load CA certificates: {}: {}", ca_cert_path, e))?;
+        let mut ca_reader = BufReader::new(ca_file);
+        let ca_certs = certs(&mut ca_reader)
+            .map_err(|e| anyhow::anyhow!("Invalid CA certificate format: {}", e))?;
+        
+        let mut root_store = RootCertStore::empty();
+        for ca in ca_certs {
+            root_store.add(&Certificate(ca))
+                .map_err(|e| anyhow::anyhow!("Failed to add CA certificate to trust store: {}", e))?;
+        }
+        
+        // Configure mTLS
+        let client_auth = rustls::server::AllowAnyAuthenticatedClient::new(root_store);
+        
+        ServerConfig::builder()
+            .with_safe_defaults()
+            .with_client_cert_verifier(client_auth)
+            .with_single_cert(cert_chain, private_key)
+            .map_err(|e| anyhow::anyhow!("Failed to build TLS server config: {}", e))?
+    } else {
+        // Regular TLS without client auth
+        ServerConfig::builder()
+            .with_safe_defaults()
+            .with_no_client_auth()
+            .with_single_cert(cert_chain, private_key)
+            .map_err(|e| anyhow::anyhow!("Failed to build TLS server config: {}", e))?
+    };
+    
+    Ok(Some(RustlsConfig::from(config)))
+}
+
 pub async fn init_flagd_provider() -> Arc<dyn FeatureProvider> {
     let options = get_flagd_options();
 
@@ -283,16 +381,35 @@ async fn main() -> std::io::Result<()> {
     }
 
     let addr = format!("{}:{}", ip, port);
+    
+    // Load TLS configuration
+    let tls_config = match load_tls_config() {
+        Ok(config) => config,
+        Err(e) => {
+            error!("{}", e);
+            std::process::exit(1);
+        }
+    };
+    
     info!(
         name = "ServerStartedSuccessfully",
         addr = addr.as_str(),
+        tls_enabled = tls_config.is_some(),
         message = "Shipping service is running"
     );
 
-    let server = HttpServer::new(move || app())
-        .shutdown_timeout(30)
-        .bind(&addr)?
-        .run();
+    let server_builder = HttpServer::new(move || app())
+        .shutdown_timeout(30);
+    
+    let server = if let Some(tls_config) = tls_config {
+        server_builder
+            .bind_rustls(&addr, tls_config)?
+            .run()
+    } else {
+        server_builder
+            .bind(&addr)?
+            .run()
+    };
 
     // Get server handle for shutdown
     let handle = server.handle();
