@@ -148,13 +148,27 @@ extensions:
       failure_threshold: 3
 
 exporters:
+  # OTEL_COLLECTOR_EXPORTER_QUEUE_SIZE: Maximum in-memory queue size per exporter (default 1000 for dev, increase for high throughput production)
   debug:
+    queue_settings:
+      queue_size: ${env:OTEL_COLLECTOR_EXPORTER_QUEUE_SIZE:-1000}
 
 processors:
+  # Memory Limiter Processor: Prevents OOM crashes by rejecting incoming data when memory exceeds limits
+  # OTEL_COLLECTOR_MEMORY_LIMIT_MIB: Maximum allowed memory usage (default 512MiB for dev, recommended 80% of allocated container memory in production)
+  # OTEL_COLLECTOR_MEMORY_SPIKE_LIMIT_MIB: Maximum allowed sudden memory spike (default 256MiB for dev, recommended 20-30% of memory limit in production)
+  # OTEL_COLLECTOR_MEMORY_CHECK_INTERVAL: How often to check memory usage (default 1s, valid Go duration format)
   memory_limiter:
-    check_interval: 5s
-    limit_percentage: 80
-    spike_limit_percentage: 25
+    limit_mib: ${env:OTEL_COLLECTOR_MEMORY_LIMIT_MIB:-512}
+    spike_limit_mib: ${env:OTEL_COLLECTOR_MEMORY_SPIKE_LIMIT_MIB:-256}
+    check_interval: ${env:OTEL_COLLECTOR_MEMORY_CHECK_INTERVAL:-1s}
+  # Batch Processor: Batches telemetry data before exporting to reduce overhead
+  # OTEL_COLLECTOR_BATCH_PROCESSOR_QUEUE_SIZE: Maximum number of batches held in memory (default 1000 for dev, increase for high throughput production environments)
+  batch:
+    send_batch_size: 1024
+    send_batch_max_size: 8192
+    timeout: 200ms
+    queue_size: ${env:OTEL_COLLECTOR_BATCH_PROCESSOR_QUEUE_SIZE:-1000}
   resourcedetection:
     detectors: [env, docker, system]
     system:
@@ -250,19 +264,19 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [resourcedetection, memory_limiter, transform/sanitize_spans]
+      processors: [resourcedetection, memory_limiter, transform/sanitize_spans, batch]
       exporters: [debug, span_metrics]
     metrics:
       receivers: [docker_stats, http_check/frontend-proxy, host_metrics, nginx, otlp, redis, postgresql, prometheus/ad, span_metrics]
-      processors: [resourcedetection, memory_limiter]
+      processors: [resourcedetection, memory_limiter, batch]
       exporters: [debug]
     logs:
       receivers: [otlp]
-      processors: [resourcedetection, memory_limiter, transform/sanitize_logs]
+      processors: [resourcedetection, memory_limiter, transform/sanitize_logs, batch]
       exporters: [debug]
     profiles:
       receivers: [otlp]
-      processors: [filter/sanitize_profiles, memory_limiter]
+      processors: [filter/sanitize_profiles, memory_limiter, batch]
       exporters: [debug]
   telemetry:
     metrics:
