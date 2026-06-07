@@ -78,11 +78,100 @@ sealed class OrderValidationError(message: String) : Exception(message) {
 const val topic = "orders"
 const val groupID = "fraud-detection"
 const val DEFAULT_HEALTH_PORT = 9091
+const val DEFAULT_GRPC_TLS_PORT = 9092
 const val POLL_TIMEOUT_MS = 100L
 const val HEALTH_CHECK_INTERVAL_MS = 10000L // 10 seconds
 const val MAX_UNHEALTHY_POLL_INTERVAL_MS = 60000L // 60 seconds
 const val SHUTDOWN_WAIT_MS = 5000L // 5 seconds
 const val DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_MS = 30000L // 30 seconds default
+
+// TLS Configuration Environment Variables
+const val ENV_GRPC_TLS_ENABLED = "GRPC_TLS_ENABLED"
+const val ENV_GRPC_TLS_CERT_PATH = "GRPC_TLS_CERT_PATH"
+const val ENV_GRPC_TLS_KEY_PATH = "GRPC_TLS_KEY_PATH"
+const val ENV_GRPC_TLS_CLIENT_CA_PATH = "GRPC_TLS_CLIENT_CA_PATH"
+const val ENV_GRPC_PLAINTEXT_ENABLED = "GRPC_PLAINTEXT_ENABLED"
+const val ENV_KAFKA_TLS_ENABLED = "KAFKA_TLS_ENABLED"
+const val ENV_KAFKA_TLS_CERT_PATH = "KAFKA_TLS_CERT_PATH"
+const val ENV_KAFKA_TLS_KEY_PATH = "KAFKA_TLS_KEY_PATH"
+const val ENV_KAFKA_TLS_CA_PATH = "KAFKA_TLS_CA_PATH"
+
+data class TlsConfig(
+    val grpcTlsEnabled: Boolean,
+    val grpcTlsCertPath: String,
+    val grpcTlsKeyPath: String,
+    val grpcTlsClientCaPath: String,
+    val grpcPlaintextEnabled: Boolean,
+    val kafkaTlsEnabled: Boolean,
+    val kafkaTlsCertPath: String,
+    val kafkaTlsKeyPath: String,
+    val kafkaTlsCaPath: String
+)
+
+fun loadTlsConfigFromEnv(): TlsConfig {
+    return TlsConfig(
+        grpcTlsEnabled = System.getenv(ENV_GRPC_TLS_ENABLED)?.toBooleanStrictOrNull() ?: false,
+        grpcTlsCertPath = System.getenv(ENV_GRPC_TLS_CERT_PATH) ?: "",
+        grpcTlsKeyPath = System.getenv(ENV_GRPC_TLS_KEY_PATH) ?: "",
+        grpcTlsClientCaPath = System.getenv(ENV_GRPC_TLS_CLIENT_CA_PATH) ?: "",
+        grpcPlaintextEnabled = System.getenv(ENV_GRPC_PLAINTEXT_ENABLED)?.toBooleanStrictOrNull() ?: true,
+        kafkaTlsEnabled = System.getenv(ENV_KAFKA_TLS_ENABLED)?.toBooleanStrictOrNull() ?: false,
+        kafkaTlsCertPath = System.getenv(ENV_KAFKA_TLS_CERT_PATH) ?: "",
+        kafkaTlsKeyPath = System.getenv(ENV_KAFKA_TLS_KEY_PATH) ?: "",
+        kafkaTlsCaPath = System.getenv(ENV_KAFKA_TLS_CA_PATH) ?: ""
+    )
+}
+
+fun validateTlsConfig(config: TlsConfig): Result<Unit> {
+    // Validate gRPC TLS config
+    if (config.grpcTlsEnabled) {
+        if (config.grpcTlsCertPath.isBlank()) {
+            return Result.Failure(IllegalArgumentException("$ENV_GRPC_TLS_CERT_PATH must be set when $ENV_GRPC_TLS_ENABLED is true"))
+        }
+        if (config.grpcTlsKeyPath.isBlank()) {
+            return Result.Failure(IllegalArgumentException("$ENV_GRPC_TLS_KEY_PATH must be set when $ENV_GRPC_TLS_ENABLED is true"))
+        }
+        val certFile = File(config.grpcTlsCertPath)
+        if (!certFile.exists() || !certFile.isFile || !certFile.canRead()) {
+            return Result.Failure(IllegalArgumentException("$ENV_GRPC_TLS_CERT_PATH '${config.grpcTlsCertPath}' does not exist or is not readable"))
+        }
+        val keyFile = File(config.grpcTlsKeyPath)
+        if (!keyFile.exists() || !keyFile.isFile || !keyFile.canRead()) {
+            return Result.Failure(IllegalArgumentException("$ENV_GRPC_TLS_KEY_PATH '${config.grpcTlsKeyPath}' does not exist or is not readable"))
+        }
+        if (config.grpcTlsClientCaPath.isNotBlank()) {
+            val caFile = File(config.grpcTlsClientCaPath)
+            if (!caFile.exists() || !caFile.isFile || !caFile.canRead()) {
+                return Result.Failure(IllegalArgumentException("$ENV_GRPC_TLS_CLIENT_CA_PATH '${config.grpcTlsClientCaPath}' does not exist or is not readable"))
+            }
+        }
+    }
+
+    // Validate Kafka TLS config
+    if (config.kafkaTlsEnabled) {
+        if (config.kafkaTlsCaPath.isBlank()) {
+            return Result.Failure(IllegalArgumentException("$ENV_KAFKA_TLS_CA_PATH must be set when $ENV_KAFKA_TLS_ENABLED is true"))
+        }
+        val caFile = File(config.kafkaTlsCaPath)
+        if (!caFile.exists() || !caFile.isFile || !caFile.canRead()) {
+            return Result.Failure(IllegalArgumentException("$ENV_KAFKA_TLS_CA_PATH '${config.kafkaTlsCaPath}' does not exist or is not readable"))
+        }
+        if (config.kafkaTlsCertPath.isNotBlank() && config.kafkaTlsKeyPath.isNotBlank()) {
+            val certFile = File(config.kafkaTlsCertPath)
+            if (!certFile.exists() || !certFile.isFile || !certFile.canRead()) {
+                return Result.Failure(IllegalArgumentException("$ENV_KAFKA_TLS_CERT_PATH '${config.kafkaTlsCertPath}' does not exist or is not readable"))
+            }
+            val keyFile = File(config.kafkaTlsKeyPath)
+            if (!keyFile.exists() || !keyFile.isFile || !keyFile.canRead()) {
+                return Result.Failure(IllegalArgumentException("$ENV_KAFKA_TLS_KEY_PATH '${config.kafkaTlsKeyPath}' does not exist or is not readable"))
+            }
+        } else if (config.kafkaTlsCertPath.isNotBlank() || config.kafkaTlsKeyPath.isNotBlank()) {
+            return Result.Failure(IllegalArgumentException("Both $ENV_KAFKA_TLS_CERT_PATH and $ENV_KAFKA_TLS_KEY_PATH must be set together when using client certificate authentication for Kafka"))
+        }
+    }
+
+    return Result.Success(Unit)
+}
 
 private val logger: Logger = LogManager.getLogger(groupID)
 private val lastSuccessfulPollTime = AtomicLong(0)
@@ -473,32 +562,37 @@ fun main() {
     val healthStatusManager = HealthStatusManager()
     healthStatusManager.setStatus(HealthStatusManager.SERVICE_NAME_ALL_SERVICES, ServingStatus.NOT_SERVING)
 
-    // Configure health port
-    val healthPort = System.getenv("FRAUD_DETECTION_HEALTH_PORT")?.toIntOrNull() ?: DEFAULT_HEALTH_PORT
-    val grpcPort = System.getenv("FRAUD_DETECTION_GRPC_PORT")?.toIntOrNull() ?: 50051
+    // Configure ports
+    val plaintextPort = System.getenv("FRAUD_DETECTION_GRPC_PORT")?.toIntOrNull() ?: DEFAULT_HEALTH_PORT
+    val tlsPort = System.getenv("FRAUD_DETECTION_GRPC_TLS_PORT")?.toIntOrNull() ?: DEFAULT_GRPC_TLS_PORT
 
     val servers = mutableListOf<Server>()
 
+    // Initialize fraud detection service
+    val fraudDetectionService = FraudDetectionServiceImpl()
+
     // Start plaintext gRPC server if enabled
     if (grpcTlsConfig.plaintextEnabled) {
-        val plaintextServer = ServerBuilder.forPort(healthPort)
+        val plaintextServer = ServerBuilder.forPort(plaintextPort)
             .addService(healthStatusManager.healthService)
+            .addService(fraudDetectionService)
             .build()
             .start()
         servers.add(plaintextServer)
-        logger.info("Plaintext gRPC server started on port $healthPort")
+        logger.info("Plaintext gRPC server started on port $plaintextPort")
     }
 
     // Start TLS gRPC server if enabled
     if (grpcTlsConfig.enabled) {
         val sslContext = buildGrpcSslContext(grpcTlsConfig)
-        val tlsServer = NettyServerBuilder.forPort(grpcPort)
+        val tlsServer = NettyServerBuilder.forPort(tlsPort)
             .addService(healthStatusManager.healthService)
+            .addService(fraudDetectionService)
             .sslContext(sslContext)
             .build()
             .start()
         servers.add(tlsServer)
-        logger.info("TLS gRPC server started on port $grpcPort")
+        logger.info("TLS gRPC server started on port $tlsPort")
     }
 
     if (servers.isEmpty()) {
