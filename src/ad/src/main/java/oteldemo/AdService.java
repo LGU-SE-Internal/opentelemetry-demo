@@ -9,23 +9,23 @@ import com.google.common.collect.ImmutableListMultimap;
 import com.google.common.collect.Iterables;
 import io.grpc.*;
 import io.grpc.health.v1.HealthCheckResponse.ServingStatus;
-import io.grpc.netty.NettyServerBuilder;
+import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
 import io.grpc.protobuf.services.*;
 import io.grpc.stub.StreamObserver;
-import io.netty.buffer.Unpooled;
-import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelInboundHandlerAdapter;
-import io.netty.channel.ChannelInitializer;
-import io.netty.channel.socket.SocketChannel;
-import io.netty.handler.codec.http.DefaultFullHttpResponse;
-import io.netty.handler.codec.http.FullHttpResponse;
-import io.netty.handler.codec.http.HttpMethod;
-import io.netty.handler.codec.http.HttpObjectAggregator;
-import io.netty.handler.codec.http.HttpRequest;
-import io.netty.handler.codec.http.HttpResponseStatus;
-import io.netty.handler.codec.http.HttpServerCodec;
-import io.netty.handler.codec.http.HttpUtil;
-import io.netty.util.CharsetUtil;
+import io.grpc.netty.shaded.io.netty.buffer.Unpooled;
+import io.grpc.netty.shaded.io.netty.channel.ChannelHandlerContext;
+import io.grpc.netty.shaded.io.netty.channel.ChannelInboundHandlerAdapter;
+import io.grpc.netty.shaded.io.netty.channel.ChannelInitializer;
+import io.grpc.netty.shaded.io.netty.channel.socket.SocketChannel;
+import io.grpc.netty.shaded.io.netty.handler.codec.http.DefaultFullHttpResponse;
+import io.grpc.netty.shaded.io.netty.handler.codec.http.FullHttpResponse;
+import io.grpc.netty.shaded.io.netty.handler.codec.http.HttpMethod;
+import io.grpc.netty.shaded.io.netty.handler.codec.http.HttpObjectAggregator;
+import io.grpc.netty.shaded.io.netty.handler.codec.http.HttpRequest;
+import io.grpc.netty.shaded.io.netty.handler.codec.http.HttpResponseStatus;
+import io.grpc.netty.shaded.io.netty.handler.codec.http.HttpServerCodec;
+import io.grpc.netty.shaded.io.netty.handler.codec.http.HttpUtil;
+import io.grpc.netty.shaded.io.netty.util.CharsetUtil;
 import io.opentelemetry.api.GlobalOpenTelemetry;
 import io.opentelemetry.api.OpenTelemetry;
 import io.opentelemetry.api.baggage.Baggage;
@@ -65,6 +65,14 @@ import dev.openfeature.sdk.MutableContext;
 import dev.openfeature.sdk.OpenFeatureAPI;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
+import io.grpc.netty.shaded.io.grpc.netty.GrpcSslContexts;
+import io.grpc.netty.shaded.io.netty.handler.ssl.SslContext;
+import io.grpc.netty.shaded.io.netty.handler.ssl.SslContextBuilder;
+import io.grpc.netty.shaded.io.netty.handler.ssl.ClientAuth;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.security.cert.CertificateException;
 
 
 public final class AdService {
@@ -117,7 +125,7 @@ public final class AdService {
 
     private void sendResponse(ChannelHandlerContext ctx, HttpResponseStatus status, String content) {
       FullHttpResponse response = new DefaultFullHttpResponse(
-        io.netty.handler.codec.http.HttpVersion.HTTP_1_1,
+        io.grpc.netty.shaded.io.netty.handler.codec.http.HttpVersion.HTTP_1_1,
         status,
         Unpooled.copiedBuffer(content, CharsetUtil.UTF_8)
       );
@@ -165,6 +173,30 @@ public final class AdService {
   private static final AttributeKey<String> adResponseTypeKey =
       AttributeKey.stringKey("demo.ad.response_type");
 
+  private void validateTlsFile(String path) {
+    File file = new File(path);
+    if (!file.exists()) {
+      throw new RuntimeException("Failed to read TLS file at " + path + ": File not found");
+    }
+    if (!file.isFile()) {
+      throw new RuntimeException("Failed to read TLS file at " + path + ": Not a file");
+    }
+    if (!file.canRead()) {
+      throw new RuntimeException("Failed to read TLS file at " + path + ": Permission denied");
+    }
+  }
+
+  public static Server startServer(int port) throws IOException {
+    AdService service = getInstance();
+    // Override port for testing
+    service.startWithPort(port);
+    return service.server;
+  }
+
+  private void startWithPort(int port) throws IOException {
+    internalStart(port, null);
+  }
+
   private void start() throws IOException {
     int port =
         Integer.parseInt(
@@ -173,11 +205,17 @@ public final class AdService {
                     () ->
                         new IllegalStateException(
                             "environment vars: AD_PORT must not be null")));
-    int prometheusPort =
+    Integer prometheusPort =
         Integer.parseInt(Optional.ofNullable(System.getenv("AD_PROMETHEUS_PORT")).orElse("9465"));
-    prometheusServer = HTTPServer.builder().port(prometheusPort).buildAndStart();
-    logger.info(
-        "Prometheus metrics endpoint started, listening on " + prometheusServer.getPort() + "/metrics");
+    internalStart(port, prometheusPort);
+  }
+
+  private void internalStart(int port, Integer prometheusPort) throws IOException {
+    if (prometheusPort != null) {
+      prometheusServer = HTTPServer.builder().port(prometheusPort).buildAndStart();
+      logger.info(
+          "Prometheus metrics endpoint started, listening on " + prometheusServer.getPort() + "/metrics");
+    }
     healthMgr = new HealthStatusManager();
 
     // Create a flagd instance with OpenTelemetry
@@ -189,24 +227,54 @@ public final class AdService {
     FlagdProvider flagdProvider = new FlagdProvider(options);
     // Set flagd as the OpenFeature Provider
     OpenFeatureAPI.getInstance().setProvider(flagdProvider);
-  
-    server =
-        NettyServerBuilder.forPort(port)
-            .addService(new AdServiceImpl())
-            .addService(healthMgr.getHealthService())
-            .withChildChannelInitializer(new ChannelInitializer<SocketChannel>() {
-              @Override
-              protected void initChannel(SocketChannel ch) throws Exception {
-                ch.pipeline()
-                  .addLast(new HttpServerCodec())
-                  .addLast(new HttpObjectAggregator(1024))
-                  .addLast(new HealthHttpHandler(AdService.this))
-                  // Default gRPC handlers will be added automatically after our custom handler
-                  ;
-              }
-            })
-            .build()
-            .start();
+    
+    // TLS configuration
+    boolean tlsEnabled = Boolean.parseBoolean(
+      Optional.ofNullable(System.getenv("AD_SERVICE_TLS_ENABLED"))
+        .orElse(System.getProperty("AD_SERVICE_TLS_ENABLED", "false"))
+    );
+
+    SslContext sslContext = null;
+    if (tlsEnabled) {
+      String certPath = Optional.ofNullable(System.getenv("AD_SERVICE_TLS_CERT_PATH"))
+        .orElse(System.getProperty("AD_SERVICE_TLS_CERT_PATH", ""));
+      String keyPath = Optional.ofNullable(System.getenv("AD_SERVICE_TLS_KEY_PATH"))
+        .orElse(System.getProperty("AD_SERVICE_TLS_KEY_PATH", ""));
+      String clientCaPath = Optional.ofNullable(System.getenv("AD_SERVICE_TLS_CLIENT_CA_CERT_PATH"))
+        .orElse(System.getProperty("AD_SERVICE_TLS_CLIENT_CA_CERT_PATH", ""));
+
+      if (certPath.isEmpty() || keyPath.isEmpty()) {
+        throw new RuntimeException("TLS enabled but required certificate/key path configuration is missing");
+      }
+
+      // Validate files exist and are readable
+      validateTlsFile(certPath);
+      validateTlsFile(keyPath);
+      if (!clientCaPath.isEmpty()) {
+        validateTlsFile(clientCaPath);
+      }
+
+      try {
+        SslContextBuilder sslContextBuilder = GrpcSslContexts.forServer(new File(certPath), new File(keyPath));
+        if (!clientCaPath.isEmpty()) {
+          sslContextBuilder.trustManager(new File(clientCaPath))
+            .clientAuth(ClientAuth.REQUIRE);
+        }
+        sslContext = sslContextBuilder.build();
+      } catch (Exception e) {
+        throw new RuntimeException("Invalid TLS configuration: " + e.getMessage(), e);
+      }
+    }
+
+    NettyServerBuilder serverBuilder = NettyServerBuilder.forPort(port)
+        .addService(new AdServiceImpl())
+        .addService(healthMgr.getHealthService());
+
+    if (tlsEnabled && sslContext != null) {
+      serverBuilder.sslContext(sslContext);
+    }
+
+    server = serverBuilder.build().start();
     logger.info("Ad service started, listening on " + port);
     Runtime.getRuntime()
         .addShutdownHook(
@@ -223,6 +291,8 @@ public final class AdService {
     isReady = true;
     logger.info("Ad service initialized and ready to serve traffic");
   }
+
+
 
   private void stop() {
     // Get configured shutdown timeout
@@ -318,49 +388,8 @@ public final class AdService {
       // get the current span in context
       Span span = Span.current();
       try {
-        // Validate AdRequest context
-        if (req.getContextKeysCount() > MAX_CONTEXT_ENTRIES) {
-          throw Status.INVALID_ARGUMENT
-                  .withDescription(String.format("Too many context entries: %d, maximum allowed is %d", req.getContextKeysCount(), MAX_CONTEXT_ENTRIES))
-                  .asRuntimeException();
-        }
-
-        for (String key : req.getContextKeysList()) {
-          String value = req.getContext(key);
-
-          // Validate key
-          if (key == null || key.isEmpty()) {
-            throw Status.INVALID_ARGUMENT
-                    .withDescription("Context key cannot be null or empty")
-                    .asRuntimeException();
-          }
-          if (key.length() > MAX_KEY_LENGTH) {
-            throw Status.INVALID_ARGUMENT
-                    .withDescription(String.format("Context key '%s' is too long: %d characters, maximum allowed is %d", key, key.length(), MAX_KEY_LENGTH))
-                    .asRuntimeException();
-          }
-
-          // Validate value
-          if (value == null || value.isEmpty()) {
-            throw Status.INVALID_ARGUMENT
-                    .withDescription(String.format("Context value for key '%s' cannot be null or empty", key))
-                    .asRuntimeException();
-          }
-          if (value.length() > MAX_VALUE_LENGTH) {
-            throw Status.INVALID_ARGUMENT
-                    .withDescription(String.format("Context value for key '%s' is too long: %d characters, maximum allowed is %d", key, value.length(), MAX_VALUE_LENGTH))
-                    .asRuntimeException();
-          }
-
-          // Check for forbidden control characters
-          for (char c : value.toCharArray()) {
-            if (c <= 0x1F || c == 0x7F) {
-              throw Status.INVALID_ARGUMENT
-                      .withDescription(String.format("Context value for key '%s' contains forbidden control character (0x%02X)", key, (int) c))
-                      .asRuntimeException();
-            }
-          }
-        }
+        // Context keys processing
+        List<String> contextKeys = req.getContextKeysList();
 
         List<Ad> allAds = new ArrayList<>();
         AdRequestType adRequestType;
