@@ -20,14 +20,14 @@ exporters:
     endpoint: "jaeger:4317"
     tls:
       insecure: true
-    sending_queue:
-      batch:
+    queue_settings:
+      queue_size: ${env:OTEL_COLLECTOR_EXPORTER_QUEUE_SIZE:-1000}
   otlp_http/prometheus:
     endpoint: "http://prometheus:9090/api/v1/otlp"
     tls:
       insecure: true
-    sending_queue:
-      batch:
+    queue_settings:
+      queue_size: ${env:OTEL_COLLECTOR_EXPORTER_QUEUE_SIZE:-1000}
   opensearch:
     logs_index: otel-logs
     logs_index_time_format: "yyyy-MM-dd"
@@ -35,12 +35,14 @@ exporters:
       endpoint: "http://opensearch:9200"
       tls:
         insecure: true
-    sending_queue:
-      batch:
+    queue_settings:
+      queue_size: ${env:OTEL_COLLECTOR_EXPORTER_QUEUE_SIZE:-1000}
   otlp_grpc/firepit:
     endpoint: "firepit:4317"
     tls:
       insecure: true
+    queue_settings:
+      queue_size: ${env:OTEL_COLLECTOR_EXPORTER_QUEUE_SIZE:-1000}
 
 service:
   pipelines:
