@@ -242,6 +242,180 @@ def check_feature_flag(flag_name: str):
     return client.get_boolean_value("recommendationCacheFailure", False)
 
 
+def str_to_bool(value: str) -> bool:
+    """Convert string to boolean, supports 1/0, true/false (case-insensitive)."""
+    if not value:
+        return False
+    return value.lower() in ('true', '1', 'yes')
+
+
+def load_cert_file(path: str) -> bytes:
+    """Load certificate/key file from filesystem, returns bytes."""
+    try:
+        with open(path, 'rb') as f:
+            return f.read()
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Certificate file not found: {path}")
+    except PermissionError:
+        raise PermissionError(f"Permission denied reading certificate file: {path}")
+    except Exception as e:
+        raise ValueError(f"Error reading certificate file {path}: {str(e)}") from e
+
+
+def create_product_catalog_client(catalog_addr: str, logger=None):
+    """Create ProductCatalogService client with optional TLS/mTLS configuration."""
+    # Configure gRPC channel with resilience settings for ProductCatalogService
+    service_config = json.dumps({
+        "methodConfig": [
+            {
+                "name": [
+                    { "service": "oteldemo.ProductCatalogService", "method": "ListProducts" }
+                ],
+                "timeout": "10s",
+                "retryPolicy": {
+                    "maxAttempts": 3,
+                    "initialBackoff": "0.1s",
+                    "maxBackoff": "1s",
+                    "backoffMultiplier": 2,
+                    "retryableStatusCodes": ["UNAVAILABLE", "RESOURCE_EXHAUSTED", "ABORTED", "INTERNAL", "DEADLINE_EXCEEDED"]
+                }
+            }
+        ]
+    })
+    channel_options = [
+        ("grpc.enable_retries", 1),
+        ("grpc.service_config", service_config),
+        ("grpc.max_receive_message_length", -1),
+    ]
+    
+    # Configure Product Catalog client channel (plaintext or TLS/mTLS)
+    client_tls_enabled = str_to_bool(os.environ.get('TLS_CLIENT_ENABLE', 'false'))
+    if client_tls_enabled:
+        # Load required CA cert for server validation
+        client_ca_cert_path = os.environ.get('TLS_CLIENT_CA_CERT_PATH')
+        if not client_ca_cert_path:
+            raise ValueError("TLS_CLIENT_ENABLE is true but TLS_CLIENT_CA_CERT_PATH is not set")
+        root_certificates = load_cert_file(client_ca_cert_path)
+        certificate_chain = None
+        private_key = None
+        
+        # Check if mTLS is enabled
+        client_mtls_enabled = str_to_bool(os.environ.get('TLS_CLIENT_ENABLE_MTLS', 'false'))
+        if client_mtls_enabled:
+            client_cert_path = os.environ.get('TLS_CLIENT_CERT_PATH')
+            client_key_path = os.environ.get('TLS_CLIENT_KEY_PATH')
+            if not client_cert_path or not client_key_path:
+                raise ValueError("TLS_CLIENT_ENABLE_MTLS is true but TLS_CLIENT_CERT_PATH or TLS_CLIENT_KEY_PATH is not set")
+            certificate_chain = load_cert_file(client_cert_path)
+            private_key = load_cert_file(client_key_path)
+        
+        # Create TLS credentials
+        client_credentials = grpc.ssl_channel_credentials(
+            root_certificates=root_certificates,
+            certificate_chain=certificate_chain,
+            private_key=private_key
+        )
+        pc_channel = grpc.secure_channel(
+            catalog_addr,
+            credentials=client_credentials,
+            options=channel_options
+        )
+    else:
+        # Use plaintext channel (default behavior)
+        pc_channel = grpc.insecure_channel(
+            catalog_addr,
+            options=channel_options
+        )
+    
+    # Add retry logging interceptor if logger is provided
+    if logger is not None:
+        retry_interceptor = RetryLoggingInterceptor(logger)
+        intercepted_channel = grpc.intercept_channel(pc_channel, retry_interceptor)
+        return demo_pb2_grpc.ProductCatalogServiceStub(intercepted_channel)
+    else:
+        # For test cases without logger
+        return demo_pb2_grpc.ProductCatalogServiceStub(pc_channel)
+
+
+def serve(listen_addr: str, test_mode: bool = False, logger=None):
+    """Start recommendation service gRPC server with optional TLS/mTLS configuration."""
+    # Create gRPC server
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+
+    # Add class to gRPC server
+    service = RecommendationService()
+    demo_pb2_grpc.add_RecommendationServiceServicer_to_server(service, server)
+    health_pb2_grpc.add_HealthServicer_to_server(service, server)
+
+    # Configure server listener (plaintext or TLS/mTLS)
+    server_tls_enabled = str_to_bool(os.environ.get('TLS_SERVER_ENABLE', 'false'))
+    
+    if server_tls_enabled:
+        # Load required server cert and key
+        server_cert_path = os.environ.get('TLS_SERVER_CERT_PATH')
+        server_key_path = os.environ.get('TLS_SERVER_KEY_PATH')
+        if not server_cert_path or not server_key_path:
+            raise ValueError("TLS_SERVER_ENABLE is true but TLS_SERVER_CERT_PATH or TLS_SERVER_KEY_PATH is not set")
+        server_cert_chain = load_cert_file(server_cert_path)
+        server_private_key = load_cert_file(server_key_path)
+        root_certificates = None
+        
+        # Check if server-side mTLS is required
+        client_ca_cert_path = os.environ.get('TLS_SERVER_CLIENT_CA_CERT_PATH')
+        if client_ca_cert_path:
+            root_certificates = load_cert_file(client_ca_cert_path)
+        
+        # Create server TLS credentials
+        server_credentials = grpc.ssl_server_credentials(
+            private_key_certificate_chain_pairs=[(server_private_key, server_cert_chain)],
+            root_certificates=root_certificates,
+            require_client_auth=client_ca_cert_path is not None
+        )
+        server.add_secure_port(listen_addr, server_credentials)
+        if logger:
+            logger.info(f'Recommendation service started with TLS enabled, listening on {listen_addr}')
+    else:
+        # Use plaintext port (default behavior)
+        server.add_insecure_port(listen_addr)
+        if logger:
+            logger.info(f'Recommendation service started, listening on {listen_addr}')
+    
+    server.start()
+    
+    if test_mode:
+        # Return server instance for testing, don't wait for termination
+        # Store port for test access if using random port [::]:0
+        if listen_addr.endswith(':0'):
+            server._port = server.addrs[0].get_port()
+        return server
+    
+    # Define signal handler for graceful shutdown
+    def handle_shutdown_signal(signum, frame):
+        signal_name = signal.Signals(signum).name
+        if logger:
+            logger.info(f"Graceful shutdown started: stopping new requests, waiting up to 30s for in-flight requests to complete")
+        # Initiate graceful shutdown with 30s grace period
+        shutdown_event = server.stop(grace=30)
+        
+        def wait_for_shutdown():
+            shutdown_event.wait()
+            if shutdown_event.is_set() and logger:
+                logger.info("Graceful shutdown completed: all in-flight requests finished, exiting")
+            elif logger:
+                logger.warning("Graceful shutdown timed out after 30s: force terminating with active in-flight requests remaining")
+        
+        # Wait for shutdown to complete
+        wait_for_shutdown()
+        os._exit(0)
+    
+    # Register signal handlers for SIGTERM and SIGINT
+    signal.signal(signal.SIGTERM, handle_shutdown_signal)
+    signal.signal(signal.SIGINT, handle_shutdown_signal)
+    
+    # Wait for server termination
+    server.wait_for_termination()
+
+
 if __name__ == "__main__":
     service_name = must_map_env('OTEL_SERVICE_NAME')
     api.set_provider(FlagdProvider(host=os.environ.get('FLAGD_HOST', 'flagd'), port=os.environ.get('FLAGD_PORT', 8013)))
@@ -270,75 +444,8 @@ if __name__ == "__main__":
     logger.addHandler(handler)
 
     catalog_addr = must_map_env('PRODUCT_CATALOG_ADDR')
-    
-    # Configure gRPC channel with resilience settings for ProductCatalogService
-    service_config = json.dumps({
-        "methodConfig": [
-            {
-                "name": [
-                    { "service": "oteldemo.ProductCatalogService", "method": "ListProducts" }
-                ],
-                "timeout": "10s",
-                "retryPolicy": {
-                    "maxAttempts": 3,
-                    "initialBackoff": "0.1s",
-                    "maxBackoff": "1s",
-                    "backoffMultiplier": 2,
-                    "retryableStatusCodes": ["UNAVAILABLE", "RESOURCE_EXHAUSTED", "ABORTED", "INTERNAL", "DEADLINE_EXCEEDED"]
-                }
-            }
-        ]
-    })
-    
-    pc_channel = grpc.insecure_channel(
-        catalog_addr,
-        options=[
-            ("grpc.enable_retries", 1),
-            ("grpc.service_config", service_config),
-            ("grpc.max_receive_message_length", -1),
-        ]
-    )
-    
-    # Add retry logging interceptor
-    retry_interceptor = RetryLoggingInterceptor(logger)
-    intercepted_channel = grpc.intercept_channel(pc_channel, retry_interceptor)
-    product_catalog_stub = demo_pb2_grpc.ProductCatalogServiceStub(intercepted_channel)
-
-    # Create gRPC server
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-
-    # Add class to gRPC server
-    service = RecommendationService()
-    demo_pb2_grpc.add_RecommendationServiceServicer_to_server(service, server)
-    health_pb2_grpc.add_HealthServicer_to_server(service, server)
+    product_catalog_stub = create_product_catalog_client(catalog_addr, logger=logger)
 
     # Start server
     port = must_map_env('RECOMMENDATION_PORT')
-    server.add_insecure_port(f'[::]:{port}')
-    server.start()
-    logger.info(f'Recommendation service started, listening on port {port}')
-    
-    # Define signal handler for graceful shutdown
-    def handle_shutdown_signal(signum, frame):
-        signal_name = signal.Signals(signum).name
-        logger.info(f"Graceful shutdown started: stopping new requests, waiting up to 30s for in-flight requests to complete")
-        # Initiate graceful shutdown with 30s grace period
-        shutdown_event = server.stop(grace=30)
-        
-        def wait_for_shutdown():
-            shutdown_event.wait()
-            if shutdown_event.is_set():
-                logger.info("Graceful shutdown completed: all in-flight requests finished, exiting")
-            else:
-                logger.warning("Graceful shutdown timed out after 30s: force terminating with active in-flight requests remaining")
-        
-        # Wait for shutdown to complete
-        wait_for_shutdown()
-        os._exit(0)
-    
-    # Register signal handlers for SIGTERM and SIGINT
-    signal.signal(signal.SIGTERM, handle_shutdown_signal)
-    signal.signal(signal.SIGINT, handle_shutdown_signal)
-    
-    # Wait for server termination
-    server.wait_for_termination()
+    serve(f'[::]:{port}', logger=logger)
