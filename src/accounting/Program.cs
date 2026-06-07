@@ -43,7 +43,7 @@ builder.Services.AddHealthChecks()
         timeout: TimeSpan.FromSeconds(5));
 
 // Add our Kafka consumer service
-builder.Services.AddSingleton<Consumer>();
+builder.Services.AddSingleton<Consumer>(sp => new Consumer(sp.GetRequiredService<ILogger<Consumer>>(), sp.GetRequiredService<IConfiguration>()));
 
 var app = builder.Build();
 
@@ -105,7 +105,14 @@ app.MapGet("/ready", async context =>
 
 // Start Kafka consumer in background
 var consumer = app.Services.GetRequiredService<Consumer>();
-_ = Task.Run(() => consumer.StartListening(app.Lifetime.ApplicationStopping), app.Lifetime.ApplicationStopping);
+var listeningTask = Task.Run(() => consumer.StartListening(app.Lifetime.ApplicationStopping), app.Lifetime.ApplicationStopping);
+
+// Register shutdown handler
+app.Lifetime.ApplicationStopping.Register(async () =>
+{
+    await consumer.StopAsync(app.Lifetime.ApplicationStopping);
+    await consumer.DisposeAsync();
+});
 
 await app.RunAsync();
 
