@@ -20,19 +20,70 @@ spec:
         runAsNonRoot: true
         runAsUser: 65534
         fsGroup: 65534
+      initContainers:
+      - name: validate-config
+        image: quay.io/prometheus/prometheus:v2.54.1
+        command: ["/bin/sh", "/etc/prometheus/validate-config.sh"]
+        env:
+        - name: PROMETHEUS_RETENTION_TIME
+          valueFrom:
+            configMapKeyRef:
+              name: prometheus-env
+              key: PROMETHEUS_RETENTION_TIME
+              optional: true
+        - name: PROMETHEUS_RETENTION_SIZE
+          valueFrom:
+            configMapKeyRef:
+              name: prometheus-env
+              key: PROMETHEUS_RETENTION_SIZE
+              optional: true
+        - name: PROMETHEUS_SCRAPE_INTERVAL
+          valueFrom:
+            configMapKeyRef:
+              name: prometheus-env
+              key: PROMETHEUS_SCRAPE_INTERVAL
+              optional: true
+        volumeMounts:
+        - name: prometheus-config
+          mountPath: /etc/prometheus
+      - name: render-config
+        image: quay.io/prometheus/prometheus:v2.54.1
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          SCRAPE_INTERVAL=${PROMETHEUS_SCRAPE_INTERVAL:-15s}
+          sed -i "s/scrape_interval: [0-9a-zA-Z]*/scrape_interval: $SCRAPE_INTERVAL/" /etc/prometheus/prometheus-config.yaml
+        env:
+        - name: PROMETHEUS_SCRAPE_INTERVAL
+          valueFrom:
+            configMapKeyRef:
+              name: prometheus-env
+              key: PROMETHEUS_SCRAPE_INTERVAL
+              optional: true
+        volumeMounts:
+        - name: prometheus-config
+          mountPath: /etc/prometheus
       containers:
       - name: prometheus
         image: quay.io/prometheus/prometheus:v2.54.1
         args:
         - --web.console.templates=/etc/prometheus/consoles
         - --web.console.libraries=/etc/prometheus/console_libraries
-        - --storage.tsdb.retention.time=7d
+        - --storage.tsdb.retention.time=$(PROMETHEUS_RETENTION_TIME)
+        {{- if ne .Values.prometheus.retentionSize "0" }}
+        - --storage.tsdb.retention.size=$(PROMETHEUS_RETENTION_SIZE)
+        {{- end }}
         - --config.file=/etc/prometheus/prometheus-config.yaml
         - --storage.tsdb.path=/prometheus
         - --web.enable-lifecycle
         - --web.route-prefix=/
         - --web.enable-otlp-receiver
         - --enable-feature=exemplar-storage
+        env:
+        - name: PROMETHEUS_RETENTION_TIME
+          value: {{ .Values.prometheus.retentionTime | default "15d" | quote }}
+        - name: PROMETHEUS_RETENTION_SIZE
+          value: {{ .Values.prometheus.retentionSize | default "0" | quote }}
         ports:
         - containerPort: 9090
           name: prometheus
@@ -52,11 +103,11 @@ spec:
           failureThreshold: 3
         resources:
           requests:
-            cpu: 100m
-            memory: 256Mi
+            cpu: {{ .Values.prometheus.resources.requests.cpu | default "100m" | quote }}
+            memory: {{ .Values.prometheus.resources.requests.memory | default "256Mi" | quote }}
           limits:
-            cpu: 500m
-            memory: 512Mi
+            cpu: {{ .Values.prometheus.resources.limits.cpu | default "500m" | quote }}
+            memory: {{ .Values.prometheus.resources.limits.memory | default "1Gi" | quote }}
         volumeMounts:
         - name: prometheus-config
           mountPath: /etc/prometheus
