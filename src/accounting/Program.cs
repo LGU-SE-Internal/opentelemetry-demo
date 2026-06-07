@@ -32,7 +32,15 @@ builder.Services.AddHealthChecks()
         var kafkaAddr = Environment.GetEnvironmentVariable("KAFKA_ADDR")
             ?? throw new InvalidOperationException("KAFKA_ADDR environment variable is not set");
         return new KafkaHealthCheck(kafkaAddr);
-    }, HealthStatus.Unhealthy, new[] { "ready" }));
+    }, HealthStatus.Unhealthy, new[] { "ready" }))
+    // Readiness check: check PostgreSQL connection
+    .AddNpgsql(
+        connectionString: Environment.GetEnvironmentVariable("POSTGRESQL_CONNECTION_STRING") 
+            ?? throw new InvalidOperationException("POSTGRESQL_CONNECTION_STRING environment variable is not set"),
+        name: "postgresql",
+        failureStatus: HealthStatus.Unhealthy,
+        tags: new[] { "ready" },
+        timeout: TimeSpan.FromSeconds(5));
 
 // Add our Kafka consumer service
 builder.Services.AddSingleton<Consumer>();
@@ -55,13 +63,28 @@ app.MapGet("/ready", async context =>
     
     context.Response.ContentType = "application/json";
     
+    var kafkaStatus = result.Entries.TryGetValue("kafka", out var kafkaEntry) 
+        ? kafkaEntry.Status == HealthStatus.Healthy ? "Healthy" : "Unhealthy" 
+        : "Unhealthy";
+    
+    var postgresqlStatus = result.Entries.TryGetValue("postgresql", out var pgEntry) 
+        ? pgEntry.Status == HealthStatus.Healthy ? "Healthy" : "Unhealthy" 
+        : "Unhealthy";
+    
+    var overallStatus = result.Status == HealthStatus.Healthy ? "Healthy" : "Unhealthy";
+    
     if (result.Status == HealthStatus.Healthy)
     {
         context.Response.StatusCode = StatusCodes.Status200OK;
         await context.Response.WriteAsync(JsonSerializer.Serialize(new 
         { 
-            status = "Ready", 
-            kafkaConnection = "Connected" 
+            status = overallStatus, 
+            kafkaConnection = "Connected",
+            checks = new
+            {
+                kafka = kafkaStatus,
+                postgresql = postgresqlStatus
+            }
         }));
     }
     else
@@ -69,8 +92,13 @@ app.MapGet("/ready", async context =>
         context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
         await context.Response.WriteAsync(JsonSerializer.Serialize(new 
         { 
-            status = "NotReady", 
-            kafkaConnection = "Disconnected" 
+            status = overallStatus, 
+            kafkaConnection = kafkaStatus == "Healthy" ? "Connected" : "Disconnected",
+            checks = new
+            {
+                kafka = kafkaStatus,
+                postgresql = postgresqlStatus
+            }
         }));
     }
 });
