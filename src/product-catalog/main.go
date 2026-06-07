@@ -13,14 +13,17 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -58,7 +61,8 @@ var (
 	db     *sql.DB
 	reg    metric.Registration
 	alphanumericRegex = regexp.MustCompile(`^[a-zA-Z0-9]*$`)
-	
+	shutdownInProgress atomic.Bool
+	catalogLoaded atomic.Bool
 	// TLS errors
 	ErrTLSConfigMissingCert = errors.New("TLS config missing certificate path")
 	ErrTLSConfigMissingKey  = errors.New("TLS config missing private key path")
@@ -197,6 +201,9 @@ type productCatalog struct {
 
 func init() {
 	logger = otelslog.NewLogger("product-catalog")
+	// Register health endpoints for tests and runtime
+	http.HandleFunc("/health/liveness", healthLivenessHandler)
+	http.HandleFunc("/health/readiness", healthReadinessHandler)
 }
 
 func initDatabase() error {
@@ -261,6 +268,7 @@ func main() {
 		logger.Error(fmt.Sprintf("Error initializing database: %v", err))
 		os.Exit(1)
 	}
+	catalogLoaded.Store(true)
 	defer func() {
 		if db != nil {
 			if err := db.Close(); err != nil {
@@ -326,19 +334,41 @@ func main() {
 	healthcheck := health.NewServer()
 	healthpb.RegisterHealthServer(srv, healthcheck)
 
+	// Create a custom handler to route gRPC and HTTP requests
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ProtoMajor == 2 && strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc") {
+			srv.ServeHTTP(w, r)
+		} else {
+			http.DefaultServeMux.ServeHTTP(w, r)
+		}
+	})
+
+	httpSrv := &http.Server{
+		Handler: handler,
+	}
+
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGKILL)
 	defer cancel()
 
 	go func() {
-		if err := srv.Serve(ln); err != nil {
-			logger.Error(fmt.Sprintf("Failed to serve gRPC server, err: %v", err))
+		if err := httpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error(fmt.Sprintf("Failed to serve server, err: %v", err))
 		}
 	}()
 
 	<-ctx.Done()
 
+	shutdownInProgress.Store(true)
+
+	// Gracefully stop gRPC server first
 	srv.GracefulStop()
-	logger.Info("Product Catalog gRPC server stopped")
+	// Then shutdown HTTP server
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+		logger.Error(fmt.Sprintf("HTTP server shutdown failed: %v", err))
+	}
+	logger.Info("Product Catalog server stopped")
 }
 
 func loadProductsFromDB(ctx context.Context) ([]*pb.Product, error) {
@@ -480,6 +510,91 @@ func mustMapEnv(target *string, key string) {
 		logger.Error(fmt.Sprintf("Environment Variable Not Set: %q", key))
 	}
 	*target = value
+}
+
+func healthLivenessHandler(w http.ResponseWriter, r *http.Request) {
+	startTime := time.Now()
+	w.Header().Set("Content-Type", "application/json")
+	var statusCode int
+	var response map[string]interface{}
+	var errMsg string
+
+	if shutdownInProgress.Load() {
+		statusCode = http.StatusServiceUnavailable
+		errMsg = "service shutting down"
+		response = map[string]interface{}{
+			"status": "DOWN",
+			"error": errMsg,
+		}
+	} else {
+		statusCode = http.StatusOK
+		response = map[string]interface{}{
+			"status": "UP",
+		}
+	}
+
+	w.WriteHeader(statusCode)
+	json.NewEncoder(w).Encode(response)
+
+	durationMs := float64(time.Since(startTime).Microseconds()) / 1000.0
+	logAttrs := []any{
+		slog.String("endpoint", r.URL.Path),
+		slog.Int("status_code", statusCode),
+		slog.Float64("duration_ms", durationMs),
+	}
+	if statusCode != http.StatusOK {
+		logAttrs = append(logAttrs, slog.String("error", errMsg))
+	}
+	logger.InfoContext(r.Context(), "Health check request processed", logAttrs...)
+}
+
+func healthReadinessHandler(w http.ResponseWriter, r *http.Request) {
+	startTime := time.Now()
+	w.Header().Set("Content-Type", "application/json")
+	var statusCode int
+	var response map[string]interface{}
+	var errMsg string
+
+	if !catalogLoaded.Load() {
+		statusCode = http.StatusServiceUnavailable
+		errMsg = "catalog not loaded"
+		response = map[string]interface{}{
+			"status": "DOWN",
+			"error": errMsg,
+		}
+	} else {
+		// Test if DB is accessible
+		var count int
+		err := db.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM catalog.products").Scan(&count)
+		if err != nil {
+			statusCode = http.StatusServiceUnavailable
+			errMsg = fmt.Sprintf("failed to access catalog: %v", err)
+			response = map[string]interface{}{
+				"status": "DOWN",
+				"error": errMsg,
+			}
+		} else {
+			statusCode = http.StatusOK
+			response = map[string]interface{}{
+				"status": "UP",
+				"catalog_count": count,
+			}
+		}
+	}
+
+	w.WriteHeader(statusCode)
+	json.NewEncoder(w).Encode(response)
+
+	durationMs := float64(time.Since(startTime).Microseconds()) / 1000.0
+	logAttrs := []any{
+		slog.String("endpoint", r.URL.Path),
+		slog.Int("status_code", statusCode),
+		slog.Float64("duration_ms", durationMs),
+	}
+	if statusCode != http.StatusOK {
+		logAttrs = append(logAttrs, slog.String("error", errMsg))
+	}
+	logger.InfoContext(r.Context(), "Health check request processed", logAttrs...)
 }
 
 func (p *productCatalog) Check(ctx context.Context, req *healthpb.HealthCheckRequest) (*healthpb.HealthCheckResponse, error) {
