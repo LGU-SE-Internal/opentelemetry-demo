@@ -348,13 +348,13 @@ server.bindAsync(address, serverCredentials, (err, port) => {
     res.status(405).send();
   });
 
-  // Liveness endpoint - always returns 200 OK empty text when process is running (AC-1)
+  // Liveness endpoint - always returns 200 OK with JSON {"status": "UP"} when process is running (AC-1)
   app.get('/health/liveness', (req, res) => {
     const start = Date.now();
     const span = opentelemetry.trace.getTracer('paymentservice').startSpan('GET /health/liveness');
     try {
-      res.setHeader('Content-Type', 'text/plain');
-      res.status(200).send('');
+      res.setHeader('Content-Type', 'application/json');
+      res.status(200).json({ status: 'UP' });
       
       span.setAttributes({
         'http.method': 'GET',
@@ -510,11 +510,21 @@ server.bindAsync(address, serverCredentials, (err, port) => {
     if (errors.length > 0) {
       statusCode = 503;
       healthStatus = 'FAIL';
-      responseBody = { status: 'NOT_READY' };
+      responseBody = { 
+        status: 'NOT_READY',
+        dependencies: {
+          paymentProcessor: charge.isHealthy() ? 'UP' : 'DOWN'
+        }
+      };
     } else {
       statusCode = 200;
       healthStatus = 'PASS';
-      responseBody = { status: 'READY' };
+      responseBody = { 
+        status: 'READY',
+        dependencies: {
+          paymentProcessor: 'UP'
+        }
+      };
     }
     
     res.status(statusCode).json(responseBody);
