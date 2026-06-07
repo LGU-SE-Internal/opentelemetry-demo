@@ -91,6 +91,47 @@ get '/health' do
   { status: $shutting_down ? "NOT_SERVING" : "SERVING" }.to_json
 end
 
+# Liveness probe endpoint
+get '/health/liveness' do
+  content_type :json
+  status 200
+  { status: "ok", service: "email" }.to_json
+end
+
+# Readiness probe endpoint
+get '/health/readiness' do
+  content_type :json
+  if $shutting_down
+    status 503
+    { status: "unavailable", service: "email", ready: false }.to_json
+  else
+    status 200
+    { status: "ok", service: "email", ready: true }.to_json
+  end
+end
+
+# Return 405 Method Not Allowed for non-GET requests on health endpoints
+['/health/liveness', '/health/readiness'].each do |path|
+  post path do
+    status 405
+  end
+  put path do
+    status 405
+  end
+  patch path do
+    status 405
+  end
+  delete path do
+    status 405
+  end
+  options path do
+    status 405
+  end
+  head path do
+    status 405
+  end
+end
+
 # Initialize OpenFeature SDK with flagd provider
 flagd_client = OpenFeature::Flagd::Provider.build_client
 flagd_client.configure do |config|
