@@ -11,6 +11,102 @@ const { RateLimiterMemory } = require('rate-limiter-flexible')
 const charge = require('./charge')
 const logger = require('./logger')
 
+function registerShutdownHandlers(
+  server,
+  cleanupHooks,
+  gracePeriodMs = 30000,
+  logger
+) {
+  let isShuttingDown = false;
+  let inFlightRequests = 0;
+  let shutdownTimeout;
+  const startTime = Date.now();
+
+  // Track in-flight requests
+  server.on('request', (req, res) => {
+    if (isShuttingDown) {
+      res.statusCode = 503;
+      res.end('Service Unavailable');
+      return;
+    }
+
+    inFlightRequests++;
+    res.on('finish', () => {
+      inFlightRequests--;
+      if (isShuttingDown && inFlightRequests === 0) {
+        runCleanup();
+      }
+    });
+  });
+
+  async function runCleanup() {
+    if (shutdownTimeout) {
+      clearTimeout(shutdownTimeout);
+    }
+
+    let exitCode = 0;
+    for (let i = 0; i < cleanupHooks.length; i++) {
+      try {
+        await cleanupHooks[i]();
+      } catch (err) {
+        exitCode = 1;
+        logger.error({
+          event: 'service.shutdown.cleanup_failed',
+          error: err.message,
+          resourceType: i === 0 ? 'database' : i === 1 ? 'stripe' : 'unknown'
+        });
+      }
+    }
+
+    const durationMs = Date.now() - startTime;
+    logger.info({
+      event: 'service.shutdown.completed',
+      durationMs
+    });
+
+    process.exit(exitCode);
+  }
+
+  function handleSignal(signal) {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+
+    logger.info({
+      event: 'service.shutdown.started',
+      signal,
+      gracePeriodMs
+    });
+
+    // Stop accepting new connections
+    server.close((err) => {
+      if (err) {
+        logger.error({
+          event: 'service.shutdown.server_close_error',
+          error: err.message
+        });
+      }
+    });
+
+    // Set force shutdown timeout
+    shutdownTimeout = setTimeout(() => {
+      logger.info({
+        event: 'service.shutdown.forced',
+        reason: 'grace_period_exceeded',
+        inFlightRequestsCount: inFlightRequests
+      });
+      runCleanup();
+    }, gracePeriodMs);
+
+    // If no in-flight requests, run cleanup immediately
+    if (inFlightRequests === 0) {
+      runCleanup();
+    }
+  }
+
+  process.on('SIGINT', () => handleSignal('SIGINT'));
+  process.on('SIGTERM', () => handleSignal('SIGTERM'));
+}
+
 // Rate limit configuration
 const RATE_LIMIT_ENV_VAR = 'PAYMENT_SERVICE_CHARGE_RATE_LIMIT_RPS'
 const rateLimitRps = parseInt(process.env[RATE_LIMIT_ENV_VAR], 10)
