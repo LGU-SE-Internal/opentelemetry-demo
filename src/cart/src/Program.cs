@@ -34,6 +34,7 @@ public partial class Program
     internal const int ShutdownGracePeriodSeconds = 10;
     private static bool _isShuttingDown = false;
     private static int _inFlightRequests = 0;
+    private static int _completedRequests = 0;
 
     internal static void RegisterShutdownHandlers(IHostApplicationLifetime lifetime, ICartStore cartStore, ILogger<Program> logger)
     {
@@ -57,7 +58,7 @@ public partial class Program
                 cartStore.FlushAsync(cts.Token).Wait(cts.Token);
 
                 stopwatch.Stop();
-                logger.LogInformation("Shutdown completed successfully in {Duration}ms, processed {CompletedCount} in-flight requests", stopwatch.ElapsedMilliseconds, 0); // TODO: track completed count
+                logger.LogInformation("Shutdown completed successfully in {Duration}ms, processed {CompletedCount} in-flight requests", stopwatch.ElapsedMilliseconds, _completedRequests);
             }
             catch (OperationCanceledException)
             {
@@ -192,6 +193,7 @@ app.Use(async (context, next) =>
     finally
     {
         Interlocked.Decrement(ref _inFlightRequests);
+        Interlocked.Increment(ref _completedRequests);
     }
 });
 
