@@ -653,11 +653,11 @@ services:
       - GOMEMLIMIT=60MiB
       - OTEL_RESOURCE_ATTRIBUTES=${OTEL_RESOURCE_ATTRIBUTES},service.criticality=low
       - OTEL_SERVICE_NAME=flagd
-    command: [
-      "start",
-      "--uri",
-      "file:./etc/flagd/demo.flagd.json"
-    ]
+      - FLAGD_TLS_SERVER_CERT_PATH=${FLAGD_TLS_SERVER_CERT_PATH:-}
+      - FLAGD_TLS_SERVER_KEY_PATH=${FLAGD_TLS_SERVER_KEY_PATH:-}
+      - FLAGD_TLS_CA_CERT_PATH=${FLAGD_TLS_CA_CERT_PATH:-}
+      - FLAGD_TLS_CLIENT_AUTH_REQUIRED=${FLAGD_TLS_CLIENT_AUTH_REQUIRED:-false}
+    entrypoint: ["/etc/flagd/entrypoint.sh"]
     ports:
       - "${FLAGD_PORT}"
       - "${FLAGD_OFREP_PORT}"
