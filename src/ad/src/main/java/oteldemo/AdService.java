@@ -172,6 +172,14 @@ public final class AdService {
       AttributeKey.stringKey("demo.ad.request_type");
   private static final AttributeKey<String> adResponseTypeKey =
       AttributeKey.stringKey("demo.ad.response_type");
+  private static final AttributeKey<String> invalidCategoryReasonKey =
+      AttributeKey.stringKey("reason");
+
+  private static final LongCounter invalidCategoryRequestsCounter =
+      meter
+          .counterBuilder("ad_service_invalid_category_requests_total")
+          .setDescription("Total number of ad requests rejected due to invalid category parameters")
+          .build();
 
   private void validateTlsFile(String path) {
     File file = new File(path);
@@ -183,6 +191,32 @@ public final class AdService {
     }
     if (!file.canRead()) {
       throw new RuntimeException("Failed to read TLS file at " + path + ": Permission denied");
+    }
+  }
+
+  /**
+   * Validates an ad category parameter.
+   * @param category Input category string to validate
+   * @throws StatusRuntimeException with INVALID_ARGUMENT status if validation fails
+   */
+  void validateAdCategory(String category) {
+    if (category == null || category.isEmpty()) {
+      // Empty category is allowed per existing behavior
+      return;
+    }
+    // Check length first
+    if (category.length() > 64) {
+      invalidCategoryRequestsCounter.add(1, Attributes.of(invalidCategoryReasonKey, "length_exceeded"));
+      throw Status.INVALID_ARGUMENT
+          .withDescription("Invalid category: must not exceed 64 characters in length")
+          .asRuntimeException();
+    }
+    // Check characters: only a-z, A-Z, 0-9, _
+    if (!category.matches("^[a-zA-Z0-9_]+$")) {
+      invalidCategoryRequestsCounter.add(1, Attributes.of(invalidCategoryReasonKey, "invalid_characters"));
+      throw Status.INVALID_ARGUMENT
+          .withDescription("Invalid category: must only contain alphanumeric characters and underscores")
+          .asRuntimeException();
     }
   }
 
@@ -390,6 +424,11 @@ public final class AdService {
       try {
         // Context keys processing
         List<String> contextKeys = req.getContextKeysList();
+
+        // Validate all category parameters first
+        for (String category : contextKeys) {
+          service.validateAdCategory(category);
+        }
 
         List<Ad> allAds = new ArrayList<>();
         AdRequestType adRequestType;
