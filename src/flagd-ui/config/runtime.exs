@@ -45,20 +45,81 @@ if config_env() == :prod do
   host = System.get_env("PHX_HOST") || "example.com"
   port = String.to_integer(System.get_env("FLAGD_UI_PORT") || "4000")
 
-  config :flagd_ui, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
+  # TLS Configuration
+  tls_enabled = System.get_env("FLAGD_UI_TLS_ENABLED") == "true"
+  mtls_enabled = System.get_env("FLAGD_UI_MTLS_ENABLED") == "true"
 
-  config :flagd_ui, FlagdUiWeb.Endpoint,
+  if mtls_enabled and not tls_enabled do
+    raise "mTLS cannot be enabled without enabling TLS first"
+  end
+
+  endpoint_config = [
     url: [host: host, port: 443, scheme: "https"],
-    http: [
-      # Enable IPv6 and bind on all interfaces.
-      # Set it to  {0, 0, 0, 0, 0, 0, 0, 1} for local network only access.
-      # See the documentation on https://hexdocs.pm/bandit/Bandit.html#t:options/0
-      # for details about using IPv6 vs IPv4 and loopback vs public addresses.
-      ip: {0, 0, 0, 0, 0, 0, 0, 0},
-      port: port
-    ],
     check_origin: false,
     secret_key_base: secret_key_base
+  ]
+
+  endpoint_config =
+    if tls_enabled do
+      tls_port = String.to_integer(System.get_env("FLAGD_UI_TLS_PORT") || "8443")
+      cert_path = System.get_env("FLAGD_UI_TLS_CERT_PATH")
+      key_path = System.get_env("FLAGD_UI_TLS_KEY_PATH")
+
+      if is_nil(cert_path) or cert_path == "" do
+        raise "TLS certificate file path is required when TLS is enabled (FLAGD_UI_TLS_CERT_PATH)"
+      end
+
+      if not File.exists?(cert_path) do
+        raise "TLS certificate file not found at #{cert_path}"
+      end
+
+      if is_nil(key_path) or key_path == "" do
+        raise "TLS private key file path is required when TLS is enabled (FLAGD_UI_TLS_KEY_PATH)"
+      end
+
+      if not File.exists?(key_path) do
+        raise "TLS private key file not found at #{key_path}"
+      end
+
+      https_opts = [
+        ip: {0, 0, 0, 0, 0, 0, 0, 0},
+        port: tls_port,
+        cipher_suite: :strong,
+        keyfile: key_path,
+        certfile: cert_path
+      ]
+
+      https_opts =
+        if mtls_enabled do
+          ca_cert_path = System.get_env("FLAGD_UI_MTLS_CA_CERT_PATH")
+
+          if is_nil(ca_cert_path) or ca_cert_path == "" do
+            raise "mTLS CA certificate bundle path is required when mTLS is enabled (FLAGD_UI_MTLS_CA_CERT_PATH)"
+          end
+
+          if not File.exists?(ca_cert_path) do
+            raise "mTLS CA certificate bundle not found at #{ca_cert_path}"
+          end
+
+          https_opts ++ [
+            verify: :verify_peer,
+            cacertfile: ca_cert_path,
+            fail_if_no_peer_cert: true
+          ]
+        else
+          https_opts
+        end
+
+      Keyword.put(endpoint_config, :https, https_opts)
+    else
+      # Use plain HTTP when TLS is disabled
+      Keyword.put(endpoint_config, :http, [
+        ip: {0, 0, 0, 0, 0, 0, 0, 0},
+        port: port
+      ])
+    end
+
+  config :flagd_ui, FlagdUiWeb.Endpoint, endpoint_config
 
   config :opentelemetry, :processors,
     otel_batch_processor: %{
