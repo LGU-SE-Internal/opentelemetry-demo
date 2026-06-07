@@ -75,3 +75,6 @@ test/tracetesting/tracetesting-vars.yaml
 .agentm/
 .agentm/
 .agentm/
+.agentm/
+test-venv/
+test-venv/
