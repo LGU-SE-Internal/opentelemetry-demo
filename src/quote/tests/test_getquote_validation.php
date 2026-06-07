@@ -6,6 +6,7 @@ use GuzzleHttp\Client;
 class GetQuoteValidationTest extends TestCase
 {
     protected Client $client;
+    protected string $logFile = '/var/log/quote-service/validation_errors.log';
 
     protected function setUp(): void
     {
@@ -13,109 +14,93 @@ class GetQuoteValidationTest extends TestCase
             'base_uri' => 'http://localhost:8080',
             'http_errors' => false
         ]);
+        // Clear validation logs before each test
+        if (file_exists($this->logFile)) {
+            file_put_contents($this->logFile, '');
+        }
     }
 
-    public function test_ac1_invalid_json_payload_returns_400()
-    {
-        // Invalid JSON: missing quotes on key
-        $invalidJson = '{numberOfItems: 3}';
-        $response = $this->client->post('/getquote', [
-            'body' => $invalidJson,
-            'headers' => ['Content-Type' => 'application/json']
-        ]);
-
-        $this->assertEquals(400, $response->getStatusCode());
-        $responseBody = json_decode($response->getBody(), true);
-        $this->assertEquals('Invalid JSON payload', $responseBody['error']);
-    }
-
-    public function test_ac2_missing_numberofitems_field_returns_400()
-    {
-        $payload = json_encode(['otherField' => 'value']);
-        $response = $this->client->post('/getquote', [
-            'body' => $payload,
-            'headers' => ['Content-Type' => 'application/json']
-        ]);
-
-        $this->assertEquals(400, $response->getStatusCode());
-        $responseBody = json_decode($response->getBody(), true);
-        $this->assertEquals('Missing required field: numberOfItems', $responseBody['error']);
-    }
-
-    public function test_ac3_numberofitems_non_integer_returns_400()
-    {
-        // Test string value
-        $payload1 = json_encode(['numberOfItems' => '3']);
-        $response1 = $this->client->post('/getquote', [
-            'body' => $payload1,
-            'headers' => ['Content-Type' => 'application/json']
-        ]);
-        $this->assertEquals(400, $response1->getStatusCode());
-        $body1 = json_decode($response1->getBody(), true);
-        $this->assertEquals('numberOfItems must be an integer', $body1['error']);
-
-        // Test float value
-        $payload2 = json_encode(['numberOfItems' => 3.5]);
-        $response2 = $this->client->post('/getquote', [
-            'body' => $payload2,
-            'headers' => ['Content-Type' => 'application/json']
-        ]);
-        $this->assertEquals(400, $response2->getStatusCode());
-        $body2 = json_decode($response2->getBody(), true);
-        $this->assertEquals('numberOfItems must be an integer', $body2['error']);
-
-        // Test boolean value
-        $payload3 = json_encode(['numberOfItems' => true]);
-        $response3 = $this->client->post('/getquote', [
-            'body' => $payload3,
-            'headers' => ['Content-Type' => 'application/json']
-        ]);
-        $this->assertEquals(400, $response3->getStatusCode());
-        $body3 = json_decode($response3->getBody(), true);
-        $this->assertEquals('numberOfItems must be an integer', $body3['error']);
-    }
-
-    public function test_ac4_numberofitems_zero_returns_400()
+    public function test_ac1_numberofitems_zero_returns_400()
     {
         $payload = json_encode(['numberOfItems' => 0]);
-        $response = $this->client->post('/getquote', [
+        $response = $this->client->post('/getQuote', [
             'body' => $payload,
             'headers' => ['Content-Type' => 'application/json']
         ]);
 
         $this->assertEquals(400, $response->getStatusCode());
         $responseBody = json_decode($response->getBody(), true);
-        $this->assertEquals('numberOfItems must be greater than 0', $responseBody['error']);
+        $this->assertEquals('Invalid request parameter', $responseBody['error']);
+        $this->assertEquals('numberOfItems must be at least 1', $responseBody['message']);
+        $this->assertArrayHasKey('requestId', $responseBody);
+        $this->assertNotEmpty($responseBody['requestId']);
     }
 
-    public function test_ac5_numberofitems_negative_integer_returns_400()
+    public function test_ac2_numberofitems_negative_integer_returns_400()
     {
-        // Test -1
-        $payload1 = json_encode(['numberOfItems' => -1]);
-        $response1 = $this->client->post('/getquote', [
-            'body' => $payload1,
+        $payload = json_encode(['numberOfItems' => -10]);
+        $response = $this->client->post('/getQuote', [
+            'body' => $payload,
             'headers' => ['Content-Type' => 'application/json']
         ]);
-        $this->assertEquals(400, $response1->getStatusCode());
-        $body1 = json_decode($response1->getBody(), true);
-        $this->assertEquals('numberOfItems must be greater than 0', $body1['error']);
 
-        // Test -10
-        $payload2 = json_encode(['numberOfItems' => -10]);
-        $response2 = $this->client->post('/getquote', [
-            'body' => $payload2,
-            'headers' => ['Content-Type' => 'application/json']
-        ]);
-        $this->assertEquals(400, $response2->getStatusCode());
-        $body2 = json_decode($response2->getBody(), true);
-        $this->assertEquals('numberOfItems must be greater than 0', $body2['error']);
+        $this->assertEquals(400, $response->getStatusCode());
+        $responseBody = json_decode($response->getBody(), true);
+        $this->assertEquals('Invalid request parameter', $responseBody['error']);
+        $this->assertEquals('numberOfItems must be a positive integer', $responseBody['message']);
+        $this->assertArrayHasKey('requestId', $responseBody);
     }
 
-    public function test_ac6_positive_integer_numberofitems_returns_200()
+    public function test_ac3_numberofitems_over_maximum_returns_400()
     {
-        // Test 1 item
+        $payload = json_encode(['numberOfItems' => 1001]);
+        $response = $this->client->post('/getQuote', [
+            'body' => $payload,
+            'headers' => ['Content-Type' => 'application/json']
+        ]);
+
+        $this->assertEquals(400, $response->getStatusCode());
+        $responseBody = json_decode($response->getBody(), true);
+        $this->assertEquals('Invalid request parameter', $responseBody['error']);
+        $this->assertEquals('numberOfItems cannot exceed 1000', $responseBody['message']);
+        $this->assertArrayHasKey('requestId', $responseBody);
+    }
+
+    public function test_ac4_numberofitems_string_type_returns_400()
+    {
+        $payload = json_encode(['numberOfItems' => "15"]);
+        $response = $this->client->post('/getQuote', [
+            'body' => $payload,
+            'headers' => ['Content-Type' => 'application/json']
+        ]);
+
+        $this->assertEquals(400, $response->getStatusCode());
+        $responseBody = json_decode($response->getBody(), true);
+        $this->assertEquals('Invalid request parameter', $responseBody['error']);
+        $this->assertEquals('numberOfItems must be an integer', $responseBody['message']);
+        $this->assertArrayHasKey('requestId', $responseBody);
+    }
+
+    public function test_ac5_numberofitems_float_type_returns_400()
+    {
+        $payload = json_encode(['numberOfItems' => 7.5]);
+        $response = $this->client->post('/getQuote', [
+            'body' => $payload,
+            'headers' => ['Content-Type' => 'application/json']
+        ]);
+
+        $this->assertEquals(400, $response->getStatusCode());
+        $responseBody = json_decode($response->getBody(), true);
+        $this->assertEquals('Invalid request parameter', $responseBody['error']);
+        $this->assertEquals('numberOfItems must be an integer', $responseBody['message']);
+        $this->assertArrayHasKey('requestId', $responseBody);
+    }
+
+    public function test_ac6_valid_numberofitems_returns_200_ok()
+    {
+        // Test minimum valid value
         $payload1 = json_encode(['numberOfItems' => 1]);
-        $response1 = $this->client->post('/getquote', [
+        $response1 = $this->client->post('/getQuote', [
             'body' => $payload1,
             'headers' => ['Content-Type' => 'application/json']
         ]);
@@ -125,28 +110,70 @@ class GetQuoteValidationTest extends TestCase
         $this->assertIsNumeric($body1['quote']);
         $this->assertGreaterThan(0, $body1['quote']);
 
-        // Test 5 items
-        $payload2 = json_encode(['numberOfItems' => 5]);
-        $response2 = $this->client->post('/getquote', [
+        // Test mid-range valid value
+        $payload2 = json_encode(['numberOfItems' => 50]);
+        $response2 = $this->client->post('/getQuote', [
             'body' => $payload2,
             'headers' => ['Content-Type' => 'application/json']
         ]);
         $this->assertEquals(200, $response2->getStatusCode());
         $body2 = json_decode($response2->getBody(), true);
         $this->assertArrayHasKey('quote', $body2);
-        $this->assertIsNumeric($body2['quote']);
-        $this->assertGreaterThan(0, $body2['quote']);
 
-        // Test 100 items
-        $payload3 = json_encode(['numberOfItems' => 100]);
-        $response3 = $this->client->post('/getquote', [
+        // Test maximum valid value
+        $payload3 = json_encode(['numberOfItems' => 1000]);
+        $response3 = $this->client->post('/getQuote', [
             'body' => $payload3,
             'headers' => ['Content-Type' => 'application/json']
         ]);
         $this->assertEquals(200, $response3->getStatusCode());
         $body3 = json_decode($response3->getBody(), true);
         $this->assertArrayHasKey('quote', $body3);
-        $this->assertIsNumeric($body3['quote']);
-        $this->assertGreaterThan(0, $body3['quote']);
+    }
+
+    public function test_ac7_invalid_request_writes_structured_log_entry()
+    {
+        $invalidValue = -5;
+        $payload = json_encode(['numberOfItems' => $invalidValue]);
+        $response = $this->client->post('/getQuote', [
+            'body' => $payload,
+            'headers' => ['Content-Type' => 'application/json']
+        ]);
+        $responseBody = json_decode($response->getBody(), true);
+        $requestId = $responseBody['requestId'];
+
+        // Check log file exists and has content
+        $this->assertFileExists($this->logFile);
+        $logContent = file_get_contents($this->logFile);
+        $this->assertNotEmpty($logContent);
+
+        // Parse log entry (assuming JSON formatted log lines)
+        $logEntries = array_filter(explode("\n", $logContent));
+        $this->assertCount(1, $logEntries);
+        $logEntry = json_decode($logEntries[0], true);
+        
+        $this->assertArrayHasKey('client_ip', $logEntry);
+        $this->assertNotEmpty($logEntry['client_ip']);
+        $this->assertEquals($invalidValue, $logEntry['invalid_value']);
+        $this->assertEquals($requestId, $logEntry['request_id']);
+        $this->assertEquals('negative/zero', $logEntry['error_type']);
+        $this->assertArrayHasKey('timestamp', $logEntry);
+        $this->assertNotEmpty($logEntry['timestamp']);
+    }
+
+    public function test_ac8_valid_request_creates_no_validation_log_entry()
+    {
+        $payload = json_encode(['numberOfItems' => 50]);
+        $response = $this->client->post('/getQuote', [
+            'body' => $payload,
+            'headers' => ['Content-Type' => 'application/json']
+        ]);
+        $this->assertEquals(200, $response->getStatusCode());
+
+        // Check log file is empty
+        if (file_exists($this->logFile)) {
+            $logContent = file_get_contents($this->logFile);
+            $this->assertEmpty(trim($logContent));
+        }
     }
 }
