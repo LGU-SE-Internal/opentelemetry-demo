@@ -53,6 +53,13 @@ shutdown_initiated = False
 service_initialized = False
 logger = logging.getLogger('main')
 import psycopg2
+import time
+
+# Rate limiting configuration
+RATE_LIMIT_ENABLED = os.getenv("PRODUCT_REVIEWS_RATE_LIMIT_ENABLED", "true").lower() == "true"
+RATE_LIMIT_REQUESTS_PER_MINUTE = int(os.getenv("PRODUCT_REVIEWS_RATE_LIMIT_REQUESTS_PER_MINUTE", "100"))
+rate_limit_store = {}
+rate_limit_lock = asyncio.Lock()
 
 def is_db_healthy() -> bool:
     """Check if database connection is healthy"""
@@ -131,6 +138,73 @@ def validate_request_params(context, product_id: str, limit: int = None, offset:
         if offset < 0:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, 
                          f"offset {offset} is invalid, must be >= 0")
+
+class RateLimitInterceptor(grpc.aio.ServerInterceptor):
+    async def intercept_service(self, continuation, handler_call_details):
+        # Skip rate limiting if disabled
+        if not RATE_LIMIT_ENABLED:
+            return await continuation(handler_call_details)
+        
+        # Only apply rate limiting to our service endpoints
+        method_name = handler_call_details.method
+        if not method_name.endswith(("GetProductReviews", "SubmitProductReview")):
+            return await continuation(handler_call_details)
+        
+        # Extract client IP
+        client_ip = "unknown"
+        for key, value in handler_call_details.invocation_metadata:
+            if key.lower() == "x-forwarded-for":
+                client_ip = value.split(",")[0].strip()
+                break
+        else:
+            # Get peer IP if no x-forwarded-for header
+            peer = handler_call_details.peer
+            if peer and ":" in peer:
+                client_ip = peer.split(":")[1]
+        
+        # Calculate current minute window (timestamp rounded down to nearest 60s)
+        current_window = int(time.time() // 60) * 60
+        
+        async with rate_limit_lock:
+            # Clean up old windows
+            to_delete = [ip for ip, data in rate_limit_store.items() if data["window"] != current_window]
+            for ip in to_delete:
+                del rate_limit_store[ip]
+            
+            # Get or create client entry
+            if client_ip not in rate_limit_store:
+                rate_limit_store[client_ip] = {
+                    "window": current_window,
+                    "count": 0
+                }
+            
+            client_data = rate_limit_store[client_ip]
+            client_data["count"] += 1
+            current_count = client_data["count"]
+        
+        # Check if rate limit exceeded
+        if current_count > RATE_LIMIT_REQUESTS_PER_MINUTE:
+            # Log violation
+            logger.warning(
+                "Rate limit exceeded",
+                extra={
+                    "client_ip": client_ip,
+                    "endpoint": method_name,
+                    "request_count": current_count,
+                    "rate_limit": RATE_LIMIT_REQUESTS_PER_MINUTE
+                }
+            )
+            # Return RESOURCE_EXHAUSTED error
+            async def abort_method(request, context):
+                await context.abort(
+                    grpc.StatusCode.RESOURCE_EXHAUSTED,
+                    "Rate limit exceeded. Try again later."
+                )
+            
+            return grpc.unary_unary_rpc_method_handler(abort_method)
+        
+        # Proceed to handler if rate limit not exceeded
+        return await continuation(handler_call_details)
 
 
 class ProductReviewService(demo_pb2_grpc.ProductReviewServiceServicer):
@@ -481,7 +555,10 @@ if __name__ == "__main__":
     logger.addHandler(handler)
 
     # Create async gRPC server
-    server = grpc.aio.server(futures.ThreadPoolExecutor(max_workers=10))
+    server = grpc.aio.server(
+        futures.ThreadPoolExecutor(max_workers=10),
+        interceptors=[RateLimitInterceptor()]
+    )
 
     # Add class to gRPC server
     service = ProductReviewService()
