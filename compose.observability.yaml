@@ -111,6 +111,7 @@ services:
       - OPENSEARCH_JAVA_OPTS=-Xms400m -Xmx400m
       - DISABLE_INSTALL_DEMO_CONFIG=true
       - DISABLE_SECURITY_PLUGIN=true
+      - OPENSEARCH_LOG_RETENTION_DAYS=${OPENSEARCH_LOG_RETENTION_DAYS:-7}
       # Workaround on OSX for https://bugs.openjdk.org/browse/JDK-8345296
       - _JAVA_OPTIONS
     ulimits:

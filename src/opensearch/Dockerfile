@@ -37,4 +37,13 @@ RUN /usr/share/opensearch/bin/opensearch-plugin remove opensearch-security-analy
 # - opensearch-sql (SQL query support for Grafana PPL queries)
 # - opensearch-job-scheduler (task scheduling)
 
+USER 0
+
+# Add ILM configuration startup script
+COPY startup-ilm-config.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/startup-ilm-config.sh
+
 USER 1000
+
+ENTRYPOINT ["/usr/local/bin/startup-ilm-config.sh"]
+
