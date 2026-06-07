@@ -1,6 +1,7 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 using System.Threading.Tasks;
+using System.Threading;
 
 namespace cart.cartstore;
 
@@ -14,4 +15,6 @@ public interface ICartStore
     Task<Oteldemo.Cart> GetCartAsync(string userId);
 
     bool Ping();
+
+    Task FlushAsync(CancellationToken cancellationToken = default);
 }
