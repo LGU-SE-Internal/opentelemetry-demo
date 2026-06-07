@@ -10,6 +10,11 @@ import random
 import re
 import os
 import logging
+import signal
+import types
+from typing import Optional
+import threading
+from uuid import uuid4
 
 from openfeature import api
 from openfeature.contrib.provider.flagd import FlagdProvider
@@ -18,6 +23,67 @@ from flask_limiter.util import get_remote_address
 
 app = Flask(__name__)
 app.logger.setLevel(logging.INFO)
+
+# Graceful shutdown configuration
+shutdown_initiated = False
+shutdown_timeout = int(os.environ.get('LLM_SERVICE_SHUTDOWN_TIMEOUT', 30))
+in_flight_requests = 0
+requests_tracking = {}
+shutdown_lock = threading.Lock()
+shutdown_event = threading.Event()
+
+def handle_shutdown(signal_num: int, frame: Optional[types.FrameType]) -> None:
+    global shutdown_initiated
+    with shutdown_lock:
+        if shutdown_initiated:
+            return
+        shutdown_initiated = True
+    
+    app.logger.info(f"Starting graceful shutdown, waiting up to {shutdown_timeout} seconds for in-flight requests to complete")
+    
+    # Wait for in-flight requests to complete or timeout
+    shutdown_completed = shutdown_event.wait(timeout=shutdown_timeout)
+    
+    if not shutdown_completed:
+        # Log all incomplete requests
+        for req_id, req_info in requests_tracking.items():
+            processing_time = time.time() - req_info['start_time']
+            app.logger.warning(f"Terminating incomplete request: ID={req_id}, Path={req_info['path']}, Processing time={processing_time:.2f}s")
+    
+    # Exit with code 0
+    os._exit(0)
+
+# Register signal handlers
+signal.signal(signal.SIGINT, handle_shutdown)
+signal.signal(signal.SIGTERM, handle_shutdown)
+
+@app.before_request
+def check_shutdown():
+    global in_flight_requests
+    with shutdown_lock:
+        if shutdown_initiated:
+            return jsonify({"error": "Service unavailable, shutting down"}), 503
+        # Track new request
+        req_id = str(uuid4())
+        request.req_id = req_id
+        requests_tracking[req_id] = {
+            'path': request.path,
+            'start_time': time.time()
+        }
+        in_flight_requests += 1
+
+@app.teardown_request
+def track_request_end(exc=None):
+    global in_flight_requests
+    if hasattr(request, 'req_id'):
+        with shutdown_lock:
+            req_id = request.req_id
+            if req_id in requests_tracking:
+                del requests_tracking[req_id]
+            in_flight_requests -= 1
+            # If no more in-flight requests and shutdown is initiated, signal shutdown event
+            if shutdown_initiated and in_flight_requests == 0:
+                shutdown_event.set()
 
 # Rate limiting configuration
 def get_rate_limit():
