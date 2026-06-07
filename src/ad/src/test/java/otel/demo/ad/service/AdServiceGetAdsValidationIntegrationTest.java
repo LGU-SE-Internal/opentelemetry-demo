@@ -175,4 +175,51 @@ class AdServiceGetAdsValidationIntegrationTest {
         // Valid request should return at least one ad as per existing service behavior
         assertFalse(response.getAdsList().isEmpty());
     }
+
+    @Test
+    void test_ac1_valid_category_accepted_normally() {
+        // AC-1: Category with alphanumeric and underscore, length <=64 is accepted
+        AdRequest request = AdRequest.newBuilder()
+                .setCategory("valid_category_123")
+                .build();
+
+        AdResponse response = assertDoesNotThrow(() -> stub.getAds(request));
+        assertNotNull(response);
+    }
+
+    @Test
+    void test_ac2_invalid_category_characters_rejected() {
+        // AC-2: Category with invalid characters returns INVALID_ARGUMENT with proper message
+        AdRequest request = AdRequest.newBuilder()
+                .setCategory("invalid category!@#")
+                .build();
+
+        StatusRuntimeException exception = assertThrows(StatusRuntimeException.class, () -> stub.getAds(request));
+        assertEquals(Status.INVALID_ARGUMENT.getCode(), exception.getStatus().getCode());
+        assertEquals("Invalid category: must only contain alphanumeric characters and underscores", exception.getStatus().getDescription());
+    }
+
+    @Test
+    void test_ac3_category_length_exceeded_rejected() {
+        // AC-3: Category longer than 64 characters returns INVALID_ARGUMENT with proper message
+        String longCategory = "a".repeat(65);
+        AdRequest request = AdRequest.newBuilder()
+                .setCategory(longCategory)
+                .build();
+
+        StatusRuntimeException exception = assertThrows(StatusRuntimeException.class, () -> stub.getAds(request));
+        assertEquals(Status.INVALID_ARGUMENT.getCode(), exception.getStatus().getCode());
+        assertEquals("Invalid category: must not exceed 64 characters in length", exception.getStatus().getDescription());
+    }
+
+    @Test
+    void test_ac5_empty_category_allowed() {
+        // AC-5: Empty category string is allowed per existing behavior
+        AdRequest request = AdRequest.newBuilder()
+                .setCategory("")
+                .build();
+
+        AdResponse response = assertDoesNotThrow(() -> stub.getAds(request));
+        assertNotNull(response);
+    }
 }
