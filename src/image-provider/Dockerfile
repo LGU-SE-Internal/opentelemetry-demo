@@ -9,8 +9,12 @@ COPY src/image-provider/static/ /static/
 COPY src/image-provider/nginx.conf.template /nginx.conf.template
 
 EXPOSE ${IMAGE_PROVIDER_PORT}
+EXPOSE 8443
 
 STOPSIGNAL SIGQUIT
 
 # Start nginx
-CMD ["/bin/sh" , "-c" , "envsubst '$OTEL_COLLECTOR_HOST $IMAGE_PROVIDER_PORT $OTEL_COLLECTOR_PORT_GRPC $OTEL_SERVICE_NAME $NGINX_RATE_LIMIT_RPS' < /nginx.conf.template > /etc/nginx/nginx.conf && cat  /etc/nginx/nginx.conf && exec nginx -g 'daemon off;'"]
+CMD ["/bin/sh" , "-c" , "\
+  # Generate nginx.conf from template with conditional TLS support\n\
+  envsubst '$OTEL_COLLECTOR_HOST $IMAGE_PROVIDER_PORT $OTEL_COLLECTOR_PORT_GRPC $OTEL_SERVICE_NAME $NGINX_RATE_LIMIT_RPS $IMAGE_PROVIDER_TLS_CERT_PATH $IMAGE_PROVIDER_TLS_KEY_PATH $IMAGE_PROVIDER_TLS_CA_CERT_PATH' < /nginx.conf.template > /etc/nginx/nginx.conf && \n\
+  exec nginx -g 'daemon off;'\n"]
