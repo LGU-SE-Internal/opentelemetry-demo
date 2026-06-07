@@ -242,6 +242,26 @@ def check_feature_flag(flag_name: str):
     return client.get_boolean_value("recommendationCacheFailure", False)
 
 
+def str_to_bool(value: str) -> bool:
+    """Convert string to boolean, supports 1/0, true/false (case-insensitive)."""
+    if not value:
+        return False
+    return value.lower() in ('true', '1', 'yes')
+
+
+def load_cert_file(path: str) -> bytes:
+    """Load certificate/key file from filesystem, returns bytes."""
+    try:
+        with open(path, 'rb') as f:
+            return f.read()
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Certificate file not found: {path}")
+    except PermissionError:
+        raise PermissionError(f"Permission denied reading certificate file: {path}")
+    except Exception as e:
+        raise ValueError(f"Error reading certificate file {path}: {str(e)}") from e
+
+
 if __name__ == "__main__":
     service_name = must_map_env('OTEL_SERVICE_NAME')
     api.set_provider(FlagdProvider(host=os.environ.get('FLAGD_HOST', 'flagd'), port=os.environ.get('FLAGD_PORT', 8013)))
@@ -289,15 +309,50 @@ if __name__ == "__main__":
             }
         ]
     })
+    channel_options = [
+        ("grpc.enable_retries", 1),
+        ("grpc.service_config", service_config),
+        ("grpc.max_receive_message_length", -1),
+    ]
     
-    pc_channel = grpc.insecure_channel(
-        catalog_addr,
-        options=[
-            ("grpc.enable_retries", 1),
-            ("grpc.service_config", service_config),
-            ("grpc.max_receive_message_length", -1),
-        ]
-    )
+    # Configure Product Catalog client channel (plaintext or TLS/mTLS)
+    client_tls_enabled = str_to_bool(os.environ.get('TLS_CLIENT_ENABLE', 'false'))
+    if client_tls_enabled:
+        # Load required CA cert for server validation
+        client_ca_cert_path = os.environ.get('TLS_CLIENT_CA_CERT_PATH')
+        if not client_ca_cert_path:
+            raise ValueError("TLS_CLIENT_ENABLE is true but TLS_CLIENT_CA_CERT_PATH is not set")
+        root_certificates = load_cert_file(client_ca_cert_path)
+        certificate_chain = None
+        private_key = None
+        
+        # Check if mTLS is enabled
+        client_mtls_enabled = str_to_bool(os.environ.get('TLS_CLIENT_ENABLE_MTLS', 'false'))
+        if client_mtls_enabled:
+            client_cert_path = os.environ.get('TLS_CLIENT_CERT_PATH')
+            client_key_path = os.environ.get('TLS_CLIENT_KEY_PATH')
+            if not client_cert_path or not client_key_path:
+                raise ValueError("TLS_CLIENT_ENABLE_MTLS is true but TLS_CLIENT_CERT_PATH or TLS_CLIENT_KEY_PATH is not set")
+            certificate_chain = load_cert_file(client_cert_path)
+            private_key = load_cert_file(client_key_path)
+        
+        # Create TLS credentials
+        client_credentials = grpc.ssl_channel_credentials(
+            root_certificates=root_certificates,
+            certificate_chain=certificate_chain,
+            private_key=private_key
+        )
+        pc_channel = grpc.secure_channel(
+            catalog_addr,
+            credentials=client_credentials,
+            options=channel_options
+        )
+    else:
+        # Use plaintext channel (default behavior)
+        pc_channel = grpc.insecure_channel(
+            catalog_addr,
+            options=channel_options
+        )
     
     # Add retry logging interceptor
     retry_interceptor = RetryLoggingInterceptor(logger)
@@ -312,11 +367,39 @@ if __name__ == "__main__":
     demo_pb2_grpc.add_RecommendationServiceServicer_to_server(service, server)
     health_pb2_grpc.add_HealthServicer_to_server(service, server)
 
-    # Start server
+    # Start server (plaintext or TLS/mTLS)
     port = must_map_env('RECOMMENDATION_PORT')
-    server.add_insecure_port(f'[::]:{port}')
+    server_tls_enabled = str_to_bool(os.environ.get('TLS_SERVER_ENABLE', 'false'))
+    
+    if server_tls_enabled:
+        # Load required server cert and key
+        server_cert_path = os.environ.get('TLS_SERVER_CERT_PATH')
+        server_key_path = os.environ.get('TLS_SERVER_KEY_PATH')
+        if not server_cert_path or not server_key_path:
+            raise ValueError("TLS_SERVER_ENABLE is true but TLS_SERVER_CERT_PATH or TLS_SERVER_KEY_PATH is not set")
+        server_cert_chain = load_cert_file(server_cert_path)
+        server_private_key = load_cert_file(server_key_path)
+        root_certificates = None
+        
+        # Check if server-side mTLS is required
+        client_ca_cert_path = os.environ.get('TLS_SERVER_CLIENT_CA_CERT_PATH')
+        if client_ca_cert_path:
+            root_certificates = load_cert_file(client_ca_cert_path)
+        
+        # Create server TLS credentials
+        server_credentials = grpc.ssl_server_credentials(
+            private_key_certificate_chain_pairs=[(server_private_key, server_cert_chain)],
+            root_certificates=root_certificates,
+            require_client_auth=client_ca_cert_path is not None
+        )
+        server.add_secure_port(f'[::]:{port}', server_credentials)
+        logger.info(f'Recommendation service started with TLS enabled, listening on port {port}')
+    else:
+        # Use plaintext port (default behavior)
+        server.add_insecure_port(f'[::]:{port}')
+        logger.info(f'Recommendation service started, listening on port {port}')
+    
     server.start()
-    logger.info(f'Recommendation service started, listening on port {port}')
     
     # Define signal handler for graceful shutdown
     def handle_shutdown_signal(signum, frame):
