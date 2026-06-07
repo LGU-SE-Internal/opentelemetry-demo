@@ -1,9 +1,10 @@
-use std::future::Future;
 use std::pin::Pin;
+use std::future::Future;
 use std::time::Duration;
 
-use opentelemetry::Context;
 use rand::Rng;
+use tokio::time::sleep;
+use opentelemetry::Context;
 use tracing::warn;
 
 /// Configuration for exponential backoff retry policy
@@ -49,65 +50,63 @@ where
     E: RetryableError + std::fmt::Display,
 {
     let mut attempt = 0;
-    let parent_cx = Context::current();
+
+    // Capture the current OpenTelemetry context to preserve across retries
+    let current_context = Context::current();
 
     loop {
-        // Attach the parent context to preserve trace ID across retries
-        let result = parent_cx.attach(&operation).await;
+        attempt += 1;
+
+        // Attach the preserved context for this attempt
+        let result = current_context.attach(|| operation()).await;
 
         match result {
             Ok(value) => return Ok(value),
             Err(error) => {
-                if attempt >= config.max_retries || !error.is_retryable() {
+                if !error.is_retryable() || attempt > config.max_retries {
                     return Err(error);
                 }
 
-                attempt += 1;
-                
-                // Calculate exponential backoff
-                let backoff_ms = std::cmp::min(
-                    config.initial_backoff_ms * (1u64 << attempt),
-                    config.max_backoff_ms
-                );
+                // Calculate backoff duration
+                let base_backoff = config.initial_backoff_ms * (2u64.pow(attempt - 1));
+                let base_backoff = base_backoff.min(config.max_backoff_ms);
 
-                // Add jitter
-                let jitter = rand::thread_rng().gen_range(0.0..=config.jitter_factor);
-                let jittered_backoff_ms = (backoff_ms as f64 * (1.0 - jitter)) as u64;
-                let backoff_duration = Duration::from_millis(jittered_backoff_ms);
+                // Apply jitter
+                let jitter = rand::thread_rng().gen_range(0.0..config.jitter_factor);
+                let backoff_ms = (base_backoff as f64 * (1.0 + jitter)) as u64;
+                let backoff_duration = Duration::from_millis(backoff_ms);
 
                 // Log retry attempt
                 warn!(
                     attempt = attempt,
                     max_attempts = config.max_retries + 1,
-                    backoff_ms = jittered_backoff_ms,
+                    backoff_ms = backoff_ms,
                     error = %error,
                     "Retrying failed request after transient error"
                 );
 
                 // Wait for backoff duration
-                tokio::time::sleep(backoff_duration).await;
+                sleep(backoff_duration).await;
             }
         }
     }
 }
 
-/// Implementation for reqwest::Error: retryable on connection timeouts, 5xx status codes
+// Implement RetryableError for reqwest::Error
 #[cfg(feature = "reqwest")]
 impl RetryableError for reqwest::Error {
     fn is_retryable(&self) -> bool {
         if self.is_timeout() || self.is_connect() {
             return true;
         }
-
         if let Some(status) = self.status() {
             return status.is_server_error();
         }
-
         false
     }
 }
 
-/// Implementation for tonic::Status: retryable on ABORTED, UNAVAILABLE, DEADLINE_EXCEEDED codes
+// Implement RetryableError for tonic::Status
 #[cfg(feature = "tonic")]
 impl RetryableError for tonic::Status {
     fn is_retryable(&self) -> bool {
