@@ -17,7 +17,9 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -33,15 +35,18 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	semconv "go.opentelemetry.io/otel/semconv/v1.38.0"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/time/rate"
 
 	otelhooks "github.com/open-feature/go-sdk-contrib/hooks/open-telemetry/pkg"
 	flagd "github.com/open-feature/go-sdk-contrib/providers/flagd/pkg"
 	"github.com/open-feature/go-sdk/openfeature"
-	pb "github.com/opentelemetry/opentelemetry-demo/src/product-catalog/genproto/oteldemo"
+	pb "github.com/open-telemetry/opentelemetry-demo/src/product-catalog/genproto/oteldemo"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
 
@@ -90,6 +95,81 @@ func validateSearchProductsRequest(req *pb.SearchProductsRequest) error {
 		return status.Errorf(codes.InvalidArgument, "page_token must be >= 1, got %d", req.PageToken)
 	}
 	return nil
+}
+
+type clientLimiter struct {
+	limiter  *rate.Limiter
+	lastSeen time.Time
+}
+
+var (
+	limiters sync.Map
+)
+
+func RateLimitInterceptor(rateLimitRPS float64, rateLimitCounter metric.Int64Counter) grpc.UnaryServerInterceptor {
+	// Start cleanup goroutine for stale limiters
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			limiters.Range(func(key, value interface{}) bool {
+				ip := key.(string)
+				cl := value.(*clientLimiter)
+				if time.Since(cl.lastSeen) > 1*time.Hour {
+					limiters.Delete(ip)
+				}
+				return true
+			})
+		}
+	}()
+
+	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+		// Extract client IP
+		clientIP := "unknown"
+		if md, ok := metadata.FromIncomingContext(ctx); ok {
+			if xff := md.Get("x-forwarded-for"); len(xff) > 0 {
+				parts := strings.Split(xff[0], ",")
+				if len(parts) > 0 {
+					clientIP = strings.TrimSpace(parts[0])
+				}
+			}
+		}
+		if clientIP == "unknown" {
+			if p, ok := peer.FromContext(ctx); ok {
+				if addr, ok := p.Addr.(*net.TCPAddr); ok {
+					clientIP = addr.IP.String()
+				}
+			}
+		}
+
+		// Get or create limiter for client IP
+		limiterValue, ok := limiters.Load(clientIP)
+		if !ok {
+			limiter := rate.NewLimiter(rate.Limit(rateLimitRPS), int(rateLimitRPS))
+			limiterValue = &clientLimiter{
+				limiter:  limiter,
+				lastSeen: time.Now(),
+			}
+			limiters.Store(clientIP, limiterValue)
+		}
+		cl := limiterValue.(*clientLimiter)
+		cl.lastSeen = time.Now()
+
+		// Check rate limit
+		if !cl.limiter.Allow() {
+			// Increment rate limit counter
+			rateLimitCounter.Add(ctx, 1,
+				metric.WithAttributes(
+					attribute.String("client_ip", clientIP),
+					attribute.String("grpc_method", info.FullMethod),
+				),
+			)
+			return nil, status.Error(codes.ResourceExhausted, "rate limit exceeded, please try again later")
+		}
+
+		// Call handler
+		return handler(ctx, req)
+	}
 }
 
 type productCatalog struct {
@@ -196,6 +276,26 @@ func main() {
 		logger.Error(err.Error())
 	}
 
+	// Initialize rate limit
+	rateLimitRPS := 100.0
+	if rateLimitStr := os.Getenv("PRODUCT_CATALOG_RATE_LIMIT_RPS"); rateLimitStr != "" {
+		if parsedRate, err := strconv.ParseFloat(rateLimitStr, 64); err == nil && parsedRate > 0 {
+			rateLimitRPS = parsedRate
+		} else {
+			logger.Warn("Invalid PRODUCT_CATALOG_RATE_LIMIT_RPS value, using default 100.0", slog.Any("error", err))
+		}
+	}
+
+	meter := otel.Meter("product-catalog")
+	rateLimitCounter, err := meter.Int64Counter(
+		"otel_demo_product_catalog_rate_limited_requests_total",
+		metric.WithDescription("Total number of requests that were rate limited"),
+	)
+	if err != nil {
+		logger.Error("Failed to create rate limit counter metric", slog.Any("error", err))
+		os.Exit(1)
+	}
+
 	svc := &productCatalog{}
 	var port string
 	mustMapEnv(&port, "PRODUCT_CATALOG_PORT")
@@ -209,6 +309,7 @@ func main() {
 
 	srv := grpc.NewServer(
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
+		grpc.UnaryInterceptor(RateLimitInterceptor(rateLimitRPS, rateLimitCounter)),
 	)
 
 	reflection.Register(srv)
