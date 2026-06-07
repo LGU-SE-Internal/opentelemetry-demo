@@ -74,10 +74,18 @@ def initialize_otel_exporters():
     retry_initial_delay = float(os.environ.get("OTEL_EXPORTER_OTLP_RETRY_INITIAL_DELAY", 1.0))
     retry_max_delay = float(os.environ.get("OTEL_EXPORTER_OTLP_RETRY_MAX_DELAY", 5.0))
     
+    # Parse OTLP timeout with fallback to 10s for invalid/non-positive values
+    try:
+        timeout = int(os.environ.get("OTEL_EXPORTER_OTLP_TIMEOUT", 10))
+        if timeout <= 0:
+            timeout = 10
+    except (ValueError, TypeError):
+        timeout = 10
+    
     # Build common exporter parameters
     common_params = {
         "insecure": insecure,
-        "timeout": 10
+        "timeout": timeout
     }
     
     if client_cert and client_key:

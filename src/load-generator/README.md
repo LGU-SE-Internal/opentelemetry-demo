@@ -22,6 +22,7 @@ The load generator supports the following environment variables for OTLP telemet
 | `OTEL_EXPORTER_OTLP_RETRY_MAX_ATTEMPTS` | integer | `5` | Maximum number of retries for failed OTLP export attempts |
 | `OTEL_EXPORTER_OTLP_RETRY_INITIAL_DELAY` | float | `1.0` | Initial backoff delay in seconds for retries |
 | `OTEL_EXPORTER_OTLP_RETRY_MAX_DELAY` | float | `5.0` | Maximum backoff delay in seconds for retries |
+| `OTEL_EXPORTER_OTLP_TIMEOUT` | integer | `10` | Timeout in seconds for all OTLP export requests. Valid values are positive integers >= 1. Invalid values fall back to default of 10. |
 
 ## Modifying the Load Generator
 
