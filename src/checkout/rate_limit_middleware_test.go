@@ -21,16 +21,6 @@ const (
 	testIP2          = "192.168.1.101"
 )
 
-// Dummy implementation to make tests compile (will be replaced by actual implementation)
-func NewRateLimiterMiddleware(rps float64, burst int) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Always pass through for now, tests will fail as expected
-			next.ServeHTTP(w, r)
-		})
-	}
-}
-
 // Test_AC1_CustomRateLimitValuesFromEnv verifies that when CHECKOUT_RATE_LIMIT_RPS and CHECKOUT_RATE_LIMIT_BURST
 // environment variables are set, the middleware uses those values instead of defaults.
 func Test_AC1_CustomRateLimitValuesFromEnv(t *testing.T) {
@@ -164,11 +154,9 @@ func Test_AC4_RateLimitPerClientIP(t *testing.T) {
 
 // Test_AC5_AllPublicCheckoutEndpointsLimited verifies rate limiting applies to all /api/checkout/* paths.
 func Test_AC5_AllPublicCheckoutEndpointsLimited(t *testing.T) {
-	mw := NewRateLimiterMiddleware(1.0, 1)
 	testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	wrappedHandler := mw(testHandler)
 
 	// Test various /api/checkout subpaths
 	testPaths := []string{
@@ -181,6 +169,9 @@ func Test_AC5_AllPublicCheckoutEndpointsLimited(t *testing.T) {
 
 	for _, path := range testPaths {
 		t.Run(path, func(t *testing.T) {
+			// Create new middleware for each subtest to avoid cross-test rate limiting
+			mw := NewRateLimiterMiddleware(1.0, 1)
+			wrappedHandler := mw(testHandler)
 			// First request passes
 			req1 := httptest.NewRequest(http.MethodPost, path, nil)
 			req1.Header.Set("X-Forwarded-For", testIP1)
