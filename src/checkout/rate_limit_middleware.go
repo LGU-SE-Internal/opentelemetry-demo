@@ -61,6 +61,7 @@ func NewRateLimiterMiddleware(rps float64, burst int) func(http.Handler) http.Ha
 				// Calculate retry after time: time until next token is available, rounded up to nearest second
 				reservation := limiter.Reserve()
 				retryAfter := reservation.Delay().Round(time.Second)
+				reservation.Cancel() // Cancel reservation since we're rejecting the request
 				if retryAfter < time.Second {
 					retryAfter = time.Second
 				}
@@ -127,4 +128,3 @@ func (rl *RateLimiter) getLimiter(ip string) *rate.Limiter {
 
 	return limiter.limiter
 }
-

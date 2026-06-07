@@ -165,6 +165,24 @@ func main() {
 		httpPort = "8080"
 	}
 
+	// Parse rate limit configuration from environment variables
+	rateLimitRPS := 10.0
+	if rpsStr := os.Getenv("CHECKOUT_RATE_LIMIT_RPS"); rpsStr != "" {
+		if parsedRPS, err := strconv.ParseFloat(rpsStr, 64); err == nil && parsedRPS > 0 {
+			rateLimitRPS = parsedRPS
+		}
+	}
+
+	rateLimitBurst := 20
+	if burstStr := os.Getenv("CHECKOUT_RATE_LIMIT_BURST"); burstStr != "" {
+		if parsedBurst, err := strconv.Atoi(burstStr); err == nil && parsedBurst > 0 {
+			rateLimitBurst = parsedBurst
+		}
+	}
+
+	// Initialize rate limiter middleware
+	rateLimiterMw := NewRateLimiterMiddleware(rateLimitRPS, rateLimitBurst)
+
 	// Initialize health check server first, set to NOT_SERVING during initialization
 	healthcheck := health.NewServer()
 	healthcheck.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
@@ -203,7 +221,7 @@ func main() {
 
 	httpServer := &http.Server{
 		Addr:    fmt.Sprintf(":%s", httpPort),
-		Handler: mux,
+		Handler: rateLimiterMw(mux),
 	}
 
 	// Start HTTP server immediately so health endpoints are available during initialization
