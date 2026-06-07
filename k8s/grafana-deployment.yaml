@@ -39,7 +39,7 @@ spec:
           httpGet:
             path: /api/health
             port: 3000
-          initialDelaySeconds: 10
+          initialDelaySeconds: 5
           periodSeconds: 5
           failureThreshold: 3
         resources:
@@ -51,9 +51,30 @@ spec:
             memory: 512Mi
         securityContext:
           allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          privileged: false
           capabilities:
             drop:
               - ALL
+        env:
+        - name: GRAFANA_LIVENESS_PROBE_INITIAL_DELAY_SECONDS
+          value: "$(GRAFANA_LIVENESS_PROBE_INITIAL_DELAY_SECONDS:30)"
+        - name: GRAFANA_LIVENESS_PROBE_PERIOD_SECONDS
+          value: "$(GRAFANA_LIVENESS_PROBE_PERIOD_SECONDS:10)"
+        - name: GRAFANA_READINESS_PROBE_INITIAL_DELAY_SECONDS
+          value: "$(GRAFANA_READINESS_PROBE_INITIAL_DELAY_SECONDS:5)"
+        - name: GRAFANA_READINESS_PROBE_PERIOD_SECONDS
+          value: "$(GRAFANA_READINESS_PROBE_PERIOD_SECONDS:5)"
+        - name: GRAFANA_RESOURCE_REQUEST_CPU
+          value: "$(GRAFANA_RESOURCE_REQUEST_CPU:100m)"
+        - name: GRAFANA_RESOURCE_REQUEST_MEMORY
+          value: "$(GRAFANA_RESOURCE_REQUEST_MEMORY:256Mi)"
+        - name: GRAFANA_RESOURCE_LIMIT_CPU
+          value: "$(GRAFANA_RESOURCE_LIMIT_CPU:500m)"
+        - name: GRAFANA_RESOURCE_LIMIT_MEMORY
+          value: "$(GRAFANA_RESOURCE_LIMIT_MEMORY:512Mi)"
+        - name: GRAFANA_RUN_USER_UID
+          value: "$(GRAFANA_RUN_USER_UID:472)"
         volumeMounts:
         - name: grafana-storage
           mountPath: /var/lib/grafana
