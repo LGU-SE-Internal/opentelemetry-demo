@@ -47,8 +47,9 @@ async function withRetry(callFn, options) {
 
   let attempt = 1;
   let lastError = null;
+  const totalAttempts = Math.max(maxAttempts, 1); // At least 1 attempt even if maxAttempts is 0
 
-  while (attempt <= maxAttempts) {
+  while (attempt <= totalAttempts) {
     try {
       const result = await callFn();
       if (attempt > 1) {
@@ -66,7 +67,8 @@ async function withRetry(callFn, options) {
       const errorCode = error.code || (error.statusCode ? String(error.statusCode) : null);
       const isRetryable = errorCode && retryableErrorCodes.includes(errorCode);
 
-      if (!isRetryable || attempt >= maxAttempts) {
+      // If not retryable, or we've used all attempts, throw
+      if (!isRetryable || attempt >= totalAttempts) {
         if (attempt > 1) {
           // Emit failure metric if we tried multiple times and failed
           metrics.getCounter('external_call.retry_failures').add(1, {
@@ -74,7 +76,7 @@ async function withRetry(callFn, options) {
             call_type: callType
           });
         }
-        if (attempt >= maxAttempts && isRetryable) {
+        if (attempt >= totalAttempts && isRetryable) {
           throw new MaxRetriesExceededError(
             `Max retries (${maxAttempts}) exceeded for ${serviceName}:${callType}`,
             lastError
