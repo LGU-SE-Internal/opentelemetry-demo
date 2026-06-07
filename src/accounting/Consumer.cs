@@ -19,7 +19,23 @@ internal class DBContext : DbContext
     {
         var connectionString = Environment.GetEnvironmentVariable("DB_CONNECTION_STRING");
 
-        optionsBuilder.UseNpgsql(connectionString).UseSnakeCaseNamingConvention();
+        var (pgTlsEnabled, caCertPath, clientCertPath, clientKeyPath) = TlsConfiguration.GetPostgresTlsConfig();
+        
+        var npgsqlBuilder = new NpgsqlConnectionStringBuilder(connectionString);
+        
+        if (pgTlsEnabled)
+        {
+            npgsqlBuilder.SslMode = SslMode.VerifyFull;
+            npgsqlBuilder.RootCertificate = caCertPath;
+            
+            if (!string.IsNullOrWhiteSpace(clientCertPath) && !string.IsNullOrWhiteSpace(clientKeyPath))
+            {
+                npgsqlBuilder.SslCertificate = clientCertPath;
+                npgsqlBuilder.SslKey = clientKeyPath;
+            }
+        }
+
+        optionsBuilder.UseNpgsql(npgsqlBuilder.ConnectionString).UseSnakeCaseNamingConvention();
     }
 }
 
@@ -217,6 +233,21 @@ internal class Consumer : IDisposable
                 EnableAutoCommit = false,
                 EnableAutoOffsetStore = false
             };
+
+            var (kafkaTlsEnabled, caCertPath, clientCertPath, clientKeyPath) = TlsConfiguration.GetKafkaTlsConfig();
+            
+            if (kafkaTlsEnabled)
+            {
+                conf.SecurityProtocol = SecurityProtocol.Ssl;
+                conf.SslCaLocation = caCertPath;
+                conf.SslEndpointIdentificationAlgorithm = SslEndpointIdentificationAlgorithm.Https;
+
+                if (!string.IsNullOrWhiteSpace(clientCertPath) && !string.IsNullOrWhiteSpace(clientKeyPath))
+                {
+                    conf.SslCertificateLocation = clientCertPath;
+                    conf.SslKeyLocation = clientKeyPath;
+                }
+            }
 
             return new ConsumerBuilder<string, byte[]>(conf)
                 .Build();

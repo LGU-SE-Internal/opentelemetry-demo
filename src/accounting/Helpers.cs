@@ -9,7 +9,7 @@ namespace Accounting
 {
     internal static class Helpers
     {
-        private static List<string> RelevantPrefixes = ["DOTNET_", "CORECLR_", "OTEL_", "KAFKA_"];
+        private static List<string> RelevantPrefixes = ["DOTNET_", "CORECLR_", "OTEL_", "KAFKA_", "POSTGRES_"];
 
         public static IEnumerable<DictionaryEntry> FilterRelevant(this IDictionary envs)
         {
