@@ -9,9 +9,14 @@ const { FlagdProvider } = require('@openfeature/flagd-provider');
 const flagProvider = new FlagdProvider();
 
 const logger = require('./logger');
+const { withRetry } = require('./retry');
 const tracer = trace.getTracer('payment');
 const meter = metrics.getMeter('payment');
 const transactionsCounter = meter.createCounter('demo.payment.transactions');
+
+// Retry configuration for flagd calls
+const FLAGD_RETRY_MAX_ATTEMPTS = parseInt(process.env.PAYMENT_SERVICE_FLAGD_RETRY_MAX_ATTEMPTS || '3', 10);
+const FLAGD_RETRY_INITIAL_DELAY_MS = parseInt(process.env.PAYMENT_SERVICE_FLAGD_RETRY_INITIAL_DELAY_MS || '100', 10);
 
 const LOYALTY_LEVEL = ['platinum', 'gold', 'silver', 'bronze'];
 
@@ -49,9 +54,27 @@ module.exports.charge = async request => {
   const span = tracer.startSpan('charge');
 
   try {
-    await OpenFeature.setProviderAndWait(flagProvider);
+    await withRetry(
+      async () => await OpenFeature.setProviderAndWait(flagProvider),
+      {
+        serviceName: "openfeature-flagd",
+        callType: "set-provider",
+        maxAttempts: FLAGD_RETRY_MAX_ATTEMPTS,
+        initialDelayMs: FLAGD_RETRY_INITIAL_DELAY_MS,
+        isIdempotent: true
+      }
+    );
 
-    const numberVariant = await OpenFeature.getClient().getNumberValue("paymentFailure", 0);
+    const numberVariant = await withRetry(
+      async () => await OpenFeature.getClient().getNumberValue("paymentFailure", 0),
+      {
+        serviceName: "openfeature-flagd",
+        callType: "feature-flag-evaluation",
+        maxAttempts: FLAGD_RETRY_MAX_ATTEMPTS,
+        initialDelayMs: FLAGD_RETRY_INITIAL_DELAY_MS,
+        isIdempotent: true
+      }
+    );
 
     if (numberVariant > 0) {
       // n% chance to fail with demo.user_context.loyalty_level=gold
