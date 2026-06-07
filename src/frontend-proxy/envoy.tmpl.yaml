@@ -10,6 +10,27 @@ static_resources:
           port_value: ${ENVOY_PORT}
       filter_chains:
         - filters:
+{{ if eq (getenv "FRONTEND_PROXY_TLS_ENABLED" "false") "true" }}
+          transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+              common_tls_context:
+                tls_params:
+                  tls_minimum_protocol_version: {{ getenv "FRONTEND_PROXY_TLS_MIN_VERSION" "TLSv1_2" }}
+                  tls_maximum_protocol_version: {{ getenv "FRONTEND_PROXY_TLS_MAX_VERSION" "TLSv1_3" }}
+                tls_certificates:
+                  - certificate_chain:
+                      filename: {{ getenv "FRONTEND_PROXY_TLS_CERT_PATH" "" }}
+                    private_key:
+                      filename: {{ getenv "FRONTEND_PROXY_TLS_KEY_PATH" "" }}
+{{ if eq (getenv "FRONTEND_PROXY_MTLS_ENABLED" "false") "true" }}
+                validation_context:
+                  trusted_ca:
+                    filename: {{ getenv "FRONTEND_PROXY_MTLS_CA_BUNDLE_PATH" "" }}
+              require_client_certificate: true
+{{ end }}
+{{ end }}
             - name: envoy.filters.network.http_connection_manager
               typed_config:
                 "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
@@ -253,6 +274,12 @@ static_resources:
                             value:
                               string_value: "%ROUTE_NAME%"
   clusters:
+{{ $upstreamTlsEnabled := eq (getenv "FRONTEND_PROXY_UPSTREAM_TLS_ENABLED" "false") "true" }}
+{{ if $upstreamTlsEnabled }}
+{{ $upstreamTlsMinVersion := getenv "FRONTEND_PROXY_UPSTREAM_TLS_MIN_VERSION" "TLSv1_2" }}
+{{ $upstreamTlsMaxVersion := getenv "FRONTEND_PROXY_UPSTREAM_TLS_MAX_VERSION" "TLSv1_3" }}
+{{ $upstreamCaPath := getenv "FRONTEND_PROXY_UPSTREAM_TLS_CA_BUNDLE_PATH" "" }}
+{{ end }}
     - name: opentelemetry_collector_grpc
       type: STRICT_DNS
       lb_policy: ROUND_ROBIN
@@ -261,6 +288,19 @@ static_resources:
           "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
           explicit_http_config:
             http2_protocol_options: {}
+{{ if $upstreamTlsEnabled }}
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+          common_tls_context:
+            tls_params:
+              tls_minimum_protocol_version: {{ $upstreamTlsMinVersion }}
+              tls_maximum_protocol_version: {{ $upstreamTlsMaxVersion }}
+            validation_context:
+              trusted_ca:
+                filename: {{ $upstreamCaPath }}
+{{ end }}
       load_assignment:
         cluster_name: opentelemetry_collector_grpc
         endpoints:
@@ -273,6 +313,19 @@ static_resources:
     - name: opentelemetry_collector_http
       type: STRICT_DNS
       lb_policy: ROUND_ROBIN
+{{ if $upstreamTlsEnabled }}
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+          common_tls_context:
+            tls_params:
+              tls_minimum_protocol_version: {{ $upstreamTlsMinVersion }}
+              tls_maximum_protocol_version: {{ $upstreamTlsMaxVersion }}
+            validation_context:
+              trusted_ca:
+                filename: {{ $upstreamCaPath }}
+{{ end }}
       load_assignment:
         cluster_name: opentelemetry_collector_http
         endpoints:
@@ -285,6 +338,19 @@ static_resources:
     - name: frontend
       type: STRICT_DNS
       lb_policy: ROUND_ROBIN
+{{ if $upstreamTlsEnabled }}
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+          common_tls_context:
+            tls_params:
+              tls_minimum_protocol_version: {{ $upstreamTlsMinVersion }}
+              tls_maximum_protocol_version: {{ $upstreamTlsMaxVersion }}
+            validation_context:
+              trusted_ca:
+                filename: {{ $upstreamCaPath }}
+{{ end }}
       load_assignment:
         cluster_name: frontend
         endpoints:
@@ -297,6 +363,19 @@ static_resources:
     - name: image-provider
       type: STRICT_DNS
       lb_policy: ROUND_ROBIN
+{{ if $upstreamTlsEnabled }}
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+          common_tls_context:
+            tls_params:
+              tls_minimum_protocol_version: {{ $upstreamTlsMinVersion }}
+              tls_maximum_protocol_version: {{ $upstreamTlsMaxVersion }}
+            validation_context:
+              trusted_ca:
+                filename: {{ $upstreamCaPath }}
+{{ end }}
       load_assignment:
         cluster_name: image-provider
         endpoints:
@@ -309,6 +388,19 @@ static_resources:
     - name: flagservice
       type: STRICT_DNS
       lb_policy: ROUND_ROBIN
+{{ if $upstreamTlsEnabled }}
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+          common_tls_context:
+            tls_params:
+              tls_minimum_protocol_version: {{ $upstreamTlsMinVersion }}
+              tls_maximum_protocol_version: {{ $upstreamTlsMaxVersion }}
+            validation_context:
+              trusted_ca:
+                filename: {{ $upstreamCaPath }}
+{{ end }}
       load_assignment:
         cluster_name: flagservice
         endpoints:
@@ -321,6 +413,19 @@ static_resources:
     - name: flagd-ui
       type: STRICT_DNS
       lb_policy: ROUND_ROBIN
+{{ if $upstreamTlsEnabled }}
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+          common_tls_context:
+            tls_params:
+              tls_minimum_protocol_version: {{ $upstreamTlsMinVersion }}
+              tls_maximum_protocol_version: {{ $upstreamTlsMaxVersion }}
+            validation_context:
+              trusted_ca:
+                filename: {{ $upstreamCaPath }}
+{{ end }}
       load_assignment:
         cluster_name: flagd-ui
         endpoints:
@@ -333,6 +438,19 @@ static_resources:
     - name: loadgen
       type: STRICT_DNS
       lb_policy: ROUND_ROBIN
+{{ if $upstreamTlsEnabled }}
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+          common_tls_context:
+            tls_params:
+              tls_minimum_protocol_version: {{ $upstreamTlsMinVersion }}
+              tls_maximum_protocol_version: {{ $upstreamTlsMaxVersion }}
+            validation_context:
+              trusted_ca:
+                filename: {{ $upstreamCaPath }}
+{{ end }}
       load_assignment:
         cluster_name: loadgen
         endpoints:
@@ -345,6 +463,19 @@ static_resources:
     - name: grafana
       type: STRICT_DNS
       lb_policy: ROUND_ROBIN
+{{ if $upstreamTlsEnabled }}
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+          common_tls_context:
+            tls_params:
+              tls_minimum_protocol_version: {{ $upstreamTlsMinVersion }}
+              tls_maximum_protocol_version: {{ $upstreamTlsMaxVersion }}
+            validation_context:
+              trusted_ca:
+                filename: {{ $upstreamCaPath }}
+{{ end }}
       load_assignment:
         cluster_name: grafana
         endpoints:
@@ -357,6 +488,19 @@ static_resources:
     - name: jaeger
       type: STRICT_DNS
       lb_policy: ROUND_ROBIN
+{{ if $upstreamTlsEnabled }}
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+          common_tls_context:
+            tls_params:
+              tls_minimum_protocol_version: {{ $upstreamTlsMinVersion }}
+              tls_maximum_protocol_version: {{ $upstreamTlsMaxVersion }}
+            validation_context:
+              trusted_ca:
+                filename: {{ $upstreamCaPath }}
+{{ end }}
       load_assignment:
         cluster_name: jaeger
         endpoints:
@@ -369,6 +513,19 @@ static_resources:
     - name: telemetry-docs
       type: STRICT_DNS
       lb_policy: ROUND_ROBIN
+{{ if $upstreamTlsEnabled }}
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+          common_tls_context:
+            tls_params:
+              tls_minimum_protocol_version: {{ $upstreamTlsMinVersion }}
+              tls_maximum_protocol_version: {{ $upstreamTlsMaxVersion }}
+            validation_context:
+              trusted_ca:
+                filename: {{ $upstreamCaPath }}
+{{ end }}
       load_assignment:
         cluster_name: telemetry-docs
         endpoints:
@@ -381,6 +538,19 @@ static_resources:
     - name: profiles
       type: STRICT_DNS
       lb_policy: ROUND_ROBIN
+{{ if $upstreamTlsEnabled }}
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+          common_tls_context:
+            tls_params:
+              tls_minimum_protocol_version: {{ $upstreamTlsMinVersion }}
+              tls_maximum_protocol_version: {{ $upstreamTlsMaxVersion }}
+            validation_context:
+              trusted_ca:
+                filename: {{ $upstreamCaPath }}
+{{ end }}
       load_assignment:
         cluster_name: profiles
         endpoints:
