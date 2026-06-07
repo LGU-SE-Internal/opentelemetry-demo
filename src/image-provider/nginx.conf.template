@@ -48,6 +48,26 @@ http {
             allow all;
         }
 
+        location /health {
+            access_log off;
+            allow all;
+            default_type text/plain;
+            return 200 'OK';
+        }
+
+        location /ready {
+            access_log off;
+            allow all;
+            default_type text/plain;
+            if (!-d /static) {
+                return 503 'NOT_READY';
+            }
+            if (!-r /static) {
+                return 503 'NOT_READY';
+            }
+            return 200 'READY';
+        }
+
         # Rate limit image assets only
         location ~* \.(png|jpg|jpeg|gif|webp|svg)$ {
             limit_req zone=image_rate_limit burst=5 nodelay;
