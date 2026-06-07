@@ -253,4 +253,19 @@ public class ValkeyCartStore : ICartStore
             return false;
         }
     }
+
+    public async Task FlushAsync(CancellationToken cancellationToken = default)
+    {
+        if (_logger.IsEnabled(LogLevel.Debug))
+        {
+            _logger.LogDebug("Flushing pending cart store operations");
+        }
+        // For Redis, operations are immediately persisted, so no explicit flush needed
+        // Just ensure connection is active and any pending commands are processed
+        if (_isRedisConnectionOpened && _redis != null)
+        {
+            await _redis.WaitAllAsync(_isShuttingDown: false, cancellationToken);
+        }
+        await Task.CompletedTask;
+    }
 }

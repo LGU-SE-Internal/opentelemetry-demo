@@ -1,6 +1,7 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 using System;
+using System.Diagnostics;
 
 using Grpc.Health.V1;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
@@ -18,6 +19,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Hosting;
 using OpenTelemetry.Instrumentation.StackExchangeRedis;
 using OpenTelemetry.Logs;
 using OpenTelemetry.Metrics;
@@ -26,6 +28,51 @@ using OpenTelemetry.Trace;
 using OpenFeature;
 using OpenFeature.Hooks;
 using OpenFeature.Providers.Flagd;
+
+public partial class Program
+{
+    internal const int ShutdownGracePeriodSeconds = 10;
+    private static bool _isShuttingDown = false;
+    private static int _inFlightRequests = 0;
+    private static int _completedRequests = 0;
+
+    internal static void RegisterShutdownHandlers(IHostApplicationLifetime lifetime, ICartStore cartStore, ILogger<Program> logger)
+    {
+        lifetime.ApplicationStopping.Register(() =>
+        {
+            _isShuttingDown = true;
+            logger.LogInformation("Received termination signal {SignalType}, starting graceful shutdown", "SIGINT/SIGTERM");
+
+            var stopwatch = Stopwatch.StartNew();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(ShutdownGracePeriodSeconds));
+
+            try
+            {
+                // Wait for in-flight requests to complete or timeout
+                while (_inFlightRequests > 0 && !cts.IsCancellationRequested)
+                {
+                    Task.Delay(100, cts.Token).Wait(cts.Token);
+                }
+
+                // Flush pending writes
+                cartStore.FlushAsync(cts.Token).Wait(cts.Token);
+
+                stopwatch.Stop();
+                logger.LogInformation("Shutdown completed successfully in {Duration}ms, processed {CompletedCount} in-flight requests", stopwatch.ElapsedMilliseconds, _completedRequests);
+            }
+            catch (OperationCanceledException)
+            {
+                stopwatch.Stop();
+                logger.LogWarning("Graceful shutdown timed out after {Timeout}s, terminating {Count} in-flight requests", ShutdownGracePeriodSeconds, _inFlightRequests);
+            }
+            catch (AggregateException ex) when (ex.InnerException is OperationCanceledException)
+            {
+                stopwatch.Stop();
+                logger.LogWarning("Graceful shutdown timed out after {Timeout}s, terminating {Count} in-flight requests", ShutdownGracePeriodSeconds, _inFlightRequests);
+            }
+        });
+    }
+}
 
 var builder = WebApplication.CreateBuilder(args);
 string valkeyAddress = builder.Configuration["VALKEY_ADDR"];
@@ -121,6 +168,34 @@ builder.Services.AddHealthChecks()
 builder.Services.AddSingleton<HealthServiceImpl>();
 
 var app = builder.Build();
+
+// Register shutdown handlers
+var lifetime = app.Services.GetRequiredService<IHostApplicationLifetime>();
+var cartStore = app.Services.GetRequiredService<ICartStore>();
+var logger = app.Services.GetRequiredService<ILogger<Program>>();
+RegisterShutdownHandlers(lifetime, cartStore, logger);
+
+// Add shutdown middleware
+app.Use(async (context, next) =>
+{
+    if (_isShuttingDown)
+    {
+        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+        context.Response.Headers.RetryAfter = ShutdownGracePeriodSeconds.ToString();
+        return;
+    }
+
+    Interlocked.Increment(ref _inFlightRequests);
+    try
+    {
+        await next(context);
+    }
+    finally
+    {
+        Interlocked.Decrement(ref _inFlightRequests);
+        Interlocked.Increment(ref _completedRequests);
+    }
+});
 
 var ValkeyCartStore = (ValkeyCartStore)app.Services.GetRequiredService<ICartStore>();
 app.Services.GetRequiredService<StackExchangeRedisInstrumentation>().AddConnection(ValkeyCartStore.GetConnection());
