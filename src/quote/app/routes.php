@@ -84,19 +84,28 @@ return function (App $app) {
         $rawPayload = $request->getBody()->__toString();
         $jsonObject = $request->getParsedBody();
         
+        // Get request ID
+        $requestId = $request->getAttribute('request_id') ?? $request->getHeaderLine('X-Request-ID') ?: uniqid('quote_', true);
+        
+        // Get client IP
+        $xForwardedFor = $request->getHeaderLine('X-Forwarded-For');
+        if (!empty($xForwardedFor)) {
+            $ips = explode(',', $xForwardedFor);
+            $clientIp = trim($ips[0]);
+        } else {
+            $serverParams = $request->getServerParams();
+            $clientIp = $serverParams['REMOTE_ADDR'] ?? 'unknown';
+        }
+        
         // Validate JSON payload
         if ($jsonObject === null) {
             $errorMsg = 'Invalid JSON payload';
-            // Log invalid request
-            $logger->warning($errorMsg, [
-                'timestamp' => date('Y-m-d H:i:sP'),
-                'client_ip' => $request->getServerParams()['REMOTE_ADDR'] ?? 'unknown',
-                'error_type' => 'invalid_json',
-                'raw_payload' => substr($rawPayload, 0, 100) . (strlen($rawPayload) > 100 ? '...' : ''),
-                'request_id' => $request->getAttribute('request_id') ?? $request->getHeaderLine('X-Request-ID') ?: 'unknown',
-            ]);
             
-            $payload = json_encode(['error' => $errorMsg]);
+            $payload = json_encode([
+                'error' => 'Invalid request parameter',
+                'message' => $errorMsg,
+                'requestId' => $requestId
+            ]);
             $response->getBody()->write($payload);
             return $response
                 ->withHeader('Content-Type', 'application/json')
@@ -106,16 +115,12 @@ return function (App $app) {
         // Validate presence of numberOfItems
         if (!array_key_exists('numberOfItems', $jsonObject)) {
             $errorMsg = 'Missing required field: numberOfItems';
-            // Log invalid request
-            $logger->warning($errorMsg, [
-                'timestamp' => date('Y-m-d H:i:sP'),
-                'client_ip' => $request->getServerParams()['REMOTE_ADDR'] ?? 'unknown',
-                'error_type' => 'missing_field',
-                'raw_payload' => substr($rawPayload, 0, 100) . (strlen($rawPayload) > 100 ? '...' : ''),
-                'request_id' => $request->getAttribute('request_id') ?? $request->getHeaderLine('X-Request-ID') ?: 'unknown',
-            ]);
             
-            $payload = json_encode(['error' => $errorMsg]);
+            $payload = json_encode([
+                'error' => 'Invalid request parameter',
+                'message' => $errorMsg,
+                'requestId' => $requestId
+            ]);
             $response->getBody()->write($payload);
             return $response
                 ->withHeader('Content-Type', 'application/json')
@@ -123,41 +128,80 @@ return function (App $app) {
         }
         
         $numberOfItems = $jsonObject['numberOfItems'];
+        $logFile = '/var/log/quote-service/validation_errors.log';
+        
         // Validate numberOfItems is integer
         if (!is_int($numberOfItems)) {
             $errorMsg = 'numberOfItems must be an integer';
-            // Log invalid request
-            $logger->warning($errorMsg, [
-                'timestamp' => date('Y-m-d H:i:sP'),
-                'client_ip' => $request->getServerParams()['REMOTE_ADDR'] ?? 'unknown',
-                'error_type' => 'invalid_type',
-                'raw_payload' => substr($rawPayload, 0, 100) . (strlen($rawPayload) > 100 ? '...' : ''),
-                'request_id' => $request->getAttribute('request_id') ?? $request->getHeaderLine('X-Request-ID') ?: 'unknown',
-                'provided_type' => gettype($numberOfItems),
-                'provided_value' => $numberOfItems,
-            ]);
+            $errorType = 'non-integer';
             
-            $payload = json_encode(['error' => $errorMsg]);
+            // Write structured log entry
+            $logEntry = json_encode([
+                'client_ip' => $clientIp,
+                'invalid_value' => $numberOfItems,
+                'request_id' => $requestId,
+                'error_type' => $errorType,
+                'timestamp' => gmdate('Y-m-d\TH:i:s\Z')
+            ]) . PHP_EOL;
+            file_put_contents($logFile, $logEntry, FILE_APPEND | LOCK_EX);
+            
+            $payload = json_encode([
+                'error' => 'Invalid request parameter',
+                'message' => $errorMsg,
+                'requestId' => $requestId
+            ]);
             $response->getBody()->write($payload);
             return $response
                 ->withHeader('Content-Type', 'application/json')
                 ->withStatus(400);
         }
         
-        // Validate numberOfItems is positive
-        if ($numberOfItems <= 0) {
-            $errorMsg = 'numberOfItems must be greater than 0';
-            // Log invalid request
-            $logger->warning($errorMsg, [
-                'timestamp' => date('Y-m-d H:i:sP'),
-                'client_ip' => $request->getServerParams()['REMOTE_ADDR'] ?? 'unknown',
-                'error_type' => 'invalid_value',
-                'raw_payload' => substr($rawPayload, 0, 100) . (strlen($rawPayload) > 100 ? '...' : ''),
-                'request_id' => $request->getAttribute('request_id') ?? $request->getHeaderLine('X-Request-ID') ?: 'unknown',
-                'provided_value' => $numberOfItems,
-            ]);
+        // Validate numberOfItems is at least 1
+        if ($numberOfItems < 1) {
+            $errorMsg = $numberOfItems === 0 ? 'numberOfItems must be at least 1' : 'numberOfItems must be a positive integer';
+            $errorType = 'negative/zero';
             
-            $payload = json_encode(['error' => $errorMsg]);
+            // Write structured log entry
+            $logEntry = json_encode([
+                'client_ip' => $clientIp,
+                'invalid_value' => $numberOfItems,
+                'request_id' => $requestId,
+                'error_type' => $errorType,
+                'timestamp' => gmdate('Y-m-d\TH:i:s\Z')
+            ]) . PHP_EOL;
+            file_put_contents($logFile, $logEntry, FILE_APPEND | LOCK_EX);
+            
+            $payload = json_encode([
+                'error' => 'Invalid request parameter',
+                'message' => $errorMsg,
+                'requestId' => $requestId
+            ]);
+            $response->getBody()->write($payload);
+            return $response
+                ->withHeader('Content-Type', 'application/json')
+                ->withStatus(400);
+        }
+        
+        // Validate numberOfItems does not exceed 1000
+        if ($numberOfItems > 1000) {
+            $errorMsg = 'numberOfItems cannot exceed 1000';
+            $errorType = 'over_maximum';
+            
+            // Write structured log entry
+            $logEntry = json_encode([
+                'client_ip' => $clientIp,
+                'invalid_value' => $numberOfItems,
+                'request_id' => $requestId,
+                'error_type' => $errorType,
+                'timestamp' => gmdate('Y-m-d\TH:i:s\Z')
+            ]) . PHP_EOL;
+            file_put_contents($logFile, $logEntry, FILE_APPEND | LOCK_EX);
+            
+            $payload = json_encode([
+                'error' => 'Invalid request parameter',
+                'message' => $errorMsg,
+                'requestId' => $requestId
+            ]);
             $response->getBody()->write($payload);
             return $response
                 ->withHeader('Content-Type', 'application/json')
@@ -166,7 +210,7 @@ return function (App $app) {
 
         $data = calculateQuote($jsonObject);
 
-        $payload = json_encode($data);
+        $payload = json_encode(['quote' => $data]);
         $response->getBody()->write($payload);
 
         $span->addEvent('Quote processed, response sent back', [
