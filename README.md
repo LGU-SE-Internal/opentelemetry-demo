@@ -47,6 +47,25 @@ your preferred deployment method:
 - [Docker](https://opentelemetry.io/docs/demo/docker_deployment/)
 - [Kubernetes](https://opentelemetry.io/docs/demo/kubernetes_deployment/)
 
+### Production Deployment Notes
+
+#### PostgreSQL Credentials
+The default Kubernetes deployment includes a development-only PostgreSQL Secret with default credentials. For production deployments, you **must replace this secret** with your own custom credentials before deploying:
+
+```bash
+kubectl create secret generic otel-demo-postgresql \
+  --from-literal=postgres-user=YOUR_CUSTOM_USERNAME \
+  --from-literal=postgres-password=YOUR_STRONG_PASSWORD \
+  --from-literal=postgres-db=YOUR_CUSTOM_DATABASE_NAME
+```
+
+The secret contains three required keys:
+- `postgres-user`: PostgreSQL username
+- `postgres-password`: PostgreSQL password
+- `postgres-db`: PostgreSQL database name
+
+All services that connect to PostgreSQL will automatically use the credentials from this secret, no changes to deployment manifests are required when updating credentials.
+
 ## Documentation
 
 For detailed documentation, see [Demo Documentation][docs]. If you're curious
