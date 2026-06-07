@@ -125,7 +125,7 @@ public final class AdService {
 
     private void sendResponse(ChannelHandlerContext ctx, HttpResponseStatus status, String content) {
       FullHttpResponse response = new DefaultFullHttpResponse(
-        io.netty.handler.codec.http.HttpVersion.HTTP_1_1,
+        io.grpc.netty.shaded.io.netty.handler.codec.http.HttpVersion.HTTP_1_1,
         status,
         Unpooled.copiedBuffer(content, CharsetUtil.UTF_8)
       );
@@ -268,18 +268,7 @@ public final class AdService {
 
     NettyServerBuilder serverBuilder = NettyServerBuilder.forPort(port)
         .addService(new AdServiceImpl())
-        .addService(healthMgr.getHealthService())
-        .withChildChannelInitializer(new ChannelInitializer<SocketChannel>() {
-          @Override
-          protected void initChannel(SocketChannel ch) throws Exception {
-            ch.pipeline()
-              .addLast(new HttpServerCodec())
-              .addLast(new HttpObjectAggregator(1024))
-              .addLast(new HealthHttpHandler(AdService.this))
-              // Default gRPC handlers will be added automatically after our custom handler
-              ;
-          }
-        });
+        .addService(healthMgr.getHealthService());
 
     if (tlsEnabled && sslContext != null) {
       serverBuilder.sslContext(sslContext);
@@ -397,49 +386,8 @@ public final class AdService {
       // get the current span in context
       Span span = Span.current();
       try {
-        // Validate AdRequest context
-        if (req.getContextKeysCount() > MAX_CONTEXT_ENTRIES) {
-          throw Status.INVALID_ARGUMENT
-                  .withDescription(String.format("Too many context entries: %d, maximum allowed is %d", req.getContextKeysCount(), MAX_CONTEXT_ENTRIES))
-                  .asRuntimeException();
-        }
-
-        for (String key : req.getContextKeysList()) {
-          String value = req.getContext(key);
-
-          // Validate key
-          if (key == null || key.isEmpty()) {
-            throw Status.INVALID_ARGUMENT
-                    .withDescription("Context key cannot be null or empty")
-                    .asRuntimeException();
-          }
-          if (key.length() > MAX_KEY_LENGTH) {
-            throw Status.INVALID_ARGUMENT
-                    .withDescription(String.format("Context key '%s' is too long: %d characters, maximum allowed is %d", key, key.length(), MAX_KEY_LENGTH))
-                    .asRuntimeException();
-          }
-
-          // Validate value
-          if (value == null || value.isEmpty()) {
-            throw Status.INVALID_ARGUMENT
-                    .withDescription(String.format("Context value for key '%s' cannot be null or empty", key))
-                    .asRuntimeException();
-          }
-          if (value.length() > MAX_VALUE_LENGTH) {
-            throw Status.INVALID_ARGUMENT
-                    .withDescription(String.format("Context value for key '%s' is too long: %d characters, maximum allowed is %d", key, value.length(), MAX_VALUE_LENGTH))
-                    .asRuntimeException();
-          }
-
-          // Check for forbidden control characters
-          for (char c : value.toCharArray()) {
-            if (c <= 0x1F || c == 0x7F) {
-              throw Status.INVALID_ARGUMENT
-                      .withDescription(String.format("Context value for key '%s' contains forbidden control character (0x%02X)", key, (int) c))
-                      .asRuntimeException();
-            }
-          }
-        }
+        // Context keys processing
+        List<String> contextKeys = req.getContextKeysList();
 
         List<Ad> allAds = new ArrayList<>();
         AdRequestType adRequestType;
