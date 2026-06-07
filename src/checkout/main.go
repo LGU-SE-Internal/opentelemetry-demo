@@ -30,6 +30,7 @@ import (
 	otelhooks "github.com/open-feature/go-sdk-contrib/hooks/open-telemetry/pkg"
 	flagd "github.com/open-feature/go-sdk-contrib/providers/flagd/pkg"
 	"github.com/open-feature/go-sdk/openfeature"
+	"github.com/sony/gobreaker"
 
 	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
@@ -437,32 +438,32 @@ func main() {
 	}
 
 	mustMapEnv(&svc.shippingSvcAddr, "SHIPPING_ADDR")
-	c := mustCreateClient(svc.shippingSvcAddr)
+	c := mustCreateClient(svc.shippingSvcAddr, "shipping")
 	svc.shippingSvcClient = pb.NewShippingServiceClient(c)
 	defer c.Close()
 
 	mustMapEnv(&svc.productCatalogSvcAddr, "PRODUCT_CATALOG_ADDR")
-	c = mustCreateClient(svc.productCatalogSvcAddr)
+	c = mustCreateClient(svc.productCatalogSvcAddr, "product-catalog")
 	svc.productCatalogSvcClient = pb.NewProductCatalogServiceClient(c)
 	defer c.Close()
 
 	mustMapEnv(&svc.cartSvcAddr, "CART_ADDR")
-	c = mustCreateClient(svc.cartSvcAddr)
+	c = mustCreateClient(svc.cartSvcAddr, "cart")
 	svc.cartSvcClient = pb.NewCartServiceClient(c)
 	defer c.Close()
 
 	mustMapEnv(&svc.currencySvcAddr, "CURRENCY_ADDR")
-	c = mustCreateClient(svc.currencySvcAddr)
+	c = mustCreateClient(svc.currencySvcAddr, "currency")
 	svc.currencySvcClient = pb.NewCurrencyServiceClient(c)
 	defer c.Close()
 
 	mustMapEnv(&svc.emailSvcAddr, "EMAIL_ADDR")
-	c = mustCreateClient(svc.emailSvcAddr)
+	c = mustCreateClient(svc.emailSvcAddr, "email")
 	svc.emailSvcClient = pb.NewEmailServiceClient(c)
 	defer c.Close()
 
 	mustMapEnv(&svc.paymentSvcAddr, "PAYMENT_ADDR")
-	c = mustCreateClient(svc.paymentSvcAddr)
+	c = mustCreateClient(svc.paymentSvcAddr, "payment")
 	svc.paymentSvcClient = pb.NewPaymentServiceClient(c)
 	defer c.Close()
 
@@ -702,13 +703,137 @@ func (cs *checkout) prepareOrderItemsAndShippingQuoteFromCart(ctx context.Contex
 	return out, nil
 }
 
-func mustCreateClient(svcAddr string) *grpc.ClientConn {
-	c, err := grpc.NewClient(svcAddr,
+var (
+	// Circuit breakers per upstream service
+	circuitBreakers = make(map[string]*gobreaker.CircuitBreaker)
+	cbMutex         sync.RWMutex
+
+	// Resilience configuration constants
+	retryableStatusCodes = []codes.Code{codes.Unavailable, codes.ResourceExhausted, codes.Aborted}
+	initialBackoff       = 100 * time.Millisecond
+	maxBackoff           = 1 * time.Second
+	backoffMultiplier    = 2.0
+	maxRetryAttempts     = 3
+	totalRetryTimeout    = 2 * time.Second
+	cbFailureThreshold   = uint32(5)
+	cbCoolingPeriod      = 10 * time.Second
+	cbSuccessThreshold   = uint32(3)
+)
+
+// getCircuitBreaker returns a circuit breaker for the given service name, creating it if necessary
+func getCircuitBreaker(svcName string) *gobreaker.CircuitBreaker {
+	cbMutex.RLock()
+	cb, exists := circuitBreakers[svcName]
+	cbMutex.RUnlock()
+	if exists {
+		return cb
+	}
+
+	cbMutex.Lock()
+	defer cbMutex.Unlock()
+	// Double check after acquiring write lock
+	if cb, exists := circuitBreakers[svcName]; exists {
+		return cb
+	}
+
+	settings := gobreaker.Settings{
+		Name:        svcName,
+		MaxRequests: cbSuccessThreshold,
+		Interval:    0,
+		Timeout:     cbCoolingPeriod,
+		ReadyToTrip: func(counts gobreaker.Counts) bool {
+			return counts.ConsecutiveFailures >= cbFailureThreshold
+		},
+		OnStateChange: func(name string, from gobreaker.State, to gobreaker.State) {
+			logger.Info("circuit breaker state changed",
+				slog.String("service", name),
+				slog.String("from_state", from.String()),
+				slog.String("to_state", to.String()))
+			// Add trace event if context is available
+			if span := trace.SpanFromContext(context.Background()); span.IsRecording() {
+				span.AddEvent("circuit_breaker_state_change",
+					trace.WithAttributes(
+						attribute.String("service.name", name),
+						attribute.String("old_state", from.String()),
+						attribute.String("new_state", to.String()),
+					))
+			}
+		},
+	}
+
+	cb = gobreaker.NewCircuitBreaker(settings)
+	circuitBreakers[svcName] = cb
+	return cb
+}
+
+// circuitBreakerUnaryInterceptor returns a gRPC unary client interceptor that wraps calls with circuit breaker
+func circuitBreakerUnaryInterceptor(svcName string) grpc.UnaryClientInterceptor {
+	cb := getCircuitBreaker(svcName)
+	return func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+		span := trace.SpanFromContext(ctx)
+		span.AddEvent("circuit_breaker_call_attempt",
+			trace.WithAttributes(
+				attribute.String("service.name", svcName),
+				attribute.String("method", method),
+			))
+
+		_, err := cb.Execute(func() (interface{}, error) {
+			err := invoker(ctx, method, req, reply, cc, opts...)
+			if err != nil {
+				st, ok := status.FromError(err)
+				if ok {
+					span.SetAttributes(attribute.Int("grpc.status_code", int(st.Code())))
+					// Only count retryable status codes as failures for circuit breaker
+					for _, rc := range retryableStatusCodes {
+						if st.Code() == rc {
+							return nil, err
+						}
+					}
+					// Non-retryable errors are not counted as failures
+					return nil, nil
+				}
+				return nil, err
+			}
+			return nil, nil
+		})
+
+		if err == gobreaker.ErrOpenState {
+			span.AddEvent("circuit_breaker_open", trace.WithAttributes(attribute.String("service.name", svcName)))
+			span.SetStatus(otelcodes.Error, "circuit breaker is open")
+			return status.Error(codes.Unavailable, fmt.Sprintf("circuit breaker open for service %s", svcName))
+		}
+
+		return err
+	}
+}
+
+// mustCreateClient creates a gRPC client for the given target address with retry and circuit breaker interceptors
+func mustCreateClient(addr string, svcName string) *grpc.ClientConn {
+	// Configure gRPC retry policy
+	retryPolicy := fmt.Sprintf(`{
+		"methodConfig": [{
+			"name": [{"service": ""}],
+			"retryPolicy": {
+				"maxAttempts": %d,
+				"initialBackoff": "%s",
+				"maxBackoff": "%s",
+				"backoffMultiplier": %f,
+				"retryableStatusCodes": ["UNAVAILABLE", "RESOURCE_EXHAUSTED", "ABORTED"]
+			},
+			"waitForReady": true,
+			"timeout": "%s"
+		}]
+	}`, maxRetryAttempts, initialBackoff, maxBackoff, backoffMultiplier, totalRetryTimeout)
+
+	c, err := grpc.NewClient(addr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
+		grpc.WithDefaultServiceConfig(retryPolicy),
+		grpc.WithUnaryInterceptor(circuitBreakerUnaryInterceptor(svcName)),
 	)
 	if err != nil {
-		logger.Error(fmt.Sprintf("could not connect to %s service, err: %+v", svcAddr, err))
+		logger.Error(fmt.Sprintf("could not connect to %s service, err: %+v", svcName, err))
+		panic(err)
 	}
 
 	return c
@@ -806,7 +931,7 @@ func (cs *checkout) chargeCard(ctx context.Context, amount *pb.Money, paymentInf
 	paymentService := cs.paymentSvcClient
 	if flags.PaymentUnreachable.Value(ctx, openfeature.EvaluationContext{}) {
 		badAddress := "badAddress:50051"
-		c := mustCreateClient(badAddress)
+		c := mustCreateClient(badAddress, "payment")
 		paymentService = pb.NewPaymentServiceClient(c)
 	}
 
