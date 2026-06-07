@@ -5,6 +5,10 @@
 name = "shipping"
 edition = "2021"
 
+[lib]
+name = "shipping"
+path = "src/lib.rs"
+
 [[bin]]
 name = "shipping"
 path = "src/main.rs"
@@ -30,6 +34,7 @@ opentelemetry-otlp = { version = "0.32.0", features = ["grpc-tonic"] }
 opentelemetry-instrumentation-actix-web = { version = "0.24.0", features = ["sync-middleware", "awc", "metrics"] }
 opentelemetry-appender-tracing = "0.32.0"
 opentelemetry-resource-detectors = "0.11.0"
+rand = "0.8.5"
 
 [dependencies.uuid]
 version = "1.23.1"
@@ -44,3 +49,4 @@ reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
 tokio = { version = "1.0", features = ["full"] }
 serde_json = "1.0"
 libc = "0.2"
+tracing-test = "0.2.6"

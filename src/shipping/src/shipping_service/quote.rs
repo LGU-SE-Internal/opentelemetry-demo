@@ -11,6 +11,7 @@ use opentelemetry::{trace::get_active_span, KeyValue};
 use tracing::{info, error};
 
 use super::shipping_types::{Quote, QuoteRequest, QuoteResponse, QuoteError};
+use super::retry::{with_retry, RetryConfig, RetryableError};
 
 /// Handles incoming quote requests
 pub async fn handle_quote_request(request: QuoteRequest) -> Result<QuoteResponse, QuoteError> {
@@ -123,6 +124,20 @@ pub async fn create_quote_from_count(count: u32) -> Result<Quote, tonic::Status>
     }))
 }
 
+impl RetryableError for awc::error::SendRequestError {
+    fn is_retryable(&self) -> bool {
+        // Connection errors or timeouts are retryable
+        if self.is_timeout() || self.is_connect() {
+            return true;
+        }
+        // 5xx status codes are retryable
+        if let Some(status) = self.as_status_code() {
+            return status.is_server_error();
+        }
+        false
+    }
+}
+
 async fn request_quote(count: u32) -> Result<f64, anyhow::Error> {
     let client = awc::Client::new();
     let quote_service_addr: String = format!(
@@ -143,12 +158,20 @@ async fn request_quote(count: u32) -> Result<f64, anyhow::Error> {
     let mut reqbody = HashMap::new();
     reqbody.insert("numberOfItems", count);
 
-    let mut response = client
-        .post(quote_service_addr)
-        .trace_request()
-        .send_json(&reqbody)
-        .await
-        .map_err(|err| anyhow::anyhow!("Failed to call quote service: {err}"))?;
+    let retry_config = RetryConfig::default();
+    let mut response = with_retry(retry_config, || {
+        let client = client.clone();
+        let addr = quote_service_addr.clone();
+        let body = reqbody.clone();
+        Box::pin(async move {
+            client
+                .post(addr)
+                .trace_request()
+                .send_json(&body)
+                .await
+                .map_err(|err| anyhow::anyhow!("Failed to call quote service: {err}"))
+        })
+    }).await?;
 
     let bytes = response
         .body()
