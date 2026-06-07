@@ -3,6 +3,7 @@ import pytest
 import subprocess
 import time
 import psycopg2
+import base64
 from kubernetes import client, config
 from kubernetes.stream import stream
 
@@ -278,3 +279,239 @@ def test_ac6_dependent_services_functionality():
             assert "succeeded" in resp.lower() or "open" in resp.lower(), f"Service {svc} cannot connect to PostgreSQL"
         except Exception as e:
             pytest.fail(f"Service {svc} failed PostgreSQL connectivity check: {str(e)}")
+
+
+@pytest.mark.secret_ac1
+def test_ac1_postgres_deployment_no_hardcoded_creds():
+    """Test AC-1: postgresql-deployment.yaml has no hardcoded POSTGRES_PASSWORD, POSTGRES_USER, POSTGRES_DB values, all reference otel-demo-postgresql Secret"""
+    # Read postgres deployment
+    deploy = apps_v1.read_namespaced_deployment(name="postgresql", namespace="default")
+    container = deploy.spec.template.spec.containers[0]
+    
+    # Check env vars exist and are from secret
+    env_vars = {env.name: env for env in container.env}
+    
+    required_vars = ["POSTGRES_PASSWORD", "POSTGRES_USER", "POSTGRES_DB"]
+    for var_name in required_vars:
+        assert var_name in env_vars, f"{var_name} not found in postgres deployment environment variables"
+        env = env_vars[var_name]
+        assert env.value_from is not None, f"{var_name} has hardcoded value, should reference secret"
+        assert env.value_from.secret_key_ref is not None, f"{var_name} not referencing a secret"
+        assert env.value_from.secret_key_ref.name == "otel-demo-postgresql", f"{var_name} referencing wrong secret name, expected otel-demo-postgresql"
+        assert env.value_from.secret_key_ref.key == var_name.lower(), f"{var_name} referencing wrong secret key, expected {var_name.lower()}"
+
+
+@pytest.mark.secret_ac2
+def test_ac2_dependent_services_creds_from_secret():
+    """Test AC-2: All dependent service deployment manifests reference otel-demo-postgresql Secret for DB credentials, no hardcoded values"""
+    dependent_services = [
+        "checkoutservice",
+        "paymentservice",
+        "orderservice",
+        "productservice"
+    ]
+    
+    required_env_mapping = {
+        "DB_PASSWORD": "postgres-password",
+        "DB_USER": "postgres-user",
+        "DB_NAME": "postgres-db"
+    }
+    
+    for svc_name in dependent_services:
+        try:
+            deploy = apps_v1.read_namespaced_deployment(name=svc_name, namespace="default")
+            container = deploy.spec.template.spec.containers[0]
+            env_vars = {env.name: env for env in container.env}
+            
+            for env_name, secret_key in required_env_mapping.items():
+                assert env_name in env_vars, f"{env_name} not found in {svc_name} deployment"
+                env = env_vars[env_name]
+                assert env.value_from is not None, f"{env_name} in {svc_name} has hardcoded value, should reference secret"
+                assert env.value_from.secret_key_ref is not None, f"{env_name} in {svc_name} not referencing a secret"
+                assert env.value_from.secret_key_ref.name == "otel-demo-postgresql", f"{env_name} in {svc_name} referencing wrong secret name, expected otel-demo-postgresql"
+                assert env.value_from.secret_key_ref.key == secret_key, f"{env_name} in {svc_name} referencing wrong secret key, expected {secret_key}"
+        except client.exceptions.ApiException as e:
+            if e.status == 404:
+                continue  # Skip if service not deployed
+            raise
+
+
+@pytest.mark.secret_ac3
+def test_ac3_default_postgres_secret_exists():
+    """Test AC-3: Default otel-demo-postgresql Secret exists in k8s directory with original default credential values"""
+    # Check if secret exists in cluster first
+    try:
+        secret = v1.read_namespaced_secret(name="otel-demo-postgresql", namespace="default")
+        assert secret is not None, "otel-demo-postgresql Secret not found in cluster"
+        
+        # Check default values match original hardcoded values
+        import base64
+        assert base64.b64decode(secret.data["postgres-password"]).decode() == "postgres", "Default POSTGRES_PASSWORD value does not match original hardcoded value"
+        assert base64.b64decode(secret.data["postgres-user"]).decode() == "postgres", "Default POSTGRES_USER value does not match original hardcoded value"
+        assert base64.b64decode(secret.data["postgres-db"]).decode() == "postgres", "Default POSTGRES_DB value does not match original hardcoded value"
+    except client.exceptions.ApiException as e:
+        if e.status == 404:
+            pytest.fail("otel-demo-postgresql Secret not found in cluster")
+        raise
+
+
+@pytest.mark.secret_ac4
+def test_ac4_production_docs_include_secret_creation():
+    """Test AC-4: Production deployment documentation includes steps for creating custom otel-demo-postgresql Secret"""
+    # Check docs directory for production deployment docs
+    docs_path = "/workspace/docs/production-deployment.md"
+    try:
+        with open(docs_path, "r") as f:
+            content = f.read()
+        
+        assert "otel-demo-postgresql" in content, "Production documentation does not mention otel-demo-postgresql Secret"
+        assert "kubectl create secret generic otel-demo-postgresql" in content, "Production documentation does not include command to create custom secret"
+        assert "postgres-password" in content, "Production documentation does not mention postgres-password secret key"
+        assert "postgres-user" in content, "Production documentation does not mention postgres-user secret key"
+        assert "postgres-db" in content, "Production documentation does not mention postgres-db secret key"
+    except FileNotFoundError:
+        pytest.fail("Production deployment documentation file not found")
+
+
+@pytest.mark.secret_ac5
+def test_ac5_default_deployment_succeeds():
+    """Test AC-5: Default deployment with provided secret works, postgresql starts and dependent services connect"""
+    # Check postgres pod is running
+    pod = get_postgres_pod()
+    assert pod is not None, "Postgres pod not running with default secret"
+    
+    # Verify connection with default credentials
+    pf_proc = port_forward_postgres()
+    try:
+        conn = psycopg2.connect(
+            dbname="postgres",
+            user="postgres",
+            password="postgres",
+            host="localhost",
+            port=5432
+        )
+        assert conn.closed == 0, "Cannot connect to postgres with default credentials"
+        conn.close()
+    finally:
+        pf_proc.terminate()
+        pf_proc.wait()
+    
+    # Verify dependent services can connect
+    dependent_services = ["checkoutservice", "paymentservice", "orderservice", "productservice"]
+    for svc in dependent_services:
+        try:
+            pods = v1.list_namespaced_pod(namespace="default", label_selector=f"app.kubernetes.io/name={svc}")
+            if not pods.items:
+                continue
+            test_pod = next(p for p in pods.items if p.status.phase == "Running")
+            exec_cmd = [
+                "/bin/sh",
+                "-c",
+                "nc -zv postgresql.default.svc.cluster.local 5432 -w 5"
+            ]
+            resp = stream(v1.connect_get_namespaced_pod_exec,
+                          test_pod.metadata.name,
+                          "default",
+                          command=exec_cmd,
+                          stderr=True, stdin=False,
+                          stdout=True, tty=False)
+            assert "succeeded" in resp.lower() or "open" in resp.lower(), f"Service {svc} cannot connect to PostgreSQL with default secret"
+        except Exception as e:
+            pytest.fail(f"Service {svc} failed connectivity check with default secret: {str(e)}")
+
+
+@pytest.mark.secret_ac6
+def test_ac6_custom_secret_works():
+    """Test AC-6: Custom secret with non-default values works without changing deployment manifests"""
+    # First create custom secret
+    custom_password = "custompass123"
+    custom_user = "customuser"
+    custom_db = "customdb"
+    
+    # Delete existing secret if present
+    try:
+        v1.delete_namespaced_secret(name="otel-demo-postgresql", namespace="default", body=client.V1DeleteOptions())
+        time.sleep(10)
+    except client.exceptions.ApiException as e:
+        if e.status != 404:
+            raise
+    
+    # Create new custom secret
+    secret_body = client.V1Secret(
+        metadata=client.V1ObjectMeta(name="otel-demo-postgresql"),
+        type="Opaque",
+        data={
+            "postgres-password": base64.b64encode(custom_password.encode()).decode(),
+            "postgres-user": base64.b64encode(custom_user.encode()).decode(),
+            "postgres-db": base64.b64encode(custom_db.encode()).decode()
+        }
+    )
+    v1.create_namespaced_secret(namespace="default", body=secret_body)
+    
+    # Restart postgres deployment to pick up new secret
+    apps_v1.patch_namespaced_deployment(
+        name="postgresql",
+        namespace="default",
+        body={"spec": {"template": {"metadata": {"annotations": {"kubectl.kubernetes.io/restartedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ")}}}}}
+    )
+    
+    # Wait for postgres pod to restart
+    time.sleep(60)
+    new_pod = None
+    for _ in range(10):
+        new_pod = get_postgres_pod()
+        if new_pod and new_pod.status.phase == "Running":
+            break
+        time.sleep(10)
+    assert new_pod is not None, "Postgres pod not running after custom secret applied"
+    
+    # Test connection with custom credentials
+    pf_proc = port_forward_postgres()
+    try:
+        conn = psycopg2.connect(
+            dbname=custom_db,
+            user=custom_user,
+            password=custom_password,
+            host="localhost",
+            port=5432
+        )
+        assert conn.closed == 0, "Cannot connect to postgres with custom credentials"
+        conn.close()
+    finally:
+        pf_proc.terminate()
+        pf_proc.wait()
+    
+    # Verify dependent services can connect with custom secret
+    dependent_services = ["checkoutservice", "paymentservice", "orderservice", "productservice"]
+    for svc in dependent_services:
+        try:
+            # Restart service to pick up new secret
+            apps_v1.patch_namespaced_deployment(
+                name=svc,
+                namespace="default",
+                body={"spec": {"template": {"metadata": {"annotations": {"kubectl.kubernetes.io/restartedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ")}}}}}
+            )
+            time.sleep(30)
+            
+            pods = v1.list_namespaced_pod(namespace="default", label_selector=f"app.kubernetes.io/name={svc}")
+            if not pods.items:
+                continue
+            test_pod = next(p for p in pods.items if p.status.phase == "Running")
+            exec_cmd = [
+                "/bin/sh",
+                "-c",
+                "nc -zv postgresql.default.svc.cluster.local 5432 -w 5"
+            ]
+            resp = stream(v1.connect_get_namespaced_pod_exec,
+                          test_pod.metadata.name,
+                          "default",
+                          command=exec_cmd,
+                          stderr=True, stdin=False,
+                          stdout=True, tty=False)
+            assert "succeeded" in resp.lower() or "open" in resp.lower(), f"Service {svc} cannot connect to PostgreSQL with custom secret"
+        except client.exceptions.ApiException as e:
+            if e.status == 404:
+                continue
+            raise
+        except Exception as e:
+            pytest.fail(f"Service {svc} failed connectivity check with custom secret: {str(e)}")
