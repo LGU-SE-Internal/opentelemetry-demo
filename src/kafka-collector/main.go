@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -106,8 +108,38 @@ func main() {
 	if kafkaAddr == "" {
 		kafkaAddr = "kafka:9092"
 	}
-	topics := []string{"checkout-events"} // Default topic, can be configured via env
-	httpPort := "8080"
+
+	// Get and validate HTTP port from environment variable
+	httpPortStr := os.Getenv("KAFKA_COLLECTOR_HTTP_PORT")
+	if httpPortStr == "" {
+		httpPortStr = "8080"
+	}
+	httpPortInt, err := strconv.Atoi(httpPortStr)
+	if err != nil {
+		log.Fatalf("Invalid port value '%s': must be numeric", httpPortStr)
+	}
+	if httpPortInt < 1 || httpPortInt > 65535 {
+		log.Fatalf("Invalid port value '%d': must be between 1 and 65535", httpPortInt)
+	}
+	httpPort := strconv.Itoa(httpPortInt)
+
+	// Get and process Kafka topics from environment variable
+	topicsStr := os.Getenv("KAFKA_COLLECTOR_KAFKA_TOPICS")
+	if topicsStr == "" {
+		topicsStr = "checkout-events"
+	}
+	topicsParts := strings.Split(topicsStr, ",")
+	var topics []string
+	for _, part := range topicsParts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+			topics = append(topics, trimmed)
+		}
+	}
+	if len(topics) == 0 {
+		log.Fatal("Kafka topics list cannot be empty")
+	}
+	log.Printf("Consuming from Kafka topics: %s", strings.Join(topics, ", "))
 
 	// Initialize health checker
 	healthChecker := DefaultHealthChecker{}
