@@ -33,7 +33,8 @@ import demo_pb2
 import demo_pb2_grpc
 from grpc_health.v1 import health_pb2
 from grpc_health.v1 import health_pb2_grpc
-from database import fetch_product_reviews, fetch_product_reviews_from_db, fetch_avg_product_review_score_from_db
+from grpc_health.v1.health import HealthServicer
+from database import fetch_product_reviews, fetch_product_reviews_from_db, fetch_avg_product_review_score_from_db, db_connection_str
 
 from openfeature import api
 from openfeature.contrib.provider.flagd import FlagdProvider
@@ -49,7 +50,17 @@ from google.protobuf.json_format import MessageToJson, MessageToDict
 
 # Global shutdown flag
 shutdown_initiated = False
+service_initialized = False
 logger = logging.getLogger('main')
+import psycopg2
+
+def is_db_healthy() -> bool:
+    """Check if database connection is healthy"""
+    try:
+        with psycopg2.connect(db_connection_str, connect_timeout=2):
+            return True
+    except Exception:
+        return False
 
 llm_host = None
 llm_port = None
@@ -164,14 +175,6 @@ class ProductReviewService(demo_pb2_grpc.ProductReviewServiceServicer):
         ai_assistant_response = get_ai_assistant_response(request.product_id, request.question)
 
         return ai_assistant_response
-
-    def Check(self, request, context):
-        return health_pb2.HealthCheckResponse(
-            status=health_pb2.HealthCheckResponse.SERVING)
-
-    def Watch(self, request, context):
-        return health_pb2.HealthCheckResponse(
-            status=health_pb2.HealthCheckResponse.UNIMPLEMENTED)
 
 def get_product_reviews(request_product_id):
 
@@ -483,7 +486,14 @@ if __name__ == "__main__":
     # Add class to gRPC server
     service = ProductReviewService()
     demo_pb2_grpc.add_ProductReviewServiceServicer_to_server(service, server)
-    health_pb2_grpc.add_HealthServicer_to_server(service, server)
+    
+    # Initialize health service
+    health_servicer = HealthServicer()
+    health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
+    
+    # Set initial statuses
+    health_servicer.set("", health_pb2.HealthCheckResponse.NOT_SERVING)
+    health_servicer.set("product.reviews.v1.ProductReviewService", health_pb2.HealthCheckResponse.NOT_SERVING)
 
     llm_host = must_map_env('LLM_HOST')
     llm_port = must_map_env('LLM_PORT')
@@ -508,13 +518,42 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, handle_shutdown_signal)
     signal.signal(signal.SIGTERM, handle_shutdown_signal)
 
+    # Background task to update health statuses
+    async def update_health_statuses():
+        global service_initialized
+        while not shutdown_initiated:
+            db_healthy = is_db_healthy()
+            
+            # Update liveness status (empty service name)
+            if db_healthy:
+                health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
+            else:
+                health_servicer.set("", health_pb2.HealthCheckResponse.NOT_SERVING)
+            
+            # Update readiness status
+            if service_initialized and db_healthy:
+                health_servicer.set("product.reviews.v1.ProductReviewService", health_pb2.HealthCheckResponse.SERVING)
+            else:
+                health_servicer.set("product.reviews.v1.ProductReviewService", health_pb2.HealthCheckResponse.NOT_SERVING)
+            
+            await asyncio.sleep(1)
+
     # Start server
     port = must_map_env('PRODUCT_REVIEWS_PORT')
     server.add_insecure_port(f'[::]:{port}')
 
     async def serve():
+        global service_initialized
         await server.start()
         logger.info(f'Product reviews service started, listening on port {port}')
+        
+        # Start health status updater task
+        asyncio.create_task(update_health_statuses())
+        
+        # Mark service as initialized after all startup steps complete
+        service_initialized = True
+        logger.info('Service initialization completed')
+        
         await server.wait_for_termination()
 
     asyncio.run(serve())
