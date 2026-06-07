@@ -1,11 +1,17 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use actix_web::{dev::ServerHandle, web, App, HttpServer};
+use actix_web::{dev::ServerHandle, web, App, HttpResponse, HttpServer, ResponseError};
+use actix_governor::{Governor, GovernorConfigBuilder, KeyExtractor, SimpleKeyExtractionError};
+use governor::clock::DefaultClock;
+use governor::middleware::RateLimitingMiddleware;
 use open_feature::provider::{FeatureProvider, NoOpProvider};
 use open_feature_flagd::{FlagdOptions, FlagdProvider};
+use opentelemetry::{global, metrics::{Counter, Meter}};
 use opentelemetry_instrumentation_actix_web::{RequestMetrics, RequestTracing};
+use serde::Serialize;
 use std::env;
+use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::signal::unix::{signal, SignalKind};
 use tracing::{info, warn, error};
@@ -13,6 +19,94 @@ mod telemetry_conf;
 use telemetry_conf::init_otel;
 mod shipping_service;
 use shipping_service::{get_quote, health_check, ship_order};
+
+// Rate limit error response structure
+#[derive(Serialize, Debug)]
+struct RateLimitError {
+    error: String,
+    message: String,
+    retry_after: u64,
+}
+
+impl ResponseError for RateLimitError {
+    fn status_code(&self) -> actix_web::http::StatusCode {
+        actix_web::http::StatusCode::TOO_MANY_REQUESTS
+    }
+
+    fn error_response(&self) -> HttpResponse {
+        HttpResponse::build(self.status_code())
+            .insert_header(("Retry-After", self.retry_after.to_string()))
+            .json(self)
+    }
+}
+
+// Custom key extractor to get client IP from X-Forwarded-For header or remote address
+#[derive(Clone, Copy)]
+struct ClientIpKeyExtractor;
+
+impl KeyExtractor for ClientIpKeyExtractor {
+    type Key = IpAddr;
+    type KeyExtractionError = SimpleKeyExtractionError<&'static str>;
+
+    fn extract(&self, req: &actix_web::dev::ServiceRequest) -> Result<Self::Key, Self::KeyExtractionError> {
+        // Check X-Forwarded-For header first
+        if let Some(forwarded_for) = req.headers().get("X-Forwarded-For") {
+            if let Ok(forwarded_str) = forwarded_for.to_str() {
+                // Take the first IP in the comma-separated list
+                if let Some(first_ip) = forwarded_str.split(',').next() {
+                    if let Ok(ip) = first_ip.trim().parse::<IpAddr>() {
+                        return Ok(ip);
+                    }
+                }
+            }
+        }
+
+        // Fall back to connection remote address
+        req.connection_info()
+            .peer_addr()
+            .unwrap_or("127.0.0.1")
+            .parse()
+            .map_err(|_| SimpleKeyExtractionError::new("Could not extract client IP address"))
+    }
+}
+
+// Custom middleware to increment rate limit metrics
+#[derive(Clone)]
+struct RateLimitMetricsMiddleware {
+    counter: Counter<u64>,
+}
+
+impl RateLimitingMiddleware<IpAddr> for RateLimitMetricsMiddleware {
+    fn allow(&self, _key: &IpAddr, _state: &governor::state::keyed::StateEntry<'_, IpAddr, governor::clock::QuantaInstant>) {
+        // Do nothing on allow
+    }
+
+    fn deny(&self, key: &IpAddr, _state: &governor::state::keyed::StateEntry<'_, IpAddr, governor::clock::QuantaInstant>, req: &actix_web::dev::ServiceRequest) {
+        let endpoint = req.path().to_string();
+        self.counter.add(1, &[
+            opentelemetry::KeyValue::new("client_ip", key.to_string()),
+            opentelemetry::KeyValue::new("endpoint", endpoint),
+        ]);
+    }
+}
+
+// Load and validate rate limit configuration from environment
+fn get_rate_limit_config() -> anyhow::Result<u32> {
+    const DEFAULT_RPM: u32 = 60;
+
+    match env::var("SHIPPING_RATE_LIMIT_RPM") {
+        Ok(val) => {
+            let rpm = val.parse::<u32>().map_err(|_| {
+                anyhow::anyhow!("Invalid SHIPPING_RATE_LIMIT_RPM: must be a positive integer")
+            })?;
+            if rpm == 0 {
+                return Err(anyhow::anyhow!("Invalid SHIPPING_RATE_LIMIT_RPM: must be greater than 0"));
+            }
+            Ok(rpm)
+        }
+        Err(_) => Ok(DEFAULT_RPM),
+    }
+}
 
 pub fn get_flagd_options() -> FlagdOptions {
     // Read FLAGD_HOST environment variable, default to "localhost"
@@ -99,12 +193,43 @@ pub async fn app() -> App {
     let provider = init_flagd_provider().await;
     let flag_provider = web::Data::from(provider);
     
+    // Load rate limit config
+    let rpm = get_rate_limit_config().expect("Invalid rate limit configuration");
+    
+    // Create rate limit counter metric
+    let meter = global::meter("shipping");
+    let rate_limit_counter = meter.u64_counter("shipping_rate_limited_requests_total")
+        .with_description("Total number of requests that were rejected due to rate limiting")
+        .init();
+    
+    // Build governor configuration
+    let governor_config = GovernorConfigBuilder::default()
+        .per_second(60 * 60 / rpm as u64) // Calculate interval between requests for RPM
+        .burst_size(rpm)
+        .key_extractor(ClientIpKeyExtractor)
+        .middleware(RateLimitMetricsMiddleware { counter: rate_limit_counter })
+        .error_handler(|quota| {
+            RateLimitError {
+                error: "Too many requests".to_string(),
+                message: "Rate limit exceeded. Try again later.".to_string(),
+                retry_after: quota.as_secs(),
+            }
+        })
+        .use_headers()
+        .finish()
+        .expect("Failed to build rate limit configuration");
+
+    // Create public routes scope with rate limiting
+    let public_routes = web::scope("")
+        .wrap(Governor::new(&governor_config))
+        .service(get_quote)
+        .service(ship_order);
+    
     App::new()
         .app_data(flag_provider.clone())
         .wrap(RequestTracing::new())
         .wrap(RequestMetrics::default())
-        .service(get_quote)
-        .service(ship_order)
+        .service(public_routes)
         .service(health_check)
 }
 
