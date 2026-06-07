@@ -11,6 +11,6 @@ public class GetCartRequestValidator : AbstractValidator<GetCartRequest>
     {
         RuleFor(x => x.UserId)
             .NotEmpty()
-            .WithMessage("user_id is required");
+            .WithMessage("User ID cannot be empty");
     }
 }
