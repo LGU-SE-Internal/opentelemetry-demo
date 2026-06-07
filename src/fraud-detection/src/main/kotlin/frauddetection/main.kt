@@ -76,19 +76,27 @@ const val POLL_TIMEOUT_MS = 100L
 const val HEALTH_CHECK_INTERVAL_MS = 10000L // 10 seconds
 const val MAX_UNHEALTHY_POLL_INTERVAL_MS = 60000L // 60 seconds
 const val SHUTDOWN_WAIT_MS = 5000L // 5 seconds
+const val DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_MS = 30000L // 30 seconds default
 
 private val logger: Logger = LogManager.getLogger(groupID)
 private val lastSuccessfulPollTime = AtomicLong(0)
 private var kafkaConsumerConnected = false
 private val shutdownInitiated = AtomicBoolean(false)
+private val activeOperations = AtomicLong(0)
+
+data class ShutdownResult(
+    val completedOperations: Int,
+    val timedOutOperations: Int,
+    val shutdownSuccess: Boolean
+)
 
 interface GracefulShutdownManager {
     /**
      * Initiates shutdown sequence, returns when shutdown completes or timeout expires
      * @param timeoutMs maximum time to wait for in-flight operations to complete, default 30000ms (30s)
-     * @return true if shutdown completed gracefully before timeout, false if timed out
+     * @return ShutdownResult with counts of completed/timed out operations and success status
      */
-    fun shutdown(timeoutMs: Long = System.getenv("GRACEFUL_SHUTDOWN_TIMEOUT_MS")?.toLongOrNull() ?: DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_MS): Boolean
+    fun shutdown(timeoutMs: Long = System.getenv("fraud-detection.shutdown.timeout-seconds")?.toLongOrNull()?.times(1000) ?: DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_MS): ShutdownResult
 
     /**
      * Registers resources to be managed during shutdown
@@ -109,45 +117,70 @@ class GracefulShutdownManagerImpl : GracefulShutdownManager {
         resourcesRegistered.set(true)
     }
 
-    override fun shutdown(timeoutMs: Long): Boolean {
+    override fun shutdown(timeoutMs: Long): ShutdownResult {
         if (!resourcesRegistered.get()) {
             logger.error("Cannot shutdown: resources not registered")
-            return false
+            return ShutdownResult(0, 0, false)
         }
         if (shutdownInitiated.compareAndSet(false, true)) {
-            logger.info("Received shutdown signal, initiating graceful shutdown")
+            logger.info("Received shutdown signal, initiating graceful shutdown with timeout ${timeoutMs}ms")
 
             // Step 1: Stop accepting new gRPC connections
-            logger.info("gRPC server stopped accepting new connections")
+            logger.info("Stopping gRPC server from accepting new connections")
             grpcServer.shutdown()
 
             // Step 2: Stop Kafka consumer polling
             kafkaConsumer.wakeup()
+            logger.info("Kafka consumer polling stopped, no new messages will be processed")
 
-            // Step 3: Wait for gRPC server to terminate
-            val grpcShutdownSuccess = grpcServer.awaitTermination(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+            val startTime = System.currentTimeMillis()
+            val endTime = startTime + timeoutMs
 
-            // Step 4: Commit uncommitted Kafka offsets
+            // Step 3: Wait for all active fraud check operations to complete or timeout
+            var remainingActive = activeOperations.get()
+            while (remainingActive > 0 && System.currentTimeMillis() < endTime) {
+                logger.info("Waiting for $remainingActive active fraud check operations to complete...")
+                Thread.sleep(500)
+                remainingActive = activeOperations.get()
+            }
+
+            val completedOperations = activeOperations.get()
+            val timedOutOperations = remainingActive
+
+            // Step 4: Wait for gRPC server to terminate
+            val remainingTimeout = endTime - System.currentTimeMillis()
+            val grpcShutdownSuccess = if (remainingTimeout > 0) {
+                grpcServer.awaitTermination(remainingTimeout, java.util.concurrent.TimeUnit.MILLISECONDS)
+            } else {
+                false
+            }
+
+            // Step 5: Commit uncommitted Kafka offsets and close consumer
             try {
                 kafkaConsumer.commitSync()
-                logger.info("Kafka consumer polling stopped, all uncommitted offsets successfully committed")
+                logger.info("All uncommitted Kafka offsets successfully committed")
             } catch (e: Exception) {
                 logger.error("Failed to commit Kafka offsets during shutdown", e)
             } finally {
                 kafkaConsumer.close()
+                logger.info("Kafka consumer connection closed cleanly")
             }
 
-            val shutdownCompleted = grpcShutdownSuccess
+            val shutdownCompleted = timedOutOperations == 0 && grpcShutdownSuccess
             if (shutdownCompleted) {
-                logger.info("Graceful shutdown completed successfully")
+                logger.info("Shutdown completed successfully: $completedOperations operations completed, 0 timed out")
             } else {
-                logger.warn("Graceful shutdown timed out after ${timeoutMs}ms, terminating remaining in-flight operations")
-                grpcServer.shutdownNow()
+                if (timedOutOperations > 0) {
+                    logger.warn("Shutdown timed out after ${timeoutMs}ms: $completedOperations operations completed, $timedOutOperations timed out")
+                }
+                if (!grpcShutdownSuccess) {
+                    logger.warn("gRPC server did not terminate within timeout, forcing shutdown")
+                    grpcServer.shutdownNow()
+                }
             }
-            return shutdownCompleted
+            return ShutdownResult(completedOperations.toInt(), timedOutOperations.toInt(), shutdownCompleted)
         }
-        return true
-    }
+        return ShutdownResult(0, 0, true)
     }
 }
 
@@ -313,8 +346,13 @@ fun main() {
 
     // Register signal handlers for SIGINT (2) and SIGTERM (15)
     val signalHandler = SignalHandler { signal ->
-        val shutdownSuccess = shutdownManager.shutdown()
-        exitProcess(if (shutdownSuccess) 0 else if (signal.number == 2) 130 else 143)
+        val shutdownResult = shutdownManager.shutdown()
+        val exitCode = if (shutdownResult.shutdownSuccess) {
+            0
+        } else {
+            if (signal.number == 2) 130 else 143
+        }
+        exitProcess(exitCode)
     }
 
     try {
@@ -359,28 +397,33 @@ fun main() {
                 }
                 totalCount = records
                     .fold(totalCount) { accumulator, record ->
-                        val validationResult = validateOrderMessage(record.value())
-                        
-                        when (validationResult) {
-                            is Result.Success -> {
-                                val validatedOrder = validationResult.value
-                                
-                                val newCount = accumulator + 1
-                                if (getFeatureFlagValue("kafkaQueueProblems") > 0) {
-                                    logger.info("FeatureFlag 'kafkaQueueProblems' is enabled, sleeping 1 second")
-                                    Thread.sleep(1000)
+                        activeOperations.incrementAndGet()
+                        try {
+                            val validationResult = validateOrderMessage(record.value())
+
+                            when (validationResult) {
+                                is Result.Success -> {
+                                    val validatedOrder = validationResult.value
+
+                                    val newCount = accumulator + 1
+                                    if (getFeatureFlagValue("kafkaQueueProblems") > 0) {
+                                        logger.info("FeatureFlag 'kafkaQueueProblems' is enabled, sleeping 1 second")
+                                        Thread.sleep(1000)
+                                    }
+                                    logger.info("Consumed record with orderId: ${validatedOrder.orderId}, and updated total count to: $newCount")
+                                    newCount
                                 }
-                                logger.info("Consumed record with orderId: ${validatedOrder.orderId}, and updated total count to: $newCount")
-                                newCount
+                                is Result.Failure -> {
+                                    logger.warn(
+                                        "Validation failed for record from topic ${record.topic()}, partition ${record.partition()}, offset ${record.offset()}: ${validationResult.error.message}",
+                                        validationResult.error
+                                    )
+                                    // Skip processing, commit offset normally
+                                    accumulator + 1
+                                }
                             }
-                            is Result.Failure -> {
-                                logger.warn(
-                                    "Validation failed for record from topic ${record.topic()}, partition ${record.partition()}, offset ${record.offset()}: ${validationResult.error.message}",
-                                    validationResult.error
-                                )
-                                // Skip processing, commit offset normally
-                                accumulator + 1
-                            }
+                        } finally {
+                            activeOperations.decrementAndGet()
                         }
                     }
             }
