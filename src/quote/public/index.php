@@ -36,6 +36,64 @@ $dependencies($containerBuilder);
 // Build PHP-DI Container instance
 $container = $containerBuilder->build();
 
+// TLS/mTLS Configuration Validation
+$tlsCertPath = getenv('QUOTESVC_TLS_CERT_PATH') ?: '';
+$tlsKeyPath = getenv('QUOTESVC_TLS_KEY_PATH') ?: '';
+$mtlsEnabled = filter_var(getenv('QUOTESVC_MTLS_ENABLED'), FILTER_VALIDATE_BOOLEAN);
+$mtlsCaCertPath = getenv('QUOTESVC_MTLS_CA_CERT_PATH') ?: '';
+
+// Validate TLS configuration
+if ($tlsCertPath && !$tlsKeyPath) {
+    fwrite(STDERR, "TLS key path must be provided when TLS cert path is configured\n");
+    exit(1);
+}
+if ($tlsKeyPath && !$tlsCertPath) {
+    fwrite(STDERR, "TLS cert path must be provided when TLS key path is configured\n");
+    exit(1);
+}
+
+// Validate TLS files exist and are readable
+if ($tlsCertPath) {
+    if (!file_exists($tlsCertPath) || !is_readable($tlsCertPath)) {
+        fwrite(STDERR, "TLS certificate file not found or unreadable: {$tlsCertPath}\n");
+        exit(1);
+    }
+    if (!file_exists($tlsKeyPath) || !is_readable($tlsKeyPath)) {
+        fwrite(STDERR, "TLS private key file not found or unreadable: {$tlsKeyPath}\n");
+        exit(1);
+    }
+    
+    // Validate PEM data
+    $certContent = file_get_contents($tlsCertPath);
+    $keyContent = file_get_contents($tlsKeyPath);
+    if (!openssl_x509_read($certContent)) {
+        fwrite(STDERR, "Invalid TLS certificate/key pair: Failed to parse certificate\n");
+        exit(1);
+    }
+    $key = openssl_pkey_get_private($keyContent);
+    if (!$key || !openssl_x509_check_private_key($certContent, $key)) {
+        fwrite(STDERR, "Invalid TLS certificate/key pair: Certificate and key do not match or key is invalid\n");
+        exit(1);
+    }
+}
+
+// Validate mTLS configuration
+if ($mtlsEnabled) {
+    if (!$mtlsCaCertPath) {
+        fwrite(STDERR, "mTLS CA cert path must be provided when mTLS is enabled\n");
+        exit(1);
+    }
+    if (!file_exists($mtlsCaCertPath) || !is_readable($mtlsCaCertPath)) {
+        fwrite(STDERR, "mTLS CA certificate file not found or unreadable: {$mtlsCaCertPath}\n");
+        exit(1);
+    }
+    $caCertContent = file_get_contents($mtlsCaCertPath);
+    if (!openssl_x509_read($caCertContent)) {
+        fwrite(STDERR, "Invalid mTLS CA certificate: Failed to parse CA certificate\n");
+        exit(1);
+    }
+}
+
 // Instantiate the app
 AppFactory::setContainer($container);
 $app = Bridge::create($container);
@@ -174,9 +232,33 @@ if ($ipv6_enabled == "true") {
     echo "Overwriting Localhost IP: {$ip}" . PHP_EOL;
 } 
 
-$address = $ip . ':' . getenv('QUOTE_PORT');
+$port = getenv('QUOTE_PORT') ?: '8080';
+$address = $ip . ':' . $port;
 
-$socket = new SocketServer($address);
+// Prepare socket context with TLS if configured
+$socketContext = [];
+if ($tlsCertPath) {
+    $tlsContext = [
+        'local_cert' => $tlsCertPath,
+        'local_pk' => $tlsKeyPath,
+        'verify_peer' => false,
+        'allow_self_signed' => true,
+    ];
+    
+    if ($mtlsEnabled) {
+        $tlsContext['verify_peer'] = true;
+        $tlsContext['verify_peer_name'] = true;
+        $tlsContext['cafile'] = $mtlsCaCertPath;
+        $tlsContext['verify_depth'] = 5;
+    }
+    
+    $socketContext['ssl'] = $tlsContext;
+    // Use tls:// scheme for SSL/TLS
+    $address = 'tls://' . $address;
+    echo "TLS enabled, serving HTTPS on: {$address}" . PHP_EOL;
+} else {
+    echo "Serving plain HTTP on: {$address}" . PHP_EOL;
+}
+
+$socket = new SocketServer($address, ['tcp' => $socketContext]);
 $server->listen($socket);
-
-echo "Listening on: {$address}" . PHP_EOL;
