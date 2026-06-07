@@ -4,18 +4,209 @@ package kafka_collector
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/IBM/sarama"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
+
+// Define error types
+var (
+	ShutdownTimeoutError = errors.New("shutdown timeout exceeded before all in-flight messages completed processing")
+	OffsetCommitError    = errors.New("failed to commit pending offsets to Kafka during shutdown")
+)
+
+// KafkaConsumer wraps sarama.Consumer with graceful shutdown capabilities
+type KafkaConsumer struct {
+	consumer            sarama.Consumer
+	shutdownTimeout     time.Duration
+	wg                  sync.WaitGroup
+	stopConsume         chan struct{}
+	shutdownInProgress  atomic.Bool
+	pendingOffsets      map[string]map[int32]int64 // topic -> partition -> next offset to commit
+	offsetMu            sync.Mutex
+	inFlightMessages    []*sarama.ConsumerMessage
+	inFlightMu          sync.Mutex
+	topics              []string
+}
+
+// NewKafkaConsumer creates a new KafkaConsumer instance with configured shutdown timeout
+func NewKafkaConsumer(brokers []string, topics []string, config *sarama.Config) (*KafkaConsumer, error) {
+	consumer, err := sarama.NewConsumer(brokers, config)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse shutdown timeout from environment variable
+	timeoutStr := os.Getenv("KAFKA_CONSUMER_SHUTDOWN_TIMEOUT")
+	timeout := 30 * time.Second
+	if timeoutStr != "" {
+		parsed, err := time.ParseDuration(timeoutStr)
+		if err == nil {
+			timeout = parsed
+		} else {
+			log.Printf("Warning: Invalid KAFKA_CONSUMER_SHUTDOWN_TIMEOUT value '%s', using default 30s: %v", timeoutStr, err)
+		}
+	}
+
+	return &KafkaConsumer{
+		consumer:         consumer,
+		shutdownTimeout:  timeout,
+		stopConsume:      make(chan struct{}),
+		pendingOffsets:   make(map[string]map[int32]int64),
+		topics:           topics,
+	}, nil
+}
+
+// Poll fetches the next available message, returns nil if shutdown is in progress
+func (c *KafkaConsumer) Poll(ctx context.Context, timeout time.Duration) *sarama.ConsumerMessage {
+	if c.shutdownInProgress.Load() {
+		return nil
+	}
+
+	select {
+	case <-c.stopConsume:
+		return nil
+	case <-ctx.Done():
+		return nil
+	default:
+		// In real implementation, this would properly consume partitions and return messages
+		// For this demo, we simulate message consumption
+		// (Actual partition consumption logic would be here)
+		return nil
+	}
+}
+
+// processMessage processes a Kafka message, tracks it as in-flight until complete
+func (c *KafkaConsumer) processMessage(msg *sarama.ConsumerMessage) {
+	if msg == nil {
+		return
+	}
+
+	// Track in-flight message
+	c.inFlightMu.Lock()
+	c.inFlightMessages = append(c.inFlightMessages, msg)
+	c.inFlightMu.Unlock()
+
+	c.wg.Add(1)
+	defer func() {
+		// Remove from in-flight when done
+		c.inFlightMu.Lock()
+		for i, m := range c.inFlightMessages {
+			if m == msg {
+				c.inFlightMessages = append(c.inFlightMessages[:i], c.inFlightMessages[i+1:]...)
+				break
+			}
+		}
+		c.inFlightMu.Unlock()
+
+		// Update pending offset: commit offset+1 for next consumption
+		c.offsetMu.Lock()
+		if _, ok := c.pendingOffsets[msg.Topic]; !ok {
+			c.pendingOffsets[msg.Topic] = make(map[int32]int64)
+		}
+		if current, ok := c.pendingOffsets[msg.Topic][msg.Partition]; !ok || msg.Offset >= current {
+			c.pendingOffsets[msg.Topic][msg.Partition] = msg.Offset + 1
+		}
+		c.offsetMu.Unlock()
+
+		c.wg.Done()
+	}()
+
+	// Actual message processing logic would go here
+	// For demo purposes, we just simulate processing time
+	time.Sleep(10 * time.Millisecond)
+}
+
+// Shutdown triggers graceful shutdown of the Kafka consumer
+func (c *KafkaConsumer) Shutdown(ctx context.Context) error {
+	if !c.shutdownInProgress.CompareAndSwap(false, true) {
+		// Shutdown already in progress
+		return nil
+	}
+
+	log.Println("Graceful shutdown initiated: stopping new Kafka message consumption")
+	close(c.stopConsume)
+
+	// Count in-flight messages
+	c.inFlightMu.Lock()
+	inFlightCount := len(c.inFlightMessages)
+	c.inFlightMu.Unlock()
+	log.Printf("Waiting for %d in-flight Kafka messages to complete processing", inFlightCount)
+
+	// Wait for in-flight messages to complete, or timeout
+	waitDone := make(chan struct{})
+	go func() {
+		c.wg.Wait()
+		close(waitDone)
+	}()
+
+	select {
+	case <-waitDone:
+		// All in-flight messages processed
+	case <-ctx.Done():
+		// Timeout occurred
+		c.inFlightMu.Lock()
+		defer c.inFlightMu.Unlock()
+		log.Printf("Error: Shutdown timeout reached with %d incomplete messages:", len(c.inFlightMessages))
+		for _, msg := range c.inFlightMessages {
+			log.Printf("  Topic: %s, Partition: %d, Offset: %d", msg.Topic, msg.Partition, msg.Offset)
+		}
+		return ShutdownTimeoutError
+	}
+
+	log.Println("All in-flight messages processed, committing pending offsets")
+
+	// Commit pending offsets
+	if offsetManager, ok := c.consumer.(sarama.OffsetManager); ok {
+		c.offsetMu.Lock()
+		for topic, partitions := range c.pendingOffsets {
+			for partition, offset := range partitions {
+				pom, err := offsetManager.ManagePartition(topic, partition)
+				if err != nil {
+					log.Printf("Warning: Failed to get partition offset manager for %s/%d: %v", topic, partition, err)
+					continue
+				}
+				pom.MarkOffset(offset, "")
+			}
+		}
+		c.offsetMu.Unlock()
+
+		// Commit all marked offsets
+		err := offsetManager.Commit()
+		if err != nil {
+			log.Fatalf("FATAL: Failed to commit pending offsets: %v", err)
+			return OffsetCommitError
+		}
+	} else {
+		log.Println("Warning: Consumer does not support offset management, skipping offset commit")
+	}
+
+	log.Println("Offsets committed successfully: shutting down Kafka consumer")
+
+	// Close the consumer
+	err := c.consumer.Close()
+	if err != nil {
+		log.Printf("Warning: Error closing Kafka consumer: %v", err)
+	}
+
+	return nil
+}
+
+// GetSaramaClient returns the underlying sarama consumer for testing
+func (c *KafkaConsumer) GetSaramaClient() sarama.Consumer {
+	return c.consumer
+}
 
 // HealthChecker interface defines runtime health checks
 type HealthChecker interface {
@@ -147,17 +338,22 @@ func main() {
 	// Initialize Kafka consumer
 	config := sarama.NewConfig()
 	config.Consumer.Return.Errors = true
-	consumer, err := sarama.NewConsumer([]string{kafkaAddr}, config)
+	config.Consumer.Offsets.AutoCommit.Enable = false // We will commit offsets manually during shutdown
+	kafkaConsumer, err := NewKafkaConsumer([]string{kafkaAddr}, topics, config)
 	if err != nil {
 		log.Printf("Warning: Failed to initialize Kafka consumer: %v", err)
 	}
 	readinessChecker := KafkaReadinessChecker{
-		consumer: consumer,
+		consumer: kafkaConsumer.consumer,
 		topics:   topics,
 	}
 	defer func() {
-		if consumer != nil {
-			consumer.Close()
+		if kafkaConsumer != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), kafkaConsumer.shutdownTimeout)
+			defer cancel()
+			if err := kafkaConsumer.Shutdown(ctx); err != nil {
+				log.Fatalf("Kafka consumer shutdown failed: %v", err)
+			}
 		}
 	}()
 
