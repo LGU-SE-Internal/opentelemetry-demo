@@ -24,3 +24,5 @@ ENV KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
 ENV KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1
 ENV KAFKA_OPTS="-javaagent:/tmp/opentelemetry-javaagent.jar -Dotel.jmx.target.system=kafka-broker"
 ENV CLUSTER_ID=ckjPoprWQzOf0-FuNkGfFQ
+
+HEALTHCHECK --start-period=30s --interval=10s --timeout=5s --retries=3 CMD kafka-broker-api-versions.sh --bootstrap-server localhost:9092
