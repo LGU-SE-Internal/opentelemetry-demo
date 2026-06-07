@@ -202,25 +202,41 @@ class CurrencyService final : public oteldemo::CurrencyService::Service
       Money from = request->from();
       string from_code = from.currency_code();
       
-      // Validate from currency code is not empty
-      if (from_code.empty()) {
+      // Validate from currency code exists in supported list
+      if (currency_conversion.find(from_code) == currency_conversion.end()) {
         span->SetStatus(StatusCode::kError);
-        logger->Error(std::string(__func__) + " conversion failed: from currency code is empty");
+        logger->Error(std::string(__func__) + " conversion failed: source currency code '" + from_code + "' is not supported");
         span->End();
-        return Status(grpc::INVALID_ARGUMENT, "from currency code cannot be empty");
+        return Status(grpc::INVALID_ARGUMENT, "Source currency code '" + from_code + "' is not supported");
+      }
+      
+      // Validate amount is finite and non-negative
+      double amount = getDouble(from);
+      if (std::isnan(amount) || std::isinf(amount)) {
+        span->SetStatus(StatusCode::kError);
+        logger->Error(std::string(__func__) + " conversion failed: amount is not a valid monetary value");
+        span->End();
+        return Status(grpc::INVALID_ARGUMENT, "Amount is not a valid monetary value: " + std::to_string(amount));
+      }
+      
+      if (amount < 0.0) {
+        span->SetStatus(StatusCode::kError);
+        logger->Error(std::string(__func__) + " conversion failed: amount cannot be negative: " + std::to_string(amount));
+        span->End();
+        return Status(grpc::INVALID_ARGUMENT, "Amount cannot be negative: " + std::to_string(amount));
       }
       
       double rate = currency_conversion[from_code];
-      double one_euro = getDouble(from) / rate ;
+      double one_euro = amount / rate ;
 
       string to_code = request->to_code();
       
-      // Validate to currency code is not empty
-      if (to_code.empty()) {
+      // Validate to currency code exists in supported list
+      if (currency_conversion.find(to_code) == currency_conversion.end()) {
         span->SetStatus(StatusCode::kError);
-        logger->Error(std::string(__func__) + " conversion failed: to currency code is empty");
+        logger->Error(std::string(__func__) + " conversion failed: target currency code '" + to_code + "' is not supported");
         span->End();
-        return Status(grpc::INVALID_ARGUMENT, "to currency code cannot be empty");
+        return Status(grpc::INVALID_ARGUMENT, "Target currency code '" + to_code + "' is not supported");
       }
       
       double to_rate = currency_conversion[to_code];
