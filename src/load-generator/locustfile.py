@@ -10,11 +10,16 @@ import os
 import random
 import uuid
 import logging
+import signal
+import sys
+import time
+from types import FrameType
+from typing import Optional, NoReturn
 
 from locust import HttpUser, task, between
 from locust_plugins.users.playwright import PlaywrightUser, pw, PageWithRetry, event
 
-from opentelemetry import context, baggage, trace
+from opentelemetry import context, baggage, trace, metrics, _logs as logs
 from opentelemetry.context import Context
 from opentelemetry.metrics import set_meter_provider
 from opentelemetry.sdk.metrics import MeterProvider
@@ -33,6 +38,10 @@ from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
 from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.resources import Resource
+
+from openfeature import api
+from openfeature.contrib.provider.ofrep import OFREPProvider
+from openfeature.contrib.hook.opentelemetry import TracingHook
 
 
 # Alias exporters for testability
@@ -125,6 +134,54 @@ SystemMetricsInstrumentor().instrument()
 URLLib3Instrumentor().instrument()
 
 logging.info("Instrumentation complete - logs will now include trace context")
+
+def graceful_shutdown(signum: int, frame: Optional[FrameType], environment) -> NoReturn:
+    """Signal handler for graceful shutdown sequence"""
+    logging.info("Starting graceful shutdown (10s timeout)...")
+    
+    # Stop Locust runner to prevent new requests/users
+    if environment.runner:
+        environment.runner.stop()
+    
+    # Wait for in-flight requests to complete, up to 10s
+    start_time = time.time()
+    timeout = 10
+    
+    while time.time() - start_time < timeout:
+        # Check if there are any running users
+        if not environment.runner or environment.runner.user_count == 0:
+            break
+        time.sleep(0.1)
+    
+    # Flush all OTel data
+    try:
+        tracer_provider = trace.get_tracer_provider()
+        if hasattr(tracer_provider, "force_flush"):
+            tracer_provider.force_flush(timeout_millis=2000)
+    except Exception as e:
+        logging.warning(f"Failed to flush traces: {str(e)}")
+    
+    try:
+        meter_provider = metrics.get_meter_provider()
+        if hasattr(meter_provider, "force_flush"):
+            meter_provider.force_flush(timeout_millis=2000)
+    except Exception as e:
+        logging.warning(f"Failed to flush metrics: {str(e)}")
+    
+    try:
+        logger_provider = logs.get_logger_provider()
+        if hasattr(logger_provider, "force_flush"):
+            logger_provider.force_flush(timeout_millis=2000)
+    except Exception as e:
+        logging.warning(f"Failed to flush logs: {str(e)}")
+    
+    # Check if we timed out
+    if time.time() - start_time >= timeout:
+        logging.warning("Graceful shutdown timed out after 10s, forcing exit")
+        sys.exit(1)
+    
+    logging.info("Graceful shutdown completed successfully")
+    sys.exit(0)
 
 # Initialize Flagd provider
 base_url = f"http://{os.environ.get('FLAGD_HOST', 'localhost')}:{os.environ.get('FLAGD_OFREP_PORT', 8016)}"
@@ -345,6 +402,11 @@ from flask import Response
 
 @events.init.add_listener
 def add_health_probe_endpoints(environment, **kwargs):
+    # Register signal handlers for graceful shutdown
+    from functools import partial
+    signal.signal(signal.SIGINT, partial(graceful_shutdown, environment=environment))
+    signal.signal(signal.SIGTERM, partial(graceful_shutdown, environment=environment))
+    
     if environment.web_ui:
         app = environment.web_ui.app
 
