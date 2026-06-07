@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 using System;
 using System.Diagnostics;
+using System.IO;
+using System.Security.Cryptography.X509Certificates;
+using System.Net.Security;
 
 using Grpc.Health.V1;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
@@ -28,7 +31,6 @@ using OpenTelemetry.Trace;
 using OpenFeature;
 using OpenFeature.Hooks;
 using OpenFeature.Providers.Flagd;
-
 public partial class Program
 {
     internal const int ShutdownGracePeriodSeconds = 10;
@@ -75,6 +77,76 @@ public partial class Program
 }
 
 var builder = WebApplication.CreateBuilder(args);
+
+// TLS Configuration Validation
+bool tlsEnabled = bool.TryParse(builder.Configuration["CART_SERVICE_TLS_ENABLED"], out bool te) && te;
+string tlsCertPath = builder.Configuration["CART_SERVICE_TLS_CERT_PATH"] ?? string.Empty;
+string tlsKeyPath = builder.Configuration["CART_SERVICE_TLS_KEY_PATH"] ?? string.Empty;
+bool mtlsEnabled = bool.TryParse(builder.Configuration["CART_SERVICE_MTLS_ENABLED"], out bool me) && me;
+string mtlsCaCertPath = builder.Configuration["CART_SERVICE_MTLS_CA_CERT_PATH"] ?? string.Empty;
+
+if (tlsEnabled)
+{
+    if (string.IsNullOrEmpty(tlsCertPath))
+    {
+        throw new InvalidOperationException("CART_SERVICE_TLS_CERT_PATH is required when TLS is enabled");
+    }
+    if (!File.Exists(tlsCertPath))
+    {
+        throw new InvalidOperationException("CART_SERVICE_TLS_CERT_PATH points to non-existent file");
+    }
+    if (string.IsNullOrEmpty(tlsKeyPath))
+    {
+        throw new InvalidOperationException("CART_SERVICE_TLS_KEY_PATH is required when TLS is enabled");
+    }
+    if (!File.Exists(tlsKeyPath))
+    {
+        throw new InvalidOperationException("CART_SERVICE_TLS_KEY_PATH points to non-existent file");
+    }
+
+    // Configure Kestrel TLS
+    builder.WebHost.ConfigureKestrel(options =>
+    {
+        options.ConfigureHttpsDefaults(httpsOptions =>
+        {
+            httpsOptions.ServerCertificate = System.Security.Cryptography.X509Certificates.X509Certificate2.CreateFromPemFile(tlsCertPath, tlsKeyPath);
+            httpsOptions.SslProtocols = System.Security.Authentication.SslProtocols.Tls12 | System.Security.Authentication.SslProtocols.Tls13;
+
+            if (mtlsEnabled)
+            {
+                if (string.IsNullOrEmpty(mtlsCaCertPath))
+                {
+                    throw new InvalidOperationException("CART_SERVICE_MTLS_CA_CERT_PATH is required when mTLS is enabled");
+                }
+                if (!File.Exists(mtlsCaCertPath))
+                {
+                    throw new InvalidOperationException("CART_SERVICE_MTLS_CA_CERT_PATH points to non-existent file");
+                }
+                try
+                {
+                    var caCert = new System.Security.Cryptography.X509Certificates.X509Certificate2(mtlsCaCertPath);
+                    httpsOptions.ClientCertificateMode = Microsoft.AspNetCore.Server.Kestrel.Https.ClientCertificateMode.RequireCertificate;
+                    httpsOptions.ClientCertificateValidation = (cert, chain, errors) =>
+                    {
+                        if (errors != System.Net.Security.SslPolicyErrors.None) return false;
+                        chain.ChainPolicy.TrustMode = System.Security.Cryptography.X509Certificates.X509ChainTrustMode.CustomRootTrust;
+                        chain.ChainPolicy.CustomTrustStore.Add(caCert);
+                        return chain.Build(cert);
+                    };
+                }
+                catch (System.Security.Cryptography.CryptographicException)
+                {
+                    throw new InvalidOperationException("CART_SERVICE_MTLS_CA_CERT_PATH contains invalid PEM format");
+                }
+            }
+        });
+    });
+}
+else if (mtlsEnabled)
+{
+    throw new InvalidOperationException("CART_SERVICE_MTLS_ENABLED requires CART_SERVICE_TLS_ENABLED to be true");
+}
+
 string valkeyAddress = builder.Configuration["VALKEY_ADDR"];
 if (string.IsNullOrEmpty(valkeyAddress))
 {
