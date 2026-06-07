@@ -20,14 +20,16 @@ app = Flask(__name__)
 app.logger.setLevel(logging.INFO)
 
 # Rate limiting configuration
-RATE_LIMIT_MAX_REQUESTS = int(os.environ.get('RATE_LIMIT_MAX_REQUESTS', 100))
-RATE_LIMIT_WINDOW_SECONDS = int(os.environ.get('RATE_LIMIT_WINDOW_SECONDS', 60))
+def get_rate_limit():
+    max_requests = int(os.environ.get('RATE_LIMIT_MAX_REQUESTS', 100))
+    window_seconds = int(os.environ.get('RATE_LIMIT_WINDOW_SECONDS', 60))
+    return f"{max_requests} per {window_seconds} seconds"
 
 # Initialize rate limiter
 limiter = Limiter(
     get_remote_address,
     app=app,
-    default_limits=[f"{RATE_LIMIT_MAX_REQUESTS} per {RATE_LIMIT_WINDOW_SECONDS} seconds"],
+    default_limits=[get_rate_limit],
     storage_uri="memory://",
     headers_enabled=True,
     header_name_mapping={
@@ -41,7 +43,7 @@ limiter = Limiter(
 # Custom rate limit exceeded handler
 @app.errorhandler(429)
 def rate_limit_exceeded_handler(e):
-    retry_after = int(e.description.split()[-2]) if "Too Many Requests" in e.description else RATE_LIMIT_WINDOW_SECONDS
+    retry_after = int(e.description.split()[-2]) if e.description and "Too Many Requests" in e.description else int(os.environ.get('RATE_LIMIT_WINDOW_SECONDS', 60))
     response = jsonify({
         "error": "Rate limit exceeded",
         "retry_after": retry_after
