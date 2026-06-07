@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telemetry-docs
+  labels:
+    app: telemetry-docs
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: telemetry-docs
+  template:
+    metadata:
+      labels:
+        app: telemetry-docs
+    spec:
+      securityContext:
+        runAsNonRoot: true
+      containers:
+      - name: telemetry-docs
+        image: ${IMAGE_NAME}:${DEMO_VERSION}-telemetry-docs
+        ports:
+        - containerPort: 8080
+          name: http
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          periodSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          periodSeconds: 10
+          failureThreshold: 3
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+        securityContext:
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
