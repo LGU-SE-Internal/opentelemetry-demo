@@ -25,6 +25,11 @@
 #include <grpcpp/server_builder.h>
 #include <grpcpp/server_context.h>
 #include <grpcpp/impl/codegen/string_ref.h>
+#include <grpcpp/security/credentials.h>
+
+#include <fstream>
+#include <cerrno>
+#include <cstring>
 
 using namespace std;
 using namespace opentelemetry::baggage;
@@ -277,6 +282,21 @@ void SignalHandler(int signal) {
   }
 }
 
+// Helper function to read file content into string
+std::string read_file(const std::string& path) {
+  std::ifstream file(path);
+  if (!file.is_open()) {
+    return "";
+  }
+  return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+}
+
+// Helper function to check if file exists and is readable
+bool file_exists(const std::string& path) {
+  std::ifstream f(path.c_str());
+  return f.good();
+}
+
 void RunServer(uint16_t port)
 {
   // Start HTTP health server first
@@ -328,9 +348,81 @@ void RunServer(uint16_t port)
   HealthServer healthService;
   ServerBuilder builder;
 
+  // Read TLS configuration environment variables
+  const char* tls_cert_path = std::getenv("CURRENCY_SERVICE_TLS_CERT_PATH");
+  const char* tls_key_path = std::getenv("CURRENCY_SERVICE_TLS_KEY_PATH");
+  const char* tls_ca_path = std::getenv("CURRENCY_SERVICE_TLS_CA_CERT_PATH");
+  
+  std::shared_ptr<grpc::ServerCredentials> server_creds;
+  
+  bool tls_enabled = (tls_cert_path != nullptr) || (tls_key_path != nullptr) || (tls_ca_path != nullptr);
+  
+  if (tls_enabled) {
+    // Validate configuration
+    if (tls_ca_path != nullptr && (tls_cert_path == nullptr || tls_key_path == nullptr)) {
+      logger->Error("mTLS configuration requires server TLS certificate and key to be provided");
+      exit(EINVAL);
+    }
+    
+    if ((tls_cert_path != nullptr && tls_key_path == nullptr) || (tls_cert_path == nullptr && tls_key_path != nullptr)) {
+      logger->Error("Both TLS certificate path and private key path must be provided to enable TLS");
+      exit(EINVAL);
+    }
+    
+    // Check all files exist
+    if (!file_exists(tls_cert_path)) {
+      logger->Error("TLS file " + std::string(tls_cert_path) + " is missing or unreadable");
+      exit(ENOENT);
+    }
+    if (!file_exists(tls_key_path)) {
+      logger->Error("TLS file " + std::string(tls_key_path) + " is missing or unreadable");
+      exit(ENOENT);
+    }
+    if (tls_ca_path != nullptr && !file_exists(tls_ca_path)) {
+      logger->Error("TLS file " + std::string(tls_ca_path) + " is missing or unreadable");
+      exit(ENOENT);
+    }
+    
+    // Read certificate files
+    std::string cert_data = read_file(tls_cert_path);
+    std::string key_data = read_file(tls_key_path);
+    
+    if (cert_data.empty() || key_data.empty()) {
+      logger->Error("Invalid TLS certificate or private key");
+      exit(EINVAL);
+    }
+    
+    grpc::SslServerCredentialsOptions ssl_opts;
+    grpc::SslServerCredentialsOptions::PemKeyCertPair key_cert_pair;
+    key_cert_pair.private_key = key_data;
+    key_cert_pair.cert_chain = cert_data;
+    ssl_opts.pem_key_cert_pairs.push_back(key_cert_pair);
+    
+    if (tls_ca_path != nullptr) {
+      // mTLS mode: require client certificate verification
+      std::string ca_data = read_file(tls_ca_path);
+      if (ca_data.empty()) {
+        logger->Error("Invalid CA certificate");
+        exit(EINVAL);
+      }
+      ssl_opts.pem_root_certs = ca_data;
+      ssl_opts.client_certificate_request = GRPC_SSL_REQUEST_AND_REQUIRE_CLIENT_CERTIFICATE_AND_VERIFY;
+    } else {
+      // Standard TLS: no client certificate verification
+      ssl_opts.client_certificate_request = GRPC_SSL_DONT_REQUEST_CLIENT_CERTIFICATE;
+    }
+    
+    server_creds = grpc::SslServerCredentials(ssl_opts);
+    logger->Info("TLS enabled for gRPC server" + std::string(tls_ca_path != nullptr ? " with mTLS" : ""));
+  } else {
+    // Fallback to insecure mode for backward compatibility
+    server_creds = grpc::InsecureServerCredentials();
+    logger->Info("Using insecure gRPC server credentials (no TLS configured)");
+  }
+
   builder.RegisterService(&currencyService);
   builder.RegisterService(&healthService);
-  builder.AddListeningPort(address, grpc::InsecureServerCredentials());
+  builder.AddListeningPort(address, server_creds);
 
   g_server = std::unique_ptr<Server>(builder.BuildAndStart());
   logger->Info("Currency Server listening on port: " + address);
