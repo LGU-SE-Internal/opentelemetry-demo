@@ -50,6 +50,83 @@ $app->addRoutingMiddleware();
 // Add Body Parsing Middleware
 $app->addBodyParsingMiddleware();
 
+// Rate Limiting Middleware
+$rateLimitStorage = [];
+$app->add(function (Psr\Http\Message\ServerRequestInterface $request, Psr\Http\Server\RequestHandlerInterface $handler) use (&$rateLimitStorage) {
+    $path = $request->getUri()->getPath();
+    $method = $request->getMethod();
+    
+    // Skip rate limiting for health and readiness endpoints
+    $excludedPaths = ['/health', '/healthz', '/ready', '/livez'];
+    if (in_array($path, $excludedPaths)) {
+        return $handler->handle($request);
+    }
+    
+    // Only apply rate limiting to quote calculation endpoints
+    $quoteEndpoints = ['/getquote', '/getQuote', '/api/calculate-quote'];
+    if (!($method === 'POST' && in_array($path, $quoteEndpoints))) {
+        return $handler->handle($request);
+    }
+    
+    // Get rate limit configuration from environment variable
+    $rateLimitRpm = (int)getenv('QUOTE_SERVICE_RATE_LIMIT_RPM') ?: 10;
+    
+    // If rate limit is set to 0, disable rate limiting entirely
+    if ($rateLimitRpm === 0) {
+        return $handler->handle($request);
+    }
+    
+    // Get client IP address
+    $xForwardedFor = $request->getHeaderLine('X-Forwarded-For');
+    if (!empty($xForwardedFor)) {
+        $ips = explode(',', $xForwardedFor);
+        $clientIp = trim($ips[0]);
+    } else {
+        $serverParams = $request->getServerParams();
+        $clientIp = $serverParams['REMOTE_ADDR'] ?? 'unknown';
+    }
+    
+    // Calculate current window (fixed 60-second window)
+    $currentTime = time();
+    $windowStart = floor($currentTime / 60) * 60;
+    $windowKey = $clientIp . '|' . $windowStart;
+    
+    // Initialize counter for current window if not exists
+    if (!isset($rateLimitStorage[$windowKey])) {
+        $rateLimitStorage[$windowKey] = 0;
+        // Clean up old windows (optional, prevents memory leak for long-running processes)
+        foreach ($rateLimitStorage as $key => $value) {
+            list($ip, $oldWindowStart) = explode('|', $key);
+            if ((int)$oldWindowStart < $windowStart) {
+                unset($rateLimitStorage[$key]);
+            }
+        }
+    }
+    
+    // Check if rate limit is exceeded
+    if ($rateLimitStorage[$windowKey] >= $rateLimitRpm) {
+        $retryAfter = $windowStart + 60 - $currentTime;
+        
+        $response = new Slim\Psr7\Response();
+        $payload = json_encode([
+            'error' => 'Too Many Requests',
+            'message' => 'You have exceeded the rate limit for quote calculation requests',
+            'retry_after' => $retryAfter
+        ]);
+        $response->getBody()->write($payload);
+        
+        return $response
+            ->withHeader('Content-Type', 'application/json')
+            ->withHeader('Retry-After', (string)$retryAfter)
+            ->withStatus(429);
+    }
+    
+    // Increment counter and proceed with request
+    $rateLimitStorage[$windowKey]++;
+    
+    return $handler->handle($request);
+});
+
 // Add Error Middleware
 $errorMiddleware = $app->addErrorMiddleware(true, true, true);
 Loop::get()->addSignal(SIGTERM, function() {
