@@ -11,6 +11,7 @@ import os
 import random
 import json
 import re
+import signal
 from concurrent import futures
 
 # Pip
@@ -298,4 +299,28 @@ if __name__ == "__main__":
     server.add_insecure_port(f'[::]:{port}')
     server.start()
     logger.info(f'Recommendation service started, listening on port {port}')
+    
+    # Define signal handler for graceful shutdown
+    def handle_shutdown_signal(signum, frame):
+        signal_name = signal.Signals(signum).name
+        logger.info(f"Graceful shutdown started: stopping new requests, waiting up to 30s for in-flight requests to complete")
+        # Initiate graceful shutdown with 30s grace period
+        shutdown_event = server.stop(grace=30)
+        
+        def wait_for_shutdown():
+            shutdown_event.wait()
+            if shutdown_event.is_set():
+                logger.info("Graceful shutdown completed: all in-flight requests finished, exiting")
+            else:
+                logger.warning("Graceful shutdown timed out after 30s: force terminating with active in-flight requests remaining")
+        
+        # Wait for shutdown to complete
+        wait_for_shutdown()
+        os._exit(0)
+    
+    # Register signal handlers for SIGTERM and SIGINT
+    signal.signal(signal.SIGTERM, handle_shutdown_signal)
+    signal.signal(signal.SIGINT, handle_shutdown_signal)
+    
+    # Wait for server termination
     server.wait_for_termination()
