@@ -294,15 +294,61 @@ server.bindAsync(address, serverCredentials, (err, port) => {
 
   // Liveness endpoint - always returns UP when process is running
   app.get('/health/liveness', (req, res) => {
-    res.status(200).json({
-      status: 'UP',
-      timestamp: new Date().toISOString(),
-      version: process.env.IMAGE_VERSION || 'unknown'
-    });
+    const start = Date.now();
+    const span = opentelemetry.trace.getTracer('paymentservice').startSpan('GET /health/liveness');
+    try {
+      res.status(200).json({
+        status: 'UP',
+        timestamp: new Date().toISOString(),
+        version: process.env.IMAGE_VERSION || 'unknown'
+      });
+      span.setAttributes({
+        'http.method': 'GET',
+        'http.route': '/health/liveness',
+        'http.status_code': 200
+      });
+      logger.info({
+        method: 'GET',
+        path: '/health/liveness',
+        status: 200,
+        duration: Date.now() - start,
+        timestamp: new Date().toISOString()
+      });
+    } finally {
+      span.end();
+    }
+  });
+  
+  // New required /health/live endpoint per issue #1238
+  app.get('/health/live', (req, res) => {
+    const start = Date.now();
+    const tracer = opentelemetry.trace.getTracer('paymentservice');
+    const span = tracer.startSpan('GET /health/live');
+    
+    try {
+      res.status(200).json({ status: 'UP' });
+      
+      span.setAttributes({
+        'http.method': 'GET',
+        'http.route': '/health/live',
+        'http.status_code': 200
+      });
+      
+      logger.info({
+        method: 'GET',
+        path: '/health/live',
+        status: 200,
+        duration: Date.now() - start
+      });
+    } finally {
+      span.end();
+    }
   });
 
   // Readiness endpoint - checks all required dependencies
   app.get('/health/readiness', async (req, res) => {
+    const start = Date.now();
+    const span = opentelemetry.trace.getTracer('paymentservice').startSpan('GET /health/readiness');
     const errors = [];
     const dependencies = {};
 
@@ -341,18 +387,91 @@ server.bindAsync(address, serverCredentials, (err, port) => {
       errors.push(`postgres connection failed: ${err.message}`);
     }
 
+    let statusCode;
     if (errors.length > 0) {
-      res.status(503).json({
+      statusCode = 503;
+      res.status(statusCode).json({
         status: 'DOWN',
         timestamp: new Date().toISOString(),
         errors: errors
       });
     } else {
-      res.status(200).json({
+      statusCode = 200;
+      res.status(statusCode).json({
         status: 'UP',
         timestamp: new Date().toISOString(),
         dependencies: dependencies
       });
+    }
+    
+    span.setAttributes({
+      'http.method': 'GET',
+      'http.route': '/health/readiness',
+      'http.status_code': statusCode
+    });
+    
+    logger.info({
+      method: 'GET',
+      path: '/health/readiness',
+      status: statusCode,
+      duration: Date.now() - start,
+      errors: errors.length > 0 ? errors : undefined
+    });
+    
+    span.end();
+  });
+  
+  // New required /health/ready endpoint per issue #1238
+  app.get('/health/ready', async (req, res) => {
+    const start = Date.now();
+    const tracer = opentelemetry.trace.getTracer('paymentservice');
+    const span = tracer.startSpan('GET /health/ready');
+    
+    try {
+      // Check if all dependencies are initialized
+      await new Promise((resolve, reject) => {
+        healthClient.check({ service: '' }, (err, response) => {
+          if (err) return reject(err);
+          if (response.status !== health.servingStatus.SERVING) return reject(new Error('gRPC server not serving'));
+          resolve();
+        });
+      });
+      
+      // If all checks pass
+      res.status(200).json({ status: 'READY' });
+      
+      span.setAttributes({
+        'http.method': 'GET',
+        'http.route': '/health/ready',
+        'http.status_code': 200
+      });
+      
+      logger.info({
+        method: 'GET',
+        path: '/health/ready',
+        status: 200,
+        duration: Date.now() - start
+      });
+    } catch (err) {
+      // If any check fails
+      res.status(503).json({ status: 'NOT_READY' });
+      
+      span.setAttributes({
+        'http.method': 'GET',
+        'http.route': '/health/ready',
+        'http.status_code': 503,
+        'error.message': err.message
+      });
+      
+      logger.info({
+        method: 'GET',
+        path: '/health/ready',
+        status: 503,
+        duration: Date.now() - start,
+        error: err.message
+      });
+    } finally {
+      span.end();
     }
   });
 
