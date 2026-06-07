@@ -27,6 +27,12 @@ import io.grpc.Server
 import io.grpc.ServerBuilder
 import io.grpc.protobuf.services.HealthStatusManager
 import io.grpc.health.v1.HealthCheckResponse.ServingStatus
+import io.grpc.netty.shaded.io.grpc.netty.GrpcSslContexts
+import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder
+import io.grpc.netty.shaded.io.netty.handler.ssl.ClientAuth
+import io.grpc.netty.shaded.io.netty.handler.ssl.SslContext
+import java.io.File
+import java.io.FileInputStream
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
@@ -297,7 +303,137 @@ data class FlagdClientConfig(
     }
 }
 
+data class GrpcTlsConfig(
+    val enabled: Boolean,
+    val certPath: String,
+    val keyPath: String,
+    val clientCaPath: String,
+    val plaintextEnabled: Boolean
+) {
+    companion object {
+        fun load(): GrpcTlsConfig {
+            return GrpcTlsConfig(
+                enabled = System.getenv("GRPC_TLS_ENABLED")?.toBoolean() ?: false,
+                certPath = System.getenv("GRPC_TLS_CERT_PATH") ?: "",
+                keyPath = System.getenv("GRPC_TLS_KEY_PATH") ?: "",
+                clientCaPath = System.getenv("GRPC_TLS_CLIENT_CA_PATH") ?: "",
+                plaintextEnabled = System.getenv("GRPC_PLAINTEXT_ENABLED")?.toBoolean() ?: true
+            )
+        }
+
+        fun validate(config: GrpcTlsConfig) {
+            if (!config.enabled) return
+
+            if (config.certPath.isBlank()) {
+                throw IllegalArgumentException("GRPC_TLS_CERT_PATH must be set when GRPC_TLS_ENABLED is true")
+            }
+            if (config.keyPath.isBlank()) {
+                throw IllegalArgumentException("GRPC_TLS_KEY_PATH must be set when GRPC_TLS_ENABLED is true")
+            }
+
+            val certFile = File(config.certPath)
+            if (!certFile.exists() || !certFile.isFile || !certFile.canRead()) {
+                throw IllegalArgumentException("GRPC_TLS_CERT_PATH points to non-existent, unreadable, or non-file path: ${config.certPath}")
+            }
+
+            val keyFile = File(config.keyPath)
+            if (!keyFile.exists() || !keyFile.isFile || !keyFile.canRead()) {
+                throw IllegalArgumentException("GRPC_TLS_KEY_PATH points to non-existent, unreadable, or non-file path: ${config.keyPath}")
+            }
+
+            if (config.clientCaPath.isNotBlank()) {
+                val caFile = File(config.clientCaPath)
+                if (!caFile.exists() || !caFile.isFile || !caFile.canRead()) {
+                    throw IllegalArgumentException("GRPC_TLS_CLIENT_CA_PATH points to non-existent, unreadable, or non-file path: ${config.clientCaPath}")
+                }
+            }
+        }
+    }
+}
+
+data class KafkaTlsConfig(
+    val enabled: Boolean,
+    val certPath: String,
+    val keyPath: String,
+    val caPath: String
+) {
+    companion object {
+        fun load(): KafkaTlsConfig {
+            return KafkaTlsConfig(
+                enabled = System.getenv("KAFKA_TLS_ENABLED")?.toBoolean() ?: false,
+                certPath = System.getenv("KAFKA_TLS_CERT_PATH") ?: "",
+                keyPath = System.getenv("KAFKA_TLS_KEY_PATH") ?: "",
+                caPath = System.getenv("KAFKA_TLS_CA_PATH") ?: ""
+            )
+        }
+
+        fun validate(config: KafkaTlsConfig) {
+            if (!config.enabled) return
+
+            if (config.caPath.isBlank()) {
+                throw IllegalArgumentException("KAFKA_TLS_CA_PATH must be set when KAFKA_TLS_ENABLED is true")
+            }
+
+            val caFile = File(config.caPath)
+            if (!caFile.exists() || !caFile.isFile || !caFile.canRead()) {
+                throw IllegalArgumentException("KAFKA_TLS_CA_PATH points to non-existent, unreadable, or non-file path: ${config.caPath}")
+            }
+
+            if (config.certPath.isNotBlank() || config.keyPath.isNotBlank()) {
+                if (config.certPath.isBlank()) {
+                    throw IllegalArgumentException("KAFKA_TLS_CERT_PATH must be set when KAFKA_TLS_KEY_PATH is provided")
+                }
+                if (config.keyPath.isBlank()) {
+                    throw IllegalArgumentException("KAFKA_TLS_KEY_PATH must be set when KAFKA_TLS_CERT_PATH is provided")
+                }
+
+                val certFile = File(config.certPath)
+                if (!certFile.exists() || !certFile.isFile || !certFile.canRead()) {
+                    throw IllegalArgumentException("KAFKA_TLS_CERT_PATH points to non-existent, unreadable, or non-file path: ${config.certPath}")
+                }
+
+                val keyFile = File(config.keyPath)
+                if (!keyFile.exists() || !keyFile.isFile || !keyFile.canRead()) {
+                    throw IllegalArgumentException("KAFKA_TLS_KEY_PATH points to non-existent, unreadable, or non-file path: ${config.keyPath}")
+                }
+            }
+        }
+    }
+}
+
+fun buildGrpcSslContext(config: GrpcTlsConfig): SslContext {
+    val sslContextBuilder = GrpcSslContexts.forServer(File(config.certPath), File(config.keyPath))
+
+    if (config.clientCaPath.isNotBlank()) {
+        sslContextBuilder.trustManager(File(config.clientCaPath))
+        sslContextBuilder.clientAuth(ClientAuth.REQUIRE)
+    } else {
+        sslContextBuilder.clientAuth(ClientAuth.NONE)
+    }
+
+    return sslContextBuilder.build()
+}
+
+fun buildKafkaSslProperties(props: Properties, config: KafkaTlsConfig) {
+    props["security.protocol"] = "SSL"
+    props["ssl.truststore.type"] = "PEM"
+    props["ssl.truststore.location"] = config.caPath
+
+    if (config.certPath.isNotBlank() && config.keyPath.isNotBlank()) {
+        props["ssl.keystore.type"] = "PEM"
+        props["ssl.keystore.certificate.chain"] = FileInputStream(config.certPath).use { it.readAllBytes().toString(Charsets.UTF_8) }
+        props["ssl.keystore.private.key"] = FileInputStream(config.keyPath).use { it.readAllBytes().toString(Charsets.UTF_8) }
+    }
+}
+
 fun main() {
+    // Load and validate TLS configurations first
+    val grpcTlsConfig = GrpcTlsConfig.load()
+    val kafkaTlsConfig = KafkaTlsConfig.load()
+
+    GrpcTlsConfig.validate(grpcTlsConfig)
+    KafkaTlsConfig.validate(kafkaTlsConfig)
+
     val flagdConfig = FlagdClientConfig.load()
     
     val options = FlagdOptions.builder()
@@ -323,6 +459,12 @@ fun main() {
         exitProcess(1)
     }
     props[BOOTSTRAP_SERVERS_CONFIG] = bootstrapServers
+
+    // Apply Kafka TLS configuration if enabled
+    if (kafkaTlsConfig.enabled) {
+        buildKafkaSslProperties(props, kafkaTlsConfig)
+    }
+
     val consumer = KafkaConsumer<String, ByteArray>(props).apply {
         subscribe(listOf(topic))
     }
@@ -333,16 +475,40 @@ fun main() {
 
     // Configure health port
     val healthPort = System.getenv("FRAUD_DETECTION_HEALTH_PORT")?.toIntOrNull() ?: DEFAULT_HEALTH_PORT
-    val grpcServer: Server = ServerBuilder.forPort(healthPort)
-        .addService(healthStatusManager.healthService)
-        .build()
-        .start()
+    val grpcPort = System.getenv("FRAUD_DETECTION_GRPC_PORT")?.toIntOrNull() ?: 50051
 
-    logger.info("Health check server started on port $healthPort")
+    val servers = mutableListOf<Server>()
+
+    // Start plaintext gRPC server if enabled
+    if (grpcTlsConfig.plaintextEnabled) {
+        val plaintextServer = ServerBuilder.forPort(healthPort)
+            .addService(healthStatusManager.healthService)
+            .build()
+            .start()
+        servers.add(plaintextServer)
+        logger.info("Plaintext gRPC server started on port $healthPort")
+    }
+
+    // Start TLS gRPC server if enabled
+    if (grpcTlsConfig.enabled) {
+        val sslContext = buildGrpcSslContext(grpcTlsConfig)
+        val tlsServer = NettyServerBuilder.forPort(grpcPort)
+            .addService(healthStatusManager.healthService)
+            .sslContext(sslContext)
+            .build()
+            .start()
+        servers.add(tlsServer)
+        logger.info("TLS gRPC server started on port $grpcPort")
+    }
+
+    if (servers.isEmpty()) {
+        logger.error("No gRPC servers configured. Either GRPC_PLAINTEXT_ENABLED or GRPC_TLS_ENABLED must be true.")
+        exitProcess(1)
+    }
 
     // Initialize graceful shutdown manager
     val shutdownManager = GracefulShutdownManagerImpl()
-    shutdownManager.registerResources(grpcServer, consumer)
+    shutdownManager.registerResources(servers.first(), consumer) // TODO: handle multiple servers if needed
 
     // Register signal handlers for SIGINT (2) and SIGTERM (15)
     val signalHandler = SignalHandler { signal ->
