@@ -96,6 +96,22 @@ internal class KafkaHealthCheck : IHealthCheck
         try
         {
             var config = new AdminClientConfig { BootstrapServers = _bootstrapServers };
+            
+            var (kafkaTlsEnabled, caCertPath, clientCertPath, clientKeyPath) = TlsConfiguration.GetKafkaTlsConfig();
+            
+            if (kafkaTlsEnabled)
+            {
+                config.SecurityProtocol = SecurityProtocol.Ssl;
+                config.SslCaLocation = caCertPath;
+                config.SslEndpointIdentificationAlgorithm = SslEndpointIdentificationAlgorithm.Https;
+
+                if (!string.IsNullOrWhiteSpace(clientCertPath) && !string.IsNullOrWhiteSpace(clientKeyPath))
+                {
+                    config.SslCertificateLocation = clientCertPath;
+                    config.SslKeyLocation = clientKeyPath;
+                }
+            }
+            
             using var adminClient = new AdminClientBuilder(config).Build();
             
             // Simple metadata query to verify connection
