@@ -1,14 +1,14 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use actix_web::{web, App, HttpServer};
+use actix_web::{dev::ServerHandle, web, App, HttpServer};
 use open_feature::provider::{FeatureProvider, NoOpProvider};
 use open_feature_flagd::{FlagdOptions, FlagdProvider};
 use opentelemetry_instrumentation_actix_web::{RequestMetrics, RequestTracing};
 use std::env;
 use std::sync::Arc;
+use tokio::signal::unix::{signal, SignalKind};
 use tracing::{info, warn, error};
-
 mod telemetry_conf;
 use telemetry_conf::init_otel;
 mod shipping_service;
@@ -108,6 +108,30 @@ pub async fn app() -> App {
         .service(health_check)
 }
 
+async fn handle_shutdown(handle: ServerHandle) {
+    // Listen for SIGINT and SIGTERM
+    let mut sigint = signal(SignalKind::interrupt()).expect("Failed to register SIGINT handler");
+    let mut sigterm = signal(SignalKind::terminate()).expect("Failed to register SIGTERM handler");
+
+    // Wait for either signal
+    tokio::select! {
+        _ = sigint.recv() => {},
+        _ = sigterm.recv() => {},
+    }
+
+    warn!("Received shutdown signal, starting graceful shutdown. Waiting up to 30 seconds for in-flight requests to complete.");
+
+    // Trigger graceful shutdown with timeout
+    match tokio::time::timeout(tokio::time::Duration::from_secs(30), handle.stop(true)).await {
+        Ok(_) => {
+            info!("Graceful shutdown completed successfully. All in-flight requests processed.");
+        }
+        Err(_) => {
+            warn!("Graceful shutdown timed out after 30 seconds. Terminating remaining in-flight requests.");
+        }
+    }
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     match init_otel() {
@@ -140,8 +164,15 @@ async fn main() -> std::io::Result<()> {
         message = "Shipping service is running"
     );
 
-    HttpServer::new(move || app())
+    let server = HttpServer::new(move || app())
+        .shutdown_timeout(30)
         .bind(&addr)?
-        .run()
-        .await
+        .run();
+
+    // Get server handle for shutdown
+    let handle = server.handle();
+    // Spawn shutdown handler task
+    tokio::spawn(handle_shutdown(handle));
+
+    server.await
 }
