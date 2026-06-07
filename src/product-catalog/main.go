@@ -22,11 +22,15 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/cenkalti/backoff/v4"
+	"github.com/jackc/pgerrcode"
+	"github.com/lib/pq"
 	_ "github.com/lib/pq"
 	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
@@ -63,6 +67,7 @@ var (
 	alphanumericRegex = regexp.MustCompile(`^[a-zA-Z0-9]*$`)
 	shutdownInProgress atomic.Bool
 	catalogLoaded atomic.Bool
+	defaultDBRetryConfig DBRetryConfig
 	// TLS errors
 	ErrTLSConfigMissingCert = errors.New("TLS config missing certificate path")
 	ErrTLSConfigMissingKey  = errors.New("TLS config missing private key path")
@@ -70,6 +75,159 @@ var (
 	ErrTLSInvalidCert       = errors.New("invalid TLS certificate/key")
 	ErrTLSInvalidCA         = errors.New("invalid CA bundle")
 )
+
+// DBRetryConfig holds retry configuration for PostgreSQL operations
+type DBRetryConfig struct {
+	MaxRetries       int           // Maximum number of retries (default 3)
+	InitialBackoff   time.Duration // Initial backoff interval (default 100ms)
+	MaxBackoff       time.Duration // Maximum backoff interval (default 1s)
+}
+
+// RetryableDBFunc is the signature for read-only PostgreSQL operations that support retries
+type RetryableDBFunc func(ctx context.Context) error
+
+// transientPGErrorCodes contains the list of PostgreSQL error codes that are considered transient and retryable
+var transientPGErrorCodes = map[string]bool{
+	pgerrcode.ConnectionFailure:    true, // 08006
+	pgerrcode.SerializationFailure: true, // 40001
+	pgerrcode.TooManyConnections:   true, // 53300
+	pgerrcode.AdminShutdown:        true, // 57P01
+	pgerrcode.CrashShutdown:        true, // 57P02
+	pgerrcode.InternalError:        true, // XX000
+}
+
+// isTransientError checks if an error is a transient error that should be retried
+func isTransientError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Check for context cancellation/deadline errors
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	// Check for network errors
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return netErr.Timeout() || netErr.Temporary()
+	}
+
+	// Check for PostgreSQL errors
+	var pqErr *pq.Error
+	if errors.As(err, &pqErr) {
+		return transientPGErrorCodes[string(pqErr.Code)]
+	}
+
+	// Check for wrapped transient errors
+	var cause = errors.Unwrap(err)
+	if cause != nil {
+		return isTransientError(cause)
+	}
+
+	return false
+}
+
+// NewDefaultDBRetryConfig creates a new DBRetryConfig with default values, overridden by environment variables if present
+func NewDefaultDBRetryConfig() DBRetryConfig {
+	cfg := DBRetryConfig{
+		MaxRetries:     3,
+		InitialBackoff: 100 * time.Millisecond,
+		MaxBackoff:     1 * time.Second,
+	}
+
+	// Check for environment variable override
+	if retryCountStr := os.Getenv("PRODUCT_CATALOG_DB_RETRY_COUNT"); retryCountStr != "" {
+		if retryCount, err := strconv.Atoi(retryCountStr); err == nil && retryCount >= 0 {
+			cfg.MaxRetries = retryCount
+		}
+	}
+
+	return cfg
+}
+
+// WithDBRetries executes the provided read-only DB function with retry logic
+// according to the provided configuration
+func WithDBRetries(ctx context.Context, cfg DBRetryConfig, operationName string, fn RetryableDBFunc) error {
+	if cfg.MaxRetries <= 0 {
+		// No retries configured, execute once
+		return fn(ctx)
+	}
+
+	// Create exponential backoff
+	expBackoff := backoff.NewExponentialBackOff()
+	expBackoff.InitialInterval = cfg.InitialBackoff
+	expBackoff.MaxInterval = cfg.MaxBackoff
+	expBackoff.Multiplier = 2.0
+	expBackoff.Reset()
+
+	var lastErr error
+	for attempt := 0; attempt <= cfg.MaxRetries; attempt++ {
+		// Check if context is cancelled before attempting
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		err := fn(ctx)
+		if err == nil {
+			// Success
+			return nil
+		}
+
+		lastErr = err
+
+		// Check if error is transient
+		if !isTransientError(err) {
+			// Non-transient error, return immediately
+			return err
+		}
+
+		// If this is the last attempt, don't backoff
+		if attempt == cfg.MaxRetries {
+			break
+		}
+
+		// Log retry attempt
+		logger.InfoContext(ctx, "Retrying transient database error",
+			slog.Int("attempt", attempt+1),
+			slog.String("error", err.Error()),
+			slog.String("operation", operationName),
+		)
+
+		// Add trace attribute
+		span := trace.SpanFromContext(ctx)
+		span.SetAttributes(attribute.Int("db.retry_attempt", attempt+1))
+
+		// Wait for backoff or context cancellation
+		nextBackoff := expBackoff.NextBackOff()
+		if nextBackoff == backoff.Stop {
+			break
+		}
+
+		timer := time.NewTimer(nextBackoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+
+	// All retries exhausted
+	logger.ErrorContext(ctx, "All database retry attempts exhausted",
+		slog.Int("total_attempts", cfg.MaxRetries+1),
+		slog.String("final_error", lastErr.Error()),
+		slog.String("operation", operationName),
+	)
+
+	// Add trace attribute for exhausted retries
+	span := trace.SpanFromContext(ctx)
+	span.SetAttributes(attribute.Bool("db.retries_exhausted", true))
+
+	return lastErr
+}
 
 // TLSConfig holds validated TLS configuration for the gRPC server
 type TLSConfig struct {
@@ -201,6 +359,8 @@ type productCatalog struct {
 
 func init() {
 	logger = otelslog.NewLogger("product-catalog")
+	// Initialize default DB retry config
+	defaultDBRetryConfig = NewDefaultDBRetryConfig()
 	// Register health endpoints for tests and runtime
 	http.HandleFunc("/health/liveness", healthLivenessHandler)
 	http.HandleFunc("/health/readiness", healthReadinessHandler)
@@ -376,24 +536,29 @@ func loadProductsFromDB(ctx context.Context) ([]*pb.Product, error) {
 		return nil, fmt.Errorf("database connection not initialized")
 	}
 
-	// Query all products with categories
-	rows, err := db.QueryContext(ctx, `
-		SELECT p.id, p.name, p.description, p.picture, 
-		       p.price_currency_code, p.price_units, p.price_nanos, p.categories
-		FROM catalog.products p
-		ORDER BY p.id
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query products: %w", err)
-	}
-	defer rows.Close()
+	var products []*pb.Product
+	err := WithDBRetries(ctx, defaultDBRetryConfig, "load_products", func(ctx context.Context) error {
+		// Query all products with categories
+		rows, err := db.QueryContext(ctx, `
+			SELECT p.id, p.name, p.description, p.picture, 
+			       p.price_currency_code, p.price_units, p.price_nanos, p.categories
+			FROM catalog.products p
+			ORDER BY p.id
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to query products: %w", err)
+		}
+		defer rows.Close()
 
-	products, err := getProductsFromRows(ctx, rows)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get products from rows: %w", err)
-	}
+		products, err = getProductsFromRows(ctx, rows)
+		if err != nil {
+			return fmt.Errorf("failed to get products from rows: %w", err)
+		}
 
-	return products, nil
+		return nil
+	})
+
+	return products, err
 }
 
 func searchProductsFromDB(ctx context.Context, query string) ([]*pb.Product, error) {
@@ -401,26 +566,31 @@ func searchProductsFromDB(ctx context.Context, query string) ([]*pb.Product, err
 		return nil, fmt.Errorf("database connection not initialized")
 	}
 
-	// Query products matching search query in name or description
-	searchPattern := "%" + strings.ToLower(query) + "%"
-	rows, err := db.QueryContext(ctx, `
-		SELECT p.id, p.name, p.description, p.picture, 
-		       p.price_currency_code, p.price_units, p.price_nanos, p.categories
-		FROM catalog.products p
-		WHERE LOWER(p.name) LIKE $1 OR LOWER(p.description) LIKE $1
-		ORDER BY p.id
-	`, searchPattern)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query products: %w", err)
-	}
-	defer rows.Close()
+	var products []*pb.Product
+	err := WithDBRetries(ctx, defaultDBRetryConfig, "search_products", func(ctx context.Context) error {
+		// Query products matching search query in name or description
+		searchPattern := "%" + strings.ToLower(query) + "%"
+		rows, err := db.QueryContext(ctx, `
+			SELECT p.id, p.name, p.description, p.picture, 
+			       p.price_currency_code, p.price_units, p.price_nanos, p.categories
+			FROM catalog.products p
+			WHERE LOWER(p.name) LIKE $1 OR LOWER(p.description) LIKE $1
+			ORDER BY p.id
+		`, searchPattern)
+		if err != nil {
+			return fmt.Errorf("failed to query products: %w", err)
+		}
+		defer rows.Close()
 
-	products, err := getProductsFromRows(ctx, rows)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get products from rows: %w", err)
-	}
+		products, err = getProductsFromRows(ctx, rows)
+		if err != nil {
+			return fmt.Errorf("failed to get products from rows: %w", err)
+		}
 
-	return products, nil
+		return nil
+	})
+
+	return products, err
 }
 
 func getProductFromDB(ctx context.Context, productID string) (*pb.Product, error) {
@@ -428,26 +598,32 @@ func getProductFromDB(ctx context.Context, productID string) (*pb.Product, error
 		return nil, fmt.Errorf("database connection not initialized")
 	}
 
-	// Query single product by ID
-	row := db.QueryRowContext(ctx, `
-		SELECT p.id, p.name, p.description, p.picture, 
-		       p.price_currency_code, p.price_units, p.price_nanos, p.categories
-		FROM catalog.products p
-		WHERE p.id = $1
-	`, productID)
+	var product *pb.Product
+	err := WithDBRetries(ctx, defaultDBRetryConfig, "get_product", func(ctx context.Context) error {
+		// Query single product by ID
+		row := db.QueryRowContext(ctx, `
+			SELECT p.id, p.name, p.description, p.picture, 
+			       p.price_currency_code, p.price_units, p.price_nanos, p.categories
+			FROM catalog.products p
+			WHERE p.id = $1
+		`, productID)
 
-	var id, name, description, picture, currencyCode, categoriesStr string
-	var units int64
-	var nanos int32
+		var id, name, description, picture, currencyCode, categoriesStr string
+		var units int64
+		var nanos int32
 
-	if err := row.Scan(&id, &name, &description, &picture, &currencyCode, &units, &nanos, &categoriesStr); err != nil {
-		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("product not found")
+		if err := row.Scan(&id, &name, &description, &picture, &currencyCode, &units, &nanos, &categoriesStr); err != nil {
+			if err == sql.ErrNoRows {
+				return fmt.Errorf("product not found")
+			}
+			return fmt.Errorf("failed to scan product row: %w", err)
 		}
-		return nil, fmt.Errorf("failed to scan product row: %w", err)
-	}
 
-	return parseProductRow(id, name, description, picture, currencyCode, categoriesStr, units, nanos), nil
+		product = parseProductRow(id, name, description, picture, currencyCode, categoriesStr, units, nanos)
+		return nil
+	})
+
+	return product, err
 }
 
 func getProductsFromRows(ctx context.Context, rows *sql.Rows) ([]*pb.Product, error) {
@@ -565,7 +741,9 @@ func healthReadinessHandler(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// Test if DB is accessible
 		var count int
-		err := db.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM catalog.products").Scan(&count)
+		err := WithDBRetries(r.Context(), defaultDBRetryConfig, "health_check", func(ctx context.Context) error {
+			return db.QueryRowContext(ctx, "SELECT COUNT(*) FROM catalog.products").Scan(&count)
+		})
 		if err != nil {
 			statusCode = http.StatusServiceUnavailable
 			errMsg = fmt.Sprintf("failed to access catalog: %v", err)
