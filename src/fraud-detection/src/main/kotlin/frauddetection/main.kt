@@ -33,6 +33,42 @@ import kotlin.concurrent.thread
 import sun.misc.Signal
 import sun.misc.SignalHandler
 
+// Validation types
+sealed class Result<out T> {
+    data class Success<out T>(val value: T) : Result<T>()
+    data class Failure(val error: Exception) : Result<Nothing>()
+}
+
+data class ValidatedAddress(
+    val street: String,
+    val city: String,
+    val postalCode: String,
+    val country: String
+)
+
+data class OrderItem(
+    val id: String,
+    val name: String,
+    val quantity: Int,
+    val price: Long
+)
+
+data class ValidatedOrder(
+    val orderId: String,
+    val userId: String,
+    val items: List<OrderItem>,
+    val shippingAddress: ValidatedAddress,
+    val paymentMethodId: String,
+    val totalAmount: Long
+)
+
+sealed class OrderValidationError(message: String) : Exception(message) {
+    class MalformedProtobuf(message: String = "Failed to deserialize Protobuf message") : OrderValidationError(message)
+    class MissingRequiredField(field: String) : OrderValidationError("Missing required field: $field")
+    class InvalidFieldValue(field: String, reason: String) : OrderValidationError("Invalid value for field $field: $reason")
+    class FieldTooLong(field: String, maxLength: Int) : OrderValidationError("Field $field exceeds maximum allowed length $maxLength")
+}
+
 const val topic = "orders"
 const val groupID = "fraud-detection"
 const val DEFAULT_HEALTH_PORT = 9091
@@ -111,6 +147,98 @@ class GracefulShutdownManagerImpl : GracefulShutdownManager {
             return shutdownCompleted
         }
         return true
+    }
+    }
+}
+
+/**
+ * Validates and sanitizes incoming OrderResult messages from Kafka orders topic
+ * @param message Raw Kafka consumer record value (bytes)
+ * @return Result<ValidatedOrder>: Success with sanitized valid order, Failure with validation error
+ */
+fun validateOrderMessage(message: ByteArray): Result<ValidatedOrder> {
+    return try {
+        val order = OrderResult.parseFrom(message)
+        
+        // Validate required fields
+        if (order.orderId.isNullOrBlank()) {
+            return Result.Failure(OrderValidationError.MissingRequiredField("order_id"))
+        }
+        if (order.userId.isNullOrBlank()) {
+            return Result.Failure(OrderValidationError.MissingRequiredField("user_id"))
+        }
+        if (order.itemsList.isNullOrEmpty()) {
+            return Result.Failure(OrderValidationError.InvalidFieldValue("items", "list is empty"))
+        }
+        if (!order.hasShippingAddress()) {
+            return Result.Failure(OrderValidationError.MissingRequiredField("shipping_address"))
+        }
+        val shippingAddress = order.shippingAddress
+        if (shippingAddress.street.isNullOrBlank()) {
+            return Result.Failure(OrderValidationError.MissingRequiredField("shipping_address.street"))
+        }
+        if (shippingAddress.city.isNullOrBlank()) {
+            return Result.Failure(OrderValidationError.MissingRequiredField("shipping_address.city"))
+        }
+        if (shippingAddress.postalCode.isNullOrBlank()) {
+            return Result.Failure(OrderValidationError.MissingRequiredField("shipping_address.postal_code"))
+        }
+        if (shippingAddress.country.isNullOrBlank()) {
+            return Result.Failure(OrderValidationError.MissingRequiredField("shipping_address.country"))
+        }
+        if (order.paymentMethodId.isNullOrBlank()) {
+            return Result.Failure(OrderValidationError.MissingRequiredField("payment_method_id"))
+        }
+        
+        // Calculate total amount and validate it's non-negative
+        var totalNanos: Long = 0
+        for (item in order.itemsList) {
+            val cost = item.cost
+            totalNanos += cost.units * 1_000_000_000L + cost.nanos
+        }
+        totalNanos += order.shippingCost.units * 1_000_000_000L + order.shippingCost.nanos
+        
+        if (totalNanos < 0) {
+            return Result.Failure(OrderValidationError.InvalidFieldValue("total_amount", "value is negative"))
+        }
+        
+        // Sanitize string fields: trim and truncate to max lengths
+        val sanitizedOrderId = order.orderId.trim().take(64)
+        val sanitizedUserId = order.userId.trim().take(64)
+        val sanitizedPaymentMethodId = order.paymentMethodId.trim().take(64)
+        
+        val sanitizedAddress = ValidatedAddress(
+            street = shippingAddress.street.trim().take(256),
+            city = shippingAddress.city.trim().take(256),
+            postalCode = shippingAddress.postalCode.trim().take(256),
+            country = shippingAddress.country.trim().take(256)
+        )
+        
+        val sanitizedItems = order.itemsList.map { item ->
+            OrderItem(
+                id = item.itemId.trim().take(64),
+                name = item.name.trim().take(256),
+                quantity = item.quantity,
+                price = item.cost.units * 1_000_000_000L + item.cost.nanos
+            )
+        }
+        
+        Result.Success(
+            ValidatedOrder(
+                orderId = sanitizedOrderId,
+                userId = sanitizedUserId,
+                items = sanitizedItems,
+                shippingAddress = sanitizedAddress,
+                paymentMethodId = sanitizedPaymentMethodId,
+                totalAmount = totalNanos
+            )
+        )
+    } catch (e: Exception) {
+        if (e is com.google.protobuf.InvalidProtocolBufferException) {
+            Result.Failure(OrderValidationError.MalformedProtobuf())
+        } else {
+            Result.Failure(e)
+        }
     }
 }
 
@@ -231,28 +359,29 @@ fun main() {
                 }
                 totalCount = records
                     .fold(totalCount) { accumulator, record ->
-                        val orders = OrderResult.parseFrom(record.value())
+                        val validationResult = validateOrderMessage(record.value())
                         
-                        // Validate order amount per AC-1: check if total amount is negative or zero
-                        var totalNanos: Long = 0
-                        for (item in orders.itemsList) {
-                            val cost = item.cost
-                            totalNanos += cost.units * 1_000_000_000L + cost.nanos
+                        when (validationResult) {
+                            is Result.Success -> {
+                                val validatedOrder = validationResult.value
+                                
+                                val newCount = accumulator + 1
+                                if (getFeatureFlagValue("kafkaQueueProblems") > 0) {
+                                    logger.info("FeatureFlag 'kafkaQueueProblems' is enabled, sleeping 1 second")
+                                    Thread.sleep(1000)
+                                }
+                                logger.info("Consumed record with orderId: ${validatedOrder.orderId}, and updated total count to: $newCount")
+                                newCount
+                            }
+                            is Result.Failure -> {
+                                logger.warn(
+                                    "Validation failed for record from topic ${record.topic()}, partition ${record.partition()}, offset ${record.offset()}: ${validationResult.error.message}",
+                                    validationResult.error
+                                )
+                                // Skip processing, commit offset normally
+                                accumulator + 1
+                            }
                         }
-                        totalNanos += orders.shippingCost.units * 1_000_000_000L + orders.shippingCost.nanos
-                        
-                        if (totalNanos <= 0) {
-                            logger.warn("Order ID {} has invalid amount (null or negative). Skipping further processing.", orders.orderId)
-                            return@fold accumulator + 1
-                        }
-                        
-                        val newCount = accumulator + 1
-                        if (getFeatureFlagValue("kafkaQueueProblems") > 0) {
-                            logger.info("FeatureFlag 'kafkaQueueProblems' is enabled, sleeping 1 second")
-                            Thread.sleep(1000)
-                        }
-                        logger.info("Consumed record with orderId: ${orders.orderId}, and updated total count to: $newCount")
-                        newCount
                     }
             }
         } catch (e: WakeupException) {
