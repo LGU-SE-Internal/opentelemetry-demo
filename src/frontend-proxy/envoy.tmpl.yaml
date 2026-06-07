@@ -221,6 +221,38 @@ static_resources:
                       healthy_body:
                         inline_string: "ok"
                       unhealthy_status: 503
+{{ $rateLimitRPS := getenv "FRONTEND_PROXY_RATE_LIMIT_RPS" "100" }}
+                  - name: envoy.filters.http.local_ratelimit
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+                      stat_prefix: "http_local_rate_limit"
+                      token_bucket:
+                        max_tokens: {{ $rateLimitRPS }}
+                        tokens_per_fill: {{ $rateLimitRPS }}
+                        fill_interval: "1s"
+                      response_headers_to_add:
+                        - append: false
+                          header:
+                            key: "x-envoy-ratelimited"
+                            value: "true"
+                        - append: false
+                          header:
+                            key: "retry-after"
+                            value: "1"
+                      enable_x_ratelimit_headers: DRAFT_VERSION_03
+                      filter_enabled:
+                        runtime_key: "local_rate_limit_enabled"
+                        default_value:
+                          numerator: 100
+                          denominator: HUNDRED
+                      filter_enforced:
+                        runtime_key: "local_rate_limit_enforced"
+                        default_value:
+                          numerator: 100
+                          denominator: HUNDRED
+                      match:
+                        path:
+                          prefix: "/"
                   - name: envoy.filters.http.router
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
