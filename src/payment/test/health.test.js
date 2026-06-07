@@ -65,20 +65,20 @@ describe('Payment Service Health Endpoint Tests', () => {
 
   // AC-5: Docker compose has liveness probe configured
   test('test_ac5_docker_compose_has_liveness_probe_configured', async () => {
-    const dockerComposePath = path.resolve(__dirname, '../../../docker-compose.yml');
+    const dockerComposePath = path.resolve(__dirname, '../../../compose.yaml');
     expect(fs.existsSync(dockerComposePath)).toBe(true);
     const dockerComposeContent = fs.readFileSync(dockerComposePath, 'utf8');
     
     // Check liveness probe config
     expect(dockerComposeContent).toContain('livenessProbe:');
     expect(dockerComposeContent).toContain('path: /health/liveness');
-    expect(dockerComposeContent).toContain('interval: 10s');
-    expect(dockerComposeContent).toContain('timeout: 1s');
+    expect(dockerComposeContent).toContain('periodSeconds: 10');
+    expect(dockerComposeContent).toContain('timeoutSeconds: 1');
   });
 
   // AC-6: Docker compose has readiness probe configured
   test('test_ac6_docker_compose_has_readiness_probe_configured', async () => {
-    const dockerComposePath = path.resolve(__dirname, '../../../docker-compose.yml');
+    const dockerComposePath = path.resolve(__dirname, '../../../compose.yaml');
     expect(fs.existsSync(dockerComposePath)).toBe(true);
     const dockerComposeContent = fs.readFileSync(dockerComposePath, 'utf8');
     
@@ -86,7 +86,7 @@ describe('Payment Service Health Endpoint Tests', () => {
     expect(dockerComposeContent).toContain('readinessProbe:');
     expect(dockerComposeContent).toContain('path: /health/readiness');
     expect(dockerComposeContent).toContain('initialDelaySeconds: 5');
-    expect(dockerComposeContent).toContain('interval: 10s');
-    expect(dockerComposeContent).toContain('timeout: 1s');
+    expect(dockerComposeContent).toContain('periodSeconds: 10');
+    expect(dockerComposeContent).toContain('timeoutSeconds: 1');
   });
 });

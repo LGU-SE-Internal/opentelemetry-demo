@@ -425,7 +425,7 @@ services:
       livenessProbe:
         httpGet:
           path: /health/liveness
-          port: 8080
+          port: ${PAYMENT_PORT}
         initialDelaySeconds: 0
         periodSeconds: 10
         timeoutSeconds: 1
@@ -433,7 +433,7 @@ services:
       readinessProbe:
         httpGet:
           path: /health/readiness
-          port: 8080
+          port: ${PAYMENT_PORT}
         initialDelaySeconds: 5
         periodSeconds: 10
         timeoutSeconds: 1

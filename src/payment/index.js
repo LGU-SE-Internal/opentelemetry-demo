@@ -265,8 +265,7 @@ server.bindAsync(address, serverCredentials, (err, port) => {
 
   logger.info(`payment gRPC server started on ${address}`)
   
-  // Setup HTTP health endpoint
-  const HEALTH_PORT = process.env.PAYMENT_HEALTH_PORT || 8080;
+  // Setup HTTP health endpoint on same port as gRPC server
   const app = express();
   module.exports.app = app;
 
@@ -362,9 +361,18 @@ server.bindAsync(address, serverCredentials, (err, port) => {
     res.status(404).send();
   });
 
-  // Start health server
-  app.listen(HEALTH_PORT, () => {
-    logger.info(`Payment service health endpoint listening on port ${HEALTH_PORT}`);
+  // Create combined HTTP server that handles both gRPC and HTTP requests
+  const httpServer = require('http').createServer((req, res) => {
+    if (req.headers['content-type']?.startsWith('application/grpc')) {
+      server.emit('request', req, res);
+    } else {
+      app(req, res);
+    }
+  });
+
+  // Start combined server on payment port
+  httpServer.listen(port, ip, () => {
+    logger.info(`Payment service combined gRPC + HTTP health endpoint listening on port ${port}`);
   });
 })
 
