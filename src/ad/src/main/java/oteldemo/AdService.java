@@ -46,6 +46,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
 import org.apache.logging.log4j.Level;
@@ -294,6 +295,11 @@ public final class AdService {
     private static final String AD_HIGH_CPU_FEATURE_FLAG = "adHighCpu";
     private static final Client ffClient = OpenFeatureAPI.getInstance().getClient();
     
+    // Validation constants
+    private static final int MAX_CONTEXT_ENTRIES = 10;
+    private static final int MAX_KEY_LENGTH = 100;
+    private static final int MAX_VALUE_LENGTH = 100;
+    
     private AdServiceImpl() {}
 
     /**
@@ -312,6 +318,50 @@ public final class AdService {
       // get the current span in context
       Span span = Span.current();
       try {
+        // Validate AdRequest context
+        if (req.getContextKeysCount() > MAX_CONTEXT_ENTRIES) {
+          throw Status.INVALID_ARGUMENT
+                  .withDescription(String.format("Too many context entries: %d, maximum allowed is %d", req.getContextKeysCount(), MAX_CONTEXT_ENTRIES))
+                  .asRuntimeException();
+        }
+
+        for (String key : req.getContextKeysList()) {
+          String value = req.getContext(key);
+
+          // Validate key
+          if (key == null || key.isEmpty()) {
+            throw Status.INVALID_ARGUMENT
+                    .withDescription("Context key cannot be null or empty")
+                    .asRuntimeException();
+          }
+          if (key.length() > MAX_KEY_LENGTH) {
+            throw Status.INVALID_ARGUMENT
+                    .withDescription(String.format("Context key '%s' is too long: %d characters, maximum allowed is %d", key, key.length(), MAX_KEY_LENGTH))
+                    .asRuntimeException();
+          }
+
+          // Validate value
+          if (value == null || value.isEmpty()) {
+            throw Status.INVALID_ARGUMENT
+                    .withDescription(String.format("Context value for key '%s' cannot be null or empty", key))
+                    .asRuntimeException();
+          }
+          if (value.length() > MAX_VALUE_LENGTH) {
+            throw Status.INVALID_ARGUMENT
+                    .withDescription(String.format("Context value for key '%s' is too long: %d characters, maximum allowed is %d", key, value.length(), MAX_VALUE_LENGTH))
+                    .asRuntimeException();
+          }
+
+          // Check for forbidden control characters
+          for (char c : value.toCharArray()) {
+            if (c <= 0x1F || c == 0x7F) {
+              throw Status.INVALID_ARGUMENT
+                      .withDescription(String.format("Context value for key '%s' contains forbidden control character (0x%02X)", key, (int) c))
+                      .asRuntimeException();
+            }
+          }
+        }
+
         List<Ad> allAds = new ArrayList<>();
         AdRequestType adRequestType;
         AdResponseType adResponseType;
