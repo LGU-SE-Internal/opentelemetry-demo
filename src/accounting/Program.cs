@@ -105,7 +105,46 @@ app.MapGet("/ready", async context =>
 
 // Start Kafka consumer in background
 var consumer = app.Services.GetRequiredService<Consumer>();
-_ = Task.Run(() => consumer.StartListening(app.Lifetime.ApplicationStopping), app.Lifetime.ApplicationStopping);
+var consumerTask = Task.Run(() => consumer.StartListening(app.Lifetime.ApplicationStopping), app.Lifetime.ApplicationStopping);
+
+// Register graceful shutdown handler
+app.Lifetime.ApplicationStopping.Register(async () =>
+{
+    try
+    {
+        Console.WriteLine("Received shutdown signal, starting graceful shutdown sequence");
+        
+        // Step 1: Pause Kafka consumption immediately
+        consumer.PauseConsumption();
+        
+        // Step 2: Wait for all in-flight processing to complete (max 30s)
+        await consumer.WaitForInFlightProcessingAsync(TimeSpan.FromSeconds(30));
+        
+        // Step 3: Commit all pending offsets
+        await consumer.CommitOffsetsAsync();
+        
+        // Step 4: Dispose consumer and close DB connections
+        consumer.Dispose();
+        
+        Console.WriteLine("Graceful shutdown completed successfully");
+        Environment.ExitCode = 0;
+    }
+    catch (TimeoutException)
+    {
+        Console.Error.WriteLine("Graceful shutdown timed out waiting for in-flight processing");
+        Environment.ExitCode = 1;
+    }
+    catch (KafkaException)
+    {
+        Console.Error.WriteLine("Graceful shutdown failed due to offset commit error");
+        Environment.ExitCode = 1;
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"Unexpected error during graceful shutdown: {ex.Message}");
+        Environment.ExitCode = 1;
+    }
+});
 
 await app.RunAsync();
 

@@ -52,6 +52,7 @@ internal class Consumer : IDisposable
     private int _inFlightMessages = 0;
     private readonly object _lockObj = new();
     private readonly TimeSpan _shutdownTimeout = TimeSpan.FromSeconds(30);
+    private readonly List<ConsumeResult<string, byte[]>> _processedMessagesToCommit = new();
 
     public Consumer(ILogger<Consumer> logger)
     {
@@ -69,6 +70,77 @@ internal class Consumer : IDisposable
        }
 
         _dbConnectionString = Environment.GetEnvironmentVariable("DB_CONNECTION_STRING");
+    }
+
+    public void PauseConsumption()
+    {
+        _logger.LogInformation("Pausing Kafka consumption");
+        var assignments = _consumer.Assignment;
+        if (assignments.Any())
+        {
+            _consumer.Pause(assignments);
+        }
+        _isListening = false;
+    }
+
+    public async Task WaitForInFlightProcessingAsync(TimeSpan? timeout = null)
+    {
+        var waitTimeout = timeout ?? _shutdownTimeout;
+        DateTimeOffset shutdownDeadline = DateTimeOffset.UtcNow.Add(waitTimeout);
+        _logger.LogInformation("Waiting for up to {TimeoutSeconds}s for in-flight processing to complete", waitTimeout.TotalSeconds);
+        
+        while (DateTimeOffset.UtcNow < shutdownDeadline)
+        {
+            lock (_lockObj)
+            {
+                if (_inFlightMessages == 0)
+                {
+                    _logger.LogInformation("All in-flight processing completed successfully");
+                    return;
+                }
+            }
+            await Task.Delay(100);
+        }
+
+        _logger.LogCritical("In-flight processing timed out after {TimeoutSeconds}s with {Remaining} messages still processing", 
+            waitTimeout.TotalSeconds, _inFlightMessages);
+        throw new TimeoutException("In-flight processing timed out during shutdown");
+    }
+
+    public async Task CommitOffsetsAsync(int maxRetries = 3)
+    {
+        if (!_processedMessagesToCommit.Any())
+        {
+            _logger.LogInformation("No offsets to commit during shutdown");
+            return;
+        }
+
+        var latestOffsets = _processedMessagesToCommit
+            .GroupBy(m => m.TopicPartition)
+            .Select(g => g.OrderByDescending(m => m.Offset).First())
+            .ToList();
+
+        for (int retry = 0; retry < maxRetries; retry++)
+        {
+            try
+            {
+                _logger.LogInformation("Committing offsets for {Count} processed messages", latestOffsets.Count);
+                _consumer.Commit(latestOffsets);
+                _processedMessagesToCommit.Clear();
+                _logger.LogInformation("Offsets committed successfully");
+                return;
+            }
+            catch (KafkaException ex)
+            {
+                _logger.LogError(ex, "Failed to commit offsets (attempt {Retry}/{MaxRetries})", retry + 1, maxRetries);
+                if (retry == maxRetries - 1)
+                {
+                    _logger.LogCritical("All {MaxRetries} offset commit attempts failed", maxRetries);
+                    throw;
+                }
+                await Task.Delay(1000 * (retry + 1));
+            }
+        }
     }
 
     public void StartListening(CancellationToken cancellationToken = default)
@@ -93,7 +165,16 @@ internal class Consumer : IDisposable
                     
                     if (processedSuccessfully)
                     {
+                        lock (_processedMessagesToCommit)
+                        {
+                            _processedMessagesToCommit.Add(consumeResult);
+                        }
+                        // Commit immediately for normal operation
                         _consumer.Commit(consumeResult);
+                        lock (_processedMessagesToCommit)
+                        {
+                            _processedMessagesToCommit.Remove(consumeResult);
+                        }
                     }
                     
                     lock (_lockObj)
@@ -114,23 +195,6 @@ internal class Consumer : IDisposable
                     break;
                 }
             }
-            
-            // Wait for in-flight messages to complete before shutting down
-            DateTimeOffset shutdownDeadline = DateTimeOffset.UtcNow.Add(_shutdownTimeout);
-            while (DateTimeOffset.UtcNow < shutdownDeadline)
-            {
-                lock (_lockObj)
-                {
-                    if (_inFlightMessages == 0)
-                    {
-                        break;
-                    }
-                }
-                Thread.Sleep(100);
-            }
-            
-            _logger.LogInformation("Closing consumer");
-            _consumer.Close();
         }
         catch (Exception ex)
         {
@@ -255,7 +319,13 @@ internal class Consumer : IDisposable
 
     public void Dispose()
     {
+        _logger.LogInformation("Disposing Kafka consumer resources");
         _isListening = false;
+        _consumer?.Close();
         _consumer?.Dispose();
+        
+        // Clear all database connection pools
+        NpgsqlConnection.ClearAllPools();
+        _logger.LogInformation("All PostgreSQL connections closed");
     }
 }
