@@ -1,6 +1,6 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
-package kafka_collector
+package main
 
 import (
 	"context"
@@ -17,14 +17,239 @@ import (
 	"time"
 
 	"github.com/IBM/sarama"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // Define error types
 var (
-	ShutdownTimeoutError = errors.New("shutdown timeout exceeded before all in-flight messages completed processing")
-	OffsetCommitError    = errors.New("failed to commit pending offsets to Kafka during shutdown")
+	ShutdownTimeoutError      = errors.New("shutdown timeout exceeded before all in-flight messages completed processing")
+	OffsetCommitError         = errors.New("failed to commit pending offsets to Kafka during shutdown")
+	TransientProcessingError = errors.New("transient processing error")
+	PermanentProcessingError = errors.New("permanent processing error")
+	DLQProduceError          = errors.New("DLQ produce error")
 )
+
+// Config holds retry and DLQ configuration
+type Config struct {
+	RetryMaxAttempts int
+	RetryDelayMs     int
+	DLQTopicName     string
+	DLQEnabled       bool
+}
+
+func loadConfig() Config {
+	cfg := Config{
+		RetryMaxAttempts: 3,
+		RetryDelayMs:     1000,
+		DLQTopicName:     "kafka-collector-dlq",
+		DLQEnabled:       true,
+	}
+
+	if val := os.Getenv("KAFKA_COLLECTOR_RETRY_MAX_ATTEMPTS"); val != "" {
+		if intVal, err := strconv.Atoi(val); err == nil && intVal >= 0 {
+			cfg.RetryMaxAttempts = intVal
+		}
+	}
+
+	if val := os.Getenv("KAFKA_COLLECTOR_RETRY_DELAY_MS"); val != "" {
+		if intVal, err := strconv.Atoi(val); err == nil && intVal >= 0 {
+			cfg.RetryDelayMs = intVal
+		}
+	}
+
+	if val := os.Getenv("KAFKA_COLLECTOR_DLQ_TOPIC_NAME"); val != "" {
+		cfg.DLQTopicName = val
+	}
+
+	if val := os.Getenv("KAFKA_COLLECTOR_DLQ_ENABLED"); val != "" {
+		if boolVal, err := strconv.ParseBool(val); err == nil {
+			cfg.DLQEnabled = boolVal
+		}
+	}
+
+	return cfg
+}
+
+// DLQProducer handles production of failed messages to dead-letter queue
+type DLQProducer interface {
+	// Produce sends a failed message to DLQ with original metadata
+	// Parameters:
+	//   originalMsg: *sarama.ConsumerMessage - Original failed Kafka message
+	//   failureReason: string - Reason for message failure (error message)
+	//   retryCount: int - Number of retries attempted before DLQ production
+	// Returns:
+	//   error: nil if production succeeded, non-nil otherwise
+	Produce(originalMsg *sarama.ConsumerMessage, failureReason string, retryCount int) error
+}
+
+// SaramaDLQProducer implements DLQProducer using sarama SyncProducer
+type SaramaDLQProducer struct {
+	producer sarama.SyncProducer
+	topic    string
+}
+
+func NewSaramaDLQProducer(brokers []string, config *sarama.Config, topic string) (*SaramaDLQProducer, error) {
+	producer, err := sarama.NewSyncProducer(brokers, config)
+	if err != nil {
+		return nil, err
+	}
+	return &SaramaDLQProducer{
+		producer: producer,
+		topic:    topic,
+	}, nil
+}
+
+func (p *SaramaDLQProducer) Produce(originalMsg *sarama.ConsumerMessage, failureReason string, retryCount int) error {
+	// Copy original headers
+	headers := make([]*sarama.RecordHeader, len(originalMsg.Headers))
+	copy(headers, originalMsg.Headers)
+
+	// Add new headers
+	headers = append(headers,
+		&sarama.RecordHeader{Key: []byte("x-failure-reason"), Value: []byte(failureReason)},
+		&sarama.RecordHeader{Key: []byte("x-retry-count"), Value: []byte(strconv.Itoa(retryCount))},
+		&sarama.RecordHeader{Key: []byte("x-original-topic"), Value: []byte(originalMsg.Topic)},
+	)
+
+	// Create producer message
+	producerMsg := &sarama.ProducerMessage{
+		Topic:     p.topic,
+		Partition: originalMsg.Partition,
+		Value:     sarama.ByteEncoder(originalMsg.Value),
+		Headers:   headers,
+	}
+
+	// Preserve original key if exists
+	if originalMsg.Key != nil {
+		producerMsg.Key = sarama.ByteEncoder(originalMsg.Key)
+	}
+
+	_, _, err := p.producer.SendMessage(producerMsg)
+	if err != nil {
+		return DLQProduceError
+	}
+	return nil
+}
+
+// Global instances
+var (
+	cfg         = loadConfig()
+	dlqProducer DLQProducer
+)
+
+// Prometheus metrics
+var (
+	kafkaCollectorMessagesProcessedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "kafka_collector_messages_processed_total",
+			Help: "Total count of messages processed by status",
+		},
+		[]string{"status"},
+	)
+	kafkaCollectorRetryAttemptsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "kafka_collector_retry_attempts_total",
+			Help: "Total number of retry attempts made for transient failures",
+		},
+	)
+	kafkaCollectorDLQProduceErrorsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "kafka_collector_dlq_produce_errors_total",
+			Help: "Total number of errors encountered when producing to DLQ",
+		},
+	)
+)
+
+func init() {
+	// Register metrics
+	prometheus.MustRegister(
+		kafkaCollectorMessagesProcessedTotal,
+		kafkaCollectorRetryAttemptsTotal,
+		kafkaCollectorDLQProduceErrorsTotal,
+	)
+}
+
+// ProcessMessageWithRetry attempts to process a Kafka message with retries for transient errors
+// Parameters:
+//   msg: *sarama.ConsumerMessage - Original Kafka message to process
+//   processFn: func(*sarama.ConsumerMessage) error - Processing function to execute
+// Returns:
+//   error: nil if processing succeeded even after retries, non-nil if all retries failed
+func ProcessMessageWithRetry(msg *sarama.ConsumerMessage, processFn func(*sarama.ConsumerMessage) error) error {
+	// First attempt
+	err := processFn(msg)
+	if err == nil {
+		kafkaCollectorMessagesProcessedTotal.WithLabelValues("success").Inc()
+		return nil
+	}
+
+	// If permanent error, return immediately
+	if errors.Is(err, PermanentProcessingError) {
+		return err
+	}
+
+	// If not transient error, treat as permanent
+	if !errors.Is(err, TransientProcessingError) {
+		return err
+	}
+
+	// Do retries
+	for attempt := 0; attempt < cfg.RetryMaxAttempts; attempt++ {
+		// Increment retry metrics
+		kafkaCollectorRetryAttemptsTotal.Inc()
+		kafkaCollectorMessagesProcessedTotal.WithLabelValues("retried").Inc()
+
+		// Wait delay
+		time.Sleep(time.Duration(cfg.RetryDelayMs) * time.Millisecond)
+
+		// Retry processing
+		err = processFn(msg)
+		if err == nil {
+			kafkaCollectorMessagesProcessedTotal.WithLabelValues("success").Inc()
+			return nil
+		}
+
+		// If not transient error anymore, break
+		if !errors.Is(err, TransientProcessingError) {
+			break
+		}
+	}
+
+	return err
+}
+
+func processSingleMessage(msg *sarama.ConsumerMessage, processFn func(*sarama.ConsumerMessage) error) {
+	retryCount := 0
+	err := ProcessMessageWithRetry(msg, func(m *sarama.ConsumerMessage) error {
+		return processFn(m)
+	})
+
+	if err == nil {
+		return
+	}
+
+	// Count retries: if it was transient error, retry count is cfg.RetryMaxAttempts, else 0
+	if errors.Is(err, TransientProcessingError) {
+		retryCount = cfg.RetryMaxAttempts
+	}
+
+	// Handle DLQ
+	if !cfg.DLQEnabled {
+		kafkaCollectorMessagesProcessedTotal.WithLabelValues("failed").Inc()
+		return
+	}
+
+	err = dlqProducer.Produce(msg, err.Error(), retryCount)
+	if err != nil {
+		kafkaCollectorDLQProduceErrorsTotal.Inc()
+		kafkaCollectorMessagesProcessedTotal.WithLabelValues("failed").Inc()
+		log.Printf("Failed to produce message to DLQ: %v", err)
+		return
+	}
+
+	kafkaCollectorMessagesProcessedTotal.WithLabelValues("dlq_produced").Inc()
+}
 
 // KafkaConsumer wraps sarama.Consumer with graceful shutdown capabilities
 type KafkaConsumer struct {
