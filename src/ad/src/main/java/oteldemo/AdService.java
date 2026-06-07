@@ -261,7 +261,7 @@ public final class AdService {
             .clientAuth(ClientAuth.REQUIRE);
         }
         sslContext = sslContextBuilder.build();
-      } catch (CertificateException | IllegalArgumentException e) {
+      } catch (Exception e) {
         throw new RuntimeException("Invalid TLS configuration: " + e.getMessage(), e);
       }
     }
@@ -291,6 +291,8 @@ public final class AdService {
     isReady = true;
     logger.info("Ad service initialized and ready to serve traffic");
   }
+
+
 
   private void stop() {
     // Get configured shutdown timeout
