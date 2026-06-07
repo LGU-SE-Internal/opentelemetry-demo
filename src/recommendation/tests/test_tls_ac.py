@@ -145,9 +145,9 @@ def test_ac6_server_mtls_enforced_rejects_unauthenticated_clients(monkeypatch):
         root_certs = f.read()
     credentials = grpc.ssl_channel_credentials(root_certificates=root_certs)
     with grpc.secure_channel(f"localhost:{port}", credentials) as channel:
-        stub = recommendation_pb2_grpc.RecommendationServiceStub(channel)
+        stub = demo_pb2_grpc.RecommendationServiceStub(channel)
         with pytest.raises(grpc.RpcError) as excinfo:
-            stub.ListRecommendations(ListRecommendationsRequest(user_id="test"))
+            stub.ListRecommendations(demo_pb2.ListRecommendationsRequest(user_id="test"))
         assert excinfo.value.code() in (grpc.StatusCode.UNAUTHENTICATED, grpc.StatusCode.PERMISSION_DENIED)
     
     # Try connecting with valid client cert - should succeed
@@ -161,8 +161,8 @@ def test_ac6_server_mtls_enforced_rejects_unauthenticated_clients(monkeypatch):
         certificate_chain=client_cert
     )
     with grpc.secure_channel(f"localhost:{port}", credentials) as channel:
-        stub = recommendation_pb2_grpc.RecommendationServiceStub(channel)
-        response = stub.ListRecommendations(ListRecommendationsRequest(user_id="test"))
+        stub = demo_pb2_grpc.RecommendationServiceStub(channel)
+        response = stub.ListRecommendations(demo_pb2.ListRecommendationsRequest(user_id="test"))
         assert response is not None
     
     server.stop(0)
