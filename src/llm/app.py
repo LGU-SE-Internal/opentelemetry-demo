@@ -13,9 +13,44 @@ import logging
 
 from openfeature import api
 from openfeature.contrib.provider.flagd import FlagdProvider
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 app = Flask(__name__)
 app.logger.setLevel(logging.INFO)
+
+# Rate limiting configuration
+def get_rate_limit():
+    max_requests = int(os.environ.get('RATE_LIMIT_MAX_REQUESTS', 100))
+    window_seconds = int(os.environ.get('RATE_LIMIT_WINDOW_SECONDS', 60))
+    return f"{max_requests} per {window_seconds} seconds"
+
+# Initialize rate limiter
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=[get_rate_limit],
+    storage_uri="memory://",
+    headers_enabled=True,
+    header_name_mapping={
+        'X-RateLimit-Limit': 'X-RateLimit-Limit',
+        'X-RateLimit-Remaining': 'X-RateLimit-Remaining',
+        'X-RateLimit-Reset': 'X-RateLimit-Reset',
+        'Retry-After': 'Retry-After'
+    }
+)
+
+# Custom rate limit exceeded handler
+@app.errorhandler(429)
+def rate_limit_exceeded_handler(e):
+    retry_after = int(e.description.split()[-2]) if e.description and "Too Many Requests" in e.description else int(os.environ.get('RATE_LIMIT_WINDOW_SECONDS', 60))
+    response = jsonify({
+        "error": "Rate limit exceeded",
+        "retry_after": retry_after
+    })
+    response.status_code = 429
+    response.headers["Retry-After"] = str(retry_after)
+    return response
 
 product_review_summaries = None
 product_review_summaries_file_path = "./product-review-summaries.json"
