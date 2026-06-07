@@ -46,7 +46,7 @@ public class CartServiceValidationTests
 
         var exception = await Assert.ThrowsAsync<RpcException>(() => cartClient.GetCartAsync(request));
         Assert.Equal(StatusCode.InvalidArgument, exception.StatusCode);
-        Assert.Contains("user_id is required", exception.Status.Detail);
+        Assert.Contains("User ID cannot be empty", exception.Status.Detail);
     }
 
     [Fact]
@@ -68,7 +68,7 @@ public class CartServiceValidationTests
 
         var exception = await Assert.ThrowsAsync<RpcException>(() => cartClient.EmptyCartAsync(request));
         Assert.Equal(StatusCode.InvalidArgument, exception.StatusCode);
-        Assert.Contains("user_id is required", exception.Status.Detail);
+        Assert.Contains("User ID cannot be empty", exception.Status.Detail);
     }
 
     [Fact]
@@ -94,7 +94,7 @@ public class CartServiceValidationTests
 
         var exception = await Assert.ThrowsAsync<RpcException>(() => cartClient.AddItemAsync(request));
         Assert.Equal(StatusCode.InvalidArgument, exception.StatusCode);
-        Assert.Contains("user_id is required", exception.Status.Detail);
+        Assert.Contains("User ID cannot be empty", exception.Status.Detail);
     }
 
     [Fact]
@@ -120,11 +120,37 @@ public class CartServiceValidationTests
 
         var exception = await Assert.ThrowsAsync<RpcException>(() => cartClient.AddItemAsync(request));
         Assert.Equal(StatusCode.InvalidArgument, exception.StatusCode);
-        Assert.Contains("product_id is required", exception.Status.Detail);
+        Assert.Contains("Product ID cannot be empty", exception.Status.Detail);
     }
 
     [Fact]
-    public async Task test_ac5_add_item_negative_quantity_returns_invalid_argument()
+    public async Task test_ac5_add_item_zero_quantity_returns_invalid_argument()
+    {
+        // Setup test server and client
+        using var server = await _host.StartAsync();
+        var httpClient = server.GetTestClient();
+
+        // Create GRPC client
+        var channel = GrpcChannel.ForAddress(httpClient.BaseAddress, new GrpcChannelOptions
+        {
+            HttpClient = httpClient
+        });
+        var cartClient = new CartServiceClient(channel);
+
+        // Test with zero quantity
+        var request = new AddItemRequest
+        {
+            UserId = "test-user-1",
+            Item = new CartItem { ProductId = "test-prod-1", Quantity = 0 }
+        };
+
+        var exception = await Assert.ThrowsAsync<RpcException>(() => cartClient.AddItemAsync(request));
+        Assert.Equal(StatusCode.InvalidArgument, exception.StatusCode);
+        Assert.Contains("Quantity must be greater than 0", exception.Status.Detail);
+    }
+
+    [Fact]
+    public async Task test_ac6_add_item_negative_quantity_returns_invalid_argument()
     {
         // Setup test server and client
         using var server = await _host.StartAsync();
@@ -146,7 +172,7 @@ public class CartServiceValidationTests
 
         var exception = await Assert.ThrowsAsync<RpcException>(() => cartClient.AddItemAsync(request));
         Assert.Equal(StatusCode.InvalidArgument, exception.StatusCode);
-        Assert.Contains("quantity must be greater than 0", exception.Status.Detail);
+        Assert.Contains("Quantity must be greater than 0", exception.Status.Detail);
     }
 
     [Fact]
@@ -172,7 +198,7 @@ public class CartServiceValidationTests
 
         var exception = await Assert.ThrowsAsync<RpcException>(() => cartClient.RemoveItemAsync(request));
         Assert.Equal(StatusCode.InvalidArgument, exception.StatusCode);
-        Assert.Contains("user_id is required", exception.Status.Detail);
+        Assert.Contains("User ID cannot be empty", exception.Status.Detail);
     }
 
     [Fact]
@@ -198,7 +224,7 @@ public class CartServiceValidationTests
 
         var exception = await Assert.ThrowsAsync<RpcException>(() => cartClient.RemoveItemAsync(request));
         Assert.Equal(StatusCode.InvalidArgument, exception.StatusCode);
-        Assert.Contains("product_id is required", exception.Status.Detail);
+        Assert.Contains("Product ID cannot be empty", exception.Status.Detail);
     }
 
     [Fact]
@@ -224,9 +250,9 @@ public class CartServiceValidationTests
 
         var exception = await Assert.ThrowsAsync<RpcException>(() => cartClient.AddItemAsync(request));
         Assert.Equal(StatusCode.InvalidArgument, exception.StatusCode);
-        Assert.Contains("user_id is required", exception.Status.Detail);
+        Assert.Contains("User ID cannot be empty", exception.Status.Detail);
         Assert.Contains("product_id is required", exception.Status.Detail);
-        Assert.Contains("quantity must be greater than 0", exception.Status.Detail);
+        Assert.Contains("Quantity must be greater than 0", exception.Status.Detail);
     }
 
     [Fact]
