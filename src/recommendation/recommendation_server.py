@@ -92,55 +92,73 @@ class RetryLoggingInterceptor(grpc.UnaryUnaryClientInterceptor):
 
 class RecommendationService(demo_pb2_grpc.RecommendationServiceServicer):
     def ListRecommendations(self, request, context):
-        # Validation logic
-        product_ids = request.product_ids
         span = trace.get_current_span()
-        trace_id = format(span.get_span_context().trace_id, '016x') if span.is_recording() else None
+        trace_id = format(span.get_span_context().trace_id, '016x') if span.is_recording() else "unknown"
         
-        # Validate list is not empty
-        if len(product_ids) == 0:
-            error_msg = "product_ids list cannot be empty"
-            logger.warning(
-                "Invalid recommendation request received",
-                extra={
-                    "error": error_msg,
-                    "trace_id": trace_id,
-                    "request_product_ids_count": 0
-                }
+        # Helper function to strip control characters (AC-6)
+        def sanitize_string(s):
+            if not s:
+                return s
+            # Remove ASCII control characters 0-31 and 127
+            return re.sub(r'[\x00-\x1F\x7F]', '', s)
+        
+        # Sanitize all input parameters first
+        sanitized_user_id = sanitize_string(request.user_id)
+        sanitized_product_ids = [sanitize_string(pid) for pid in request.product_ids]
+        
+        # AC-1: Validate user_id is present
+        if not sanitized_user_id:
+            error_msg = "user_id parameter is required"
+            logger.error(
+                f"Validation failed for recommendation request (trace_id={trace_id}): parameter=user_id, error={error_msg}"
             )
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, error_msg)
-            
-        # Validate list size <= 100
-        if len(product_ids) > 100:
+        
+        # AC-2: Validate user_id format
+        user_id_pattern = re.compile(r'^[a-zA-Z0-9-]{3,36}$')
+        if not user_id_pattern.match(sanitized_user_id):
+            error_msg = "user_id has invalid format: must be alphanumeric (including '-') between 3-36 characters"
+            logger.error(
+                f"Validation failed for recommendation request (trace_id={trace_id}): parameter=user_id, error={error_msg}"
+            )
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, error_msg)
+        
+        # AC-3: Validate product_ids list size <=100
+        if len(sanitized_product_ids) > 100:
             error_msg = "product_ids list exceeds maximum allowed size of 100"
-            logger.warning(
-                "Invalid recommendation request received",
-                extra={
-                    "error": error_msg,
-                    "trace_id": trace_id,
-                    "request_product_ids_count": len(product_ids)
-                }
+            logger.error(
+                f"Validation failed for recommendation request (trace_id={trace_id}): parameter=product_ids, error={error_msg}, count={len(sanitized_product_ids)}"
             )
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, error_msg)
-            
-        # Validate each product ID format
-        id_pattern = re.compile(r'^[a-zA-Z0-9]{3,12}$')
-        for idx, product_id in enumerate(product_ids):
-            if not id_pattern.match(product_id):
+        
+        # AC-4: Validate each product ID format
+        product_id_pattern = re.compile(r'^[a-zA-Z0-9]{3,12}$')
+        for idx, product_id in enumerate(sanitized_product_ids):
+            if not product_id_pattern.match(product_id):
                 error_msg = f"product ID at index {idx}: invalid format, must be alphanumeric 3-12 characters"
-                logger.warning(
-                    "Invalid recommendation request received",
-                    extra={
-                        "error": error_msg,
-                        "trace_id": trace_id,
-                        "request_product_ids_count": len(product_ids),
-                        "invalid_product_id": product_id,
-                        "invalid_product_index": idx
-                    }
+                logger.error(
+                    f"Validation failed for recommendation request (trace_id={trace_id}): parameter=product_ids[{idx}], error={error_msg}, value={product_id}"
                 )
                 context.abort(grpc.StatusCode.INVALID_ARGUMENT, error_msg)
-
-        prod_list = get_product_list(request.product_ids)
+        
+        # AC-5: Validate result_size bounds
+        result_size = request.result_size
+        if result_size == 0:  # proto3 int32 default value, use default 5
+            result_size = 5
+        if result_size < 1 or result_size > 20:
+            error_msg = "result_size must be between 1 and 20 (inclusive)"
+            logger.error(
+                f"Validation failed for recommendation request (trace_id={trace_id}): parameter=result_size, error={error_msg}, value={result_size}"
+            )
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, error_msg)
+        
+        # Update request object with sanitized values for further processing
+        request.user_id = sanitized_user_id
+        # Clear existing product_ids and add sanitized ones
+        del request.product_ids[:]
+        request.product_ids.extend(sanitized_product_ids)
+        
+        prod_list = get_product_list(request.product_ids, result_size)
         span.set_attribute("demo.product.recommended.count", len(prod_list))
         logger.info(f"Receive ListRecommendations for product ids:{prod_list}")
 
@@ -162,11 +180,11 @@ class RecommendationService(demo_pb2_grpc.RecommendationServiceServicer):
             status=health_pb2.HealthCheckResponse.UNIMPLEMENTED)
 
 
-def get_product_list(request_product_ids):
+def get_product_list(request_product_ids, result_size=5):
     global first_run
     global cached_ids
     with tracer.start_as_current_span("get_product_list") as span:
-        max_responses = 5
+        max_responses = result_size
 
         # Formulate the list of characters to list of strings
         request_product_ids_str = ''.join(request_product_ids)

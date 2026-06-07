@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 import pytest
 import grpc
-from unittest.mock import Mock, patch, MagicMock
+import re
 from src.recommendation import recommendation_server
-from src.recommendation import demo_pb2, demo_pb2_grpc
+from src.recommendation.demo_pb2 import ListRecommendationsRequest, ListRecommendationsResponse
+from src.recommendation.demo_pb2_grpc import RecommendationServiceStub
+from unittest.mock import Mock, patch
+
+GRPC_TARGET = "localhost:8080"
 
 @pytest.fixture
 def servicer():
@@ -30,76 +34,77 @@ def mock_get_product_list():
         mock.return_value = ["prod123", "prod456"]
         yield mock
 
-class TestListRecommendationsValidation:
-    def test_ac1_product_ids_exceeds_max_100(self, servicer, mock_context, mock_trace, mock_get_product_list):
-        # Create request with 101 product IDs
-        product_ids = [f"prod{i:03d}" for i in range(101)]
-        request = demo_pb2.ListRecommendationsRequest(product_ids=product_ids)
+@pytest.fixture(scope="module")
+def grpc_channel():
+    channel = grpc.insecure_channel(GRPC_TARGET)
+    yield channel
+    channel.close()
+
+@pytest.fixture(scope="module")
+def stub(grpc_channel):
+    return RecommendationServiceStub(grpc_channel)
+
+# Unit tests (mock based)
+class TestListRecommendationsValidationUnit:
+    def test_ac1_missing_user_id(self, servicer, mock_context, mock_trace, mock_get_product_list):
+        # AC-1: Request with missing user_id parameter returns INVALID_ARGUMENT
+        request = ListRecommendationsRequest()
         
         servicer.ListRecommendations(request, mock_context)
         
-        # Verify abort called with correct status and message
+        mock_context.abort.assert_called_once_with(
+            grpc.StatusCode.INVALID_ARGUMENT,
+            "user_id parameter is required"
+        )
+        mock_get_product_list.assert_not_called()
+
+    def test_ac2_invalid_user_id_format(self, servicer, mock_context, mock_trace, mock_get_product_list):
+        # AC-2: user_id invalid format returns correct error
+        invalid_cases = [
+            "ab",  # <3 chars
+            "a" * 37,  # >36 chars
+            "user@123",  # non alphanumeric/-
+            "user name",  # space
+            "user#123",  # special char
+        ]
+        
+        for user_id in invalid_cases:
+            mock_context.reset_mock()
+            request = ListRecommendationsRequest(user_id=user_id)
+            
+            servicer.ListRecommendations(request, mock_context)
+            
+            mock_context.abort.assert_called_once_with(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "user_id has invalid format: must be alphanumeric (including '-') between 3-36 characters"
+            )
+            mock_get_product_list.assert_not_called()
+
+    def test_ac3_product_ids_exceeds_max_100(self, servicer, mock_context, mock_trace, mock_get_product_list):
+        # AC-3: product_ids list >100 items returns error
+        product_ids = [f"prod{i:03d}" for i in range(101)]
+        request = ListRecommendationsRequest(user_id="test-user-123", product_ids=product_ids)
+        
+        servicer.ListRecommendations(request, mock_context)
+        
         mock_context.abort.assert_called_once_with(
             grpc.StatusCode.INVALID_ARGUMENT,
             "product_ids list exceeds maximum allowed size of 100"
         )
-        # Verify processing did not proceed
         mock_get_product_list.assert_not_called()
 
-    def test_ac2_product_ids_empty(self, servicer, mock_context, mock_trace, mock_get_product_list):
-        # Create request with empty product_ids list
-        request = demo_pb2.ListRecommendationsRequest(product_ids=[])
-        
-        servicer.ListRecommendations(request, mock_context)
-        
-        # Verify abort called with correct status and message
-        mock_context.abort.assert_called_once_with(
-            grpc.StatusCode.INVALID_ARGUMENT,
-            "product_ids list cannot be empty"
-        )
-        # Verify processing did not proceed
-        mock_get_product_list.assert_not_called()
-
-    def test_ac3_product_id_too_short(self, servicer, mock_context, mock_trace, mock_get_product_list):
-        # Create request with a 2-character product ID at index 1
-        request = demo_pb2.ListRecommendationsRequest(product_ids=["prod123", "ab", "prod456"])
-        
-        servicer.ListRecommendations(request, mock_context)
-        
-        # Verify abort called with correct status and message
-        mock_context.abort.assert_called_once_with(
-            grpc.StatusCode.INVALID_ARGUMENT,
-            "product ID at index 1: invalid format, must be alphanumeric 3-12 characters"
-        )
-        # Verify processing did not proceed
-        mock_get_product_list.assert_not_called()
-
-    def test_ac4_product_id_too_long(self, servicer, mock_context, mock_trace, mock_get_product_list):
-        # Create request with a 13-character product ID at index 2
-        request = demo_pb2.ListRecommendationsRequest(product_ids=["prod123", "prod456", "abcdefghijklm"])
-        
-        servicer.ListRecommendations(request, mock_context)
-        
-        # Verify abort called with correct status and message
-        mock_context.abort.assert_called_once_with(
-            grpc.StatusCode.INVALID_ARGUMENT,
-            "product ID at index 2: invalid format, must be alphanumeric 3-12 characters"
-        )
-        # Verify processing did not proceed
-        mock_get_product_list.assert_not_called()
-
-    def test_ac5_product_id_non_alphanumeric(self, servicer, mock_context, mock_trace, mock_get_product_list):
-        # Test different non-alphanumeric cases
+    def test_ac4_invalid_product_id_format(self, servicer, mock_context, mock_trace, mock_get_product_list):
+        # AC-4: invalid product ID format returns error with index
         test_cases = [
-            (["prod123", "prod@123", "prod456"], 1),
-            (["prod 123", "prod456"], 0),
-            (["prod#123$", "prod456"], 0),
-            (["prod-123", "prod456"], 0),
+            (["ab", "prod123"], 0, "too short"),
+            (["prod123", "a" * 13, "prod456"], 1, "too long"),
+            (["prod123", "prod@123"], 1, "special char"),
+            (["prod 123", "prod456"], 0, "space"),
         ]
         
-        for product_ids, expected_idx in test_cases:
+        for product_ids, expected_idx, _ in test_cases:
             mock_context.reset_mock()
-            request = demo_pb2.ListRecommendationsRequest(product_ids=product_ids)
+            request = ListRecommendationsRequest(user_id="test-user-123", product_ids=product_ids)
             
             servicer.ListRecommendations(request, mock_context)
             
@@ -109,68 +114,83 @@ class TestListRecommendationsValidation:
             )
             mock_get_product_list.assert_not_called()
 
-    def test_ac6_valid_request_processes_successfully(self, servicer, mock_context, mock_trace, mock_get_product_list):
-        # Valid request with 5 product IDs, all valid format
-        product_ids = ["prod123", "PROD456", "prod789", "a1b2c3d4", "test12345678"]
-        request = demo_pb2.ListRecommendationsRequest(product_ids=product_ids)
+    def test_ac5_result_size_out_of_bounds(self, servicer, mock_context, mock_trace, mock_get_product_list):
+        # AC-5: result_size <1 or >20 returns error
+        invalid_sizes = [0, -1, 21, 100]
         
-        response = servicer.ListRecommendations(request, mock_context)
-        
-        # Verify no abort called
-        mock_context.abort.assert_not_called()
-        # Verify processing proceeded
-        mock_get_product_list.assert_called_once_with(product_ids)
-        # Verify response is returned
-        assert isinstance(response, demo_pb2.ListRecommendationsResponse)
-        assert len(response.product_ids) == 2
-
-    def test_ac7_edge_case_valid_inputs(self, servicer, mock_context, mock_trace, mock_get_product_list):
-        # Test edge cases that should pass validation
-        test_cases = [
-            # Exactly 1 product ID
-            ["prod123"],
-            # Exactly 100 product IDs
-            [f"prod{i:03d}" for i in range(100)],
-            # Exactly 3 characters long
-            ["abc"],
-            # Exactly 12 characters long
-            ["abcdefghijkl"],
-            # Mixed case alphanumeric
-            ["Prod123AbcXy"],
-            # Only numbers
-            ["1234567890"],
-            # Only letters
-            ["ABCDEFGHIJ"]
-        ]
-        
-        for product_ids in test_cases:
+        for size in invalid_sizes:
             mock_context.reset_mock()
-            mock_get_product_list.reset_mock()
+            request = ListRecommendationsRequest(user_id="test-user-123", result_size=size)
             
-            request = demo_pb2.ListRecommendationsRequest(product_ids=product_ids)
             servicer.ListRecommendations(request, mock_context)
             
-            mock_context.abort.assert_not_called()
-            mock_get_product_list.assert_called_once()
-GRPC_TARGET = "localhost:8080"  # Default recommendation service gRPC port
+            mock_context.abort.assert_called_once_with(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "result_size must be between 1 and 20 (inclusive)"
+            )
+            mock_get_product_list.assert_not_called()
 
+    def test_ac6_control_characters_stripped(self, servicer, mock_context, mock_trace, mock_get_product_list):
+        # AC-6: control characters are stripped from parameters
+        request = ListRecommendationsRequest(
+            user_id="test\x00user-123\n",
+            product_ids=["prod\x01123", "prod\x7f456"],
+            result_size=5
+        )
+        
+        servicer.ListRecommendations(request, mock_context)
+        
+        mock_context.abort.assert_not_called()
+        # Verify get_product_list was called with sanitized product IDs
+        called_product_ids = mock_get_product_list.call_args[0][0]
+        assert "\x01" not in called_product_ids[0]
+        assert "\x7f" not in called_product_ids[1]
+        # Verify user_id is sanitized
+        assert "\x00" not in request.user_id
+        assert "\n" not in request.user_id
 
-@pytest.fixture(scope="module")
-def grpc_channel():
-    channel = grpc.insecure_channel(GRPC_TARGET)
-    yield channel
-    channel.close()
+    def test_ac7_validation_failures_logged(self, servicer, mock_context, mock_trace, mock_get_product_list):
+        # AC-7: validation failures are logged with trace_id, param name and details
+        with patch('src.recommendation.recommendation_server.logger') as mock_logger:
+            request = ListRecommendationsRequest(user_id="ab")
+            
+            servicer.ListRecommendations(request, mock_context)
+            
+            mock_logger.error.assert_called_once()
+            log_args = mock_logger.error.call_args[0][0]
+            assert "123456789abcdef0" in log_args  # trace_id
+            assert "user_id" in log_args
+            assert "invalid format" in log_args
 
+# Integration tests (against running service)
+def test_ac1_missing_user_id_integration(stub):
+    request = ListRecommendationsRequest()
+    
+    with pytest.raises(grpc.RpcError) as exc_info:
+        stub.ListRecommendations(request)
+    
+    assert exc_info.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+    assert "user_id parameter is required" in str(exc_info.value.details())
 
-@pytest.fixture(scope="module")
-def stub(grpc_channel):
-    return RecommendationServiceStub(grpc_channel)
+def test_ac2_invalid_user_id_format_integration(stub):
+    invalid_cases = [
+        "ab",
+        "a" * 37,
+        "user@123",
+        "user name"
+    ]
+    
+    for user_id in invalid_cases:
+        request = ListRecommendationsRequest(user_id=user_id)
+        with pytest.raises(grpc.RpcError) as exc_info:
+            stub.ListRecommendations(request)
+        
+        assert exc_info.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+        assert "user_id has invalid format" in str(exc_info.value.details())
 
-
-def test_ac1_product_ids_exceeds_max_100(stub):
-    # AC-1: >100 entries returns INVALID_ARGUMENT with correct message
-    product_ids = [f"prod{i}" for i in range(101)]
-    request = ListRecommendationsRequest(product_ids=product_ids)
+def test_ac3_product_ids_exceeds_max_100_integration(stub):
+    product_ids = [f"prod{i:03d}" for i in range(101)]
+    request = ListRecommendationsRequest(user_id="test-user-123", product_ids=product_ids)
     
     with pytest.raises(grpc.RpcError) as exc_info:
         stub.ListRecommendations(request)
@@ -178,90 +198,26 @@ def test_ac1_product_ids_exceeds_max_100(stub):
     assert exc_info.value.code() == grpc.StatusCode.INVALID_ARGUMENT
     assert "product_ids list exceeds maximum allowed size of 100" in str(exc_info.value.details())
 
-
-def test_ac2_product_ids_empty(stub):
-    # AC-2: empty list returns INVALID_ARGUMENT with correct message
-    request = ListRecommendationsRequest(product_ids=[])
-    
-    with pytest.raises(grpc.RpcError) as exc_info:
-        stub.ListRecommendations(request)
-    
-    assert exc_info.value.code() == grpc.StatusCode.INVALID_ARGUMENT
-    assert "product_ids list cannot be empty" in str(exc_info.value.details())
-
-
-def test_ac3_product_id_too_short(stub):
-    # AC-3: product ID <3 chars returns correct error
-    product_ids = ["ab", "prod1", "prod2"]
-    request = ListRecommendationsRequest(product_ids=product_ids)
-    
-    with pytest.raises(grpc.RpcError) as exc_info:
-        stub.ListRecommendations(request)
-    
-    assert exc_info.value.code() == grpc.StatusCode.INVALID_ARGUMENT
-    assert "product ID at index 0: invalid format, must be alphanumeric 3-12 characters" in str(exc_info.value.details())
-
-
-def test_ac4_product_id_too_long(stub):
-    # AC-4: product ID >12 chars returns correct error
-    product_ids = ["prod1", "abcdefghijklm", "prod2"]
-    request = ListRecommendationsRequest(product_ids=product_ids)
-    
-    with pytest.raises(grpc.RpcError) as exc_info:
-        stub.ListRecommendations(request)
-    
-    assert exc_info.value.code() == grpc.StatusCode.INVALID_ARGUMENT
-    assert "product ID at index 1: invalid format, must be alphanumeric 3-12 characters" in str(exc_info.value.details())
-
-
-def test_ac5_product_id_non_alphanumeric(stub):
-    # AC-5: product ID with non-alphanumeric chars returns correct error
+def test_ac4_invalid_product_id_format_integration(stub):
     test_cases = [
-        (["prod1", "pro d2", "prod3"], 1),
-        (["prod1", "prod@2", "prod3"], 1),
-        (["prod1", "prod-2", "prod3"], 1),
-        (["prod1", "prod_2", "prod3"], 1),
+        (["ab", "prod123"], 0),
+        (["prod123", "a" * 13, "prod456"], 1),
+        (["prod123", "prod@123"], 1)
     ]
     
-    for product_ids, invalid_idx in test_cases:
-        request = ListRecommendationsRequest(product_ids=product_ids)
+    for product_ids, idx in test_cases:
+        request = ListRecommendationsRequest(user_id="test-user-123", product_ids=product_ids)
         with pytest.raises(grpc.RpcError) as exc_info:
             stub.ListRecommendations(request)
         
         assert exc_info.value.code() == grpc.StatusCode.INVALID_ARGUMENT
-        assert f"product ID at index {invalid_idx}: invalid format, must be alphanumeric 3-12 characters" in str(exc_info.value.details())
+        assert f"product ID at index {idx}" in str(exc_info.value.details())
 
-
-def test_ac6_valid_request_processes_successfully(stub):
-    # AC-6: valid requests proceed without validation errors
-    # Edge cases included: exactly 100 entries, 3-char ID, 12-char ID, mixed case
-    product_ids = [
-        "abc",  # 3 chars
-        "ABCDEF123456",  # 12 chars
-        "Prod123",  # mixed case
-        *[f"prod{i}" for i in range(97)]  # total 100 entries
-    ]
-    request = ListRecommendationsRequest(product_ids=product_ids)
-    
-    # Should not raise any INVALID_ARGUMENT error
-    response = stub.ListRecommendations(request)
-    assert response is not None
-    assert hasattr(response, "product_ids")
-    assert isinstance(response.product_ids, list)
-
-
-def test_ac7_edge_case_valid_inputs(stub):
-    # AC-7: cover edge cases for valid inputs
-    test_cases = [
-        ["abc123"],  # 1 entry
-        [f"p{i}" for i in range(100)],  # exactly 100 entries
-        ["1234567890ab"],  # 12 chars all digits
-        ["ABCDEFGHIJKL"],  # 12 chars all uppercase
-        ["abcdefghijkl"],  # 12 chars all lowercase
-        ["a1B2c3D4e5F6"],  # mixed case and digits
-    ]
-    
-    for product_ids in test_cases:
-        request = ListRecommendationsRequest(product_ids=product_ids)
-        response = stub.ListRecommendations(request)
-        assert response is not None
+def test_ac5_result_size_out_of_bounds_integration(stub):
+    for size in [0, -1, 21, 100]:
+        request = ListRecommendationsRequest(user_id="test-user-123", result_size=size)
+        with pytest.raises(grpc.RpcError) as exc_info:
+            stub.ListRecommendations(request)
+        
+        assert exc_info.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+        assert "result_size must be between 1 and 20" in str(exc_info.value.details())
