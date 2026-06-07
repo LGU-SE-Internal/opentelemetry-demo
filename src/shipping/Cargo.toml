@@ -7,7 +7,7 @@ edition = "2021"
 
 [lib]
 name = "shipping"
-path = "src/shipping_service.rs"
+path = "src/lib.rs"
 
 [[bin]]
 name = "shipping"
