@@ -37,6 +37,13 @@ spec:
             - --badger.ephemeral=false
             - --badger.directory-key=/tmp/jaeger/keys
             - --badger.directory-value=/tmp/jaeger/values
+            - --badger.retention-time=$(JAEGER_BADGER_RETENTION_PERIOD)
+            - --badger.retention-disk-space-usage-threshold=$(JAEGER_BADGER_RETENTION_DISK_THRESHOLD)
+          env:
+            - name: JAEGER_BADGER_RETENTION_PERIOD
+              value: "72h"
+            - name: JAEGER_BADGER_RETENTION_DISK_THRESHOLD
+              value: "0.9"
           ports:
             - containerPort: 16686
               name: query
