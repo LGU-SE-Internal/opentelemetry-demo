@@ -11,10 +11,10 @@ public class RemoveItemRequestValidator : AbstractValidator<RemoveItemRequest>
     {
         RuleFor(x => x.UserId)
             .NotEmpty()
-            .WithMessage("user_id is required");
+            .WithMessage("User ID cannot be empty");
 
         RuleFor(x => x.ProductId)
             .NotEmpty()
-            .WithMessage("product_id is required");
+            .WithMessage("Product ID cannot be empty");
     }
 }

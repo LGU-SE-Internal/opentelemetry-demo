@@ -11,7 +11,7 @@ public class AddItemRequestValidator : AbstractValidator<AddItemRequest>
     {
         RuleFor(x => x.UserId)
             .NotEmpty()
-            .WithMessage("user_id is required");
+            .WithMessage("User ID cannot be empty");
 
         RuleFor(x => x.Item)
             .NotNull()
@@ -19,12 +19,12 @@ public class AddItemRequestValidator : AbstractValidator<AddItemRequest>
 
         RuleFor(x => x.Item.ProductId)
             .NotEmpty()
-            .WithMessage("product_id is required")
+            .WithMessage("Product ID cannot be empty")
             .When(x => x.Item != null);
 
         RuleFor(x => x.Item.Quantity)
             .GreaterThan(0)
-            .WithMessage("quantity must be greater than 0")
+            .WithMessage("Quantity must be greater than 0")
             .When(x => x.Item != null);
     }
 }
