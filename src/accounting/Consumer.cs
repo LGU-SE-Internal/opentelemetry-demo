@@ -44,7 +44,7 @@ internal class DBContext : DbContext
 }
 
 
-internal class Consumer : IDisposable
+internal class Consumer : IAsyncDisposable, IDisposable
 {
     private const string TopicName = "orders";
 
@@ -56,19 +56,25 @@ internal class Consumer : IDisposable
     private static readonly ActivitySource MyActivitySource = new("Accounting.Consumer");
     private int _inFlightMessages = 0;
     private readonly object _lockObj = new();
-    private readonly TimeSpan _shutdownTimeout = TimeSpan.FromSeconds(30);
 
     // Configuration properties
     public int MaxRetryAttempts { get; }
     public int InitialRetryDelayMs { get; }
     public int MaxRetryDelayMs { get; }
     public string DlqTopicName { get; }
+    public int ShutdownTimeoutSeconds { get; }
+    public int InFlightMessagesCount { 
+        get 
+        { 
+            lock (_lockObj) return _inFlightMessages; 
+        } 
+    }
 
     // Test hooks
     public Func<ConsumeResult<string, byte[]>, CancellationToken, Task>? ProcessMessage { get; set; }
     public Func<TimeSpan, CancellationToken, Task> DelayFunction { get; set; } = Task.Delay;
 
-    public Consumer(ILogger<Consumer> logger)
+    public Consumer(ILogger<Consumer> logger, IConfiguration configuration)
     {
         _logger = logger;
 
@@ -80,6 +86,7 @@ internal class Consumer : IDisposable
         InitialRetryDelayMs = int.TryParse(Environment.GetEnvironmentVariable("KAFKA_CONSUMER_INITIAL_RETRY_DELAY_MS"), out int initialDelay) ? initialDelay : 1000;
         MaxRetryDelayMs = int.TryParse(Environment.GetEnvironmentVariable("KAFKA_CONSUMER_MAX_RETRY_DELAY_MS"), out int maxDelay) ? maxDelay : 10000;
         DlqTopicName = Environment.GetEnvironmentVariable("KAFKA_CONSUMER_DLQ_TOPIC_NAME") ?? "accounting-service-dlq";
+        ShutdownTimeoutSeconds = Math.Min(120, configuration.GetValue<int?>("ShutdownTimeoutSeconds") ?? 30);
 
         _consumer = BuildConsumer(servers);
         _consumer.Subscribe(TopicName);
@@ -91,6 +98,7 @@ internal class Consumer : IDisposable
            _logger.LogInformation("Connecting to Kafka: {servers}", servers);
            _logger.LogInformation("Kafka consumer retry config: MaxRetries={MaxRetries}, InitialDelay={InitialDelay}ms, MaxDelay={MaxDelay}ms, DLQ={DlqTopic}", 
                MaxRetryAttempts, InitialRetryDelayMs, MaxRetryDelayMs, DlqTopicName);
+           _logger.LogInformation("Shutdown timeout configured to {ShutdownTimeoutSeconds} seconds", ShutdownTimeoutSeconds);
        }
 
         _dbConnectionString = Environment.GetEnvironmentVariable("DB_CONNECTION_STRING");
@@ -103,10 +111,44 @@ internal class Consumer : IDisposable
         InitialRetryDelayMs = configuration.GetValue<int?>("KAFKA_CONSUMER_INITIAL_RETRY_DELAY_MS") ?? 1000;
         MaxRetryDelayMs = configuration.GetValue<int?>("KAFKA_CONSUMER_MAX_RETRY_DELAY_MS") ?? 10000;
         DlqTopicName = configuration.GetValue<string?>("KAFKA_CONSUMER_DLQ_TOPIC_NAME") ?? "accounting-service-dlq";
+        ShutdownTimeoutSeconds = Math.Min(120, configuration.GetValue<int?>("ShutdownTimeoutSeconds") ?? 30);
         
         _consumer = consumer;
         _dlqProducer = dlqProducer;
         _logger = new LoggerFactory().CreateLogger<Consumer>();
+    }
+
+    public async Task StopAsync(CancellationToken shutdownToken)
+    {
+        _logger.LogInformation("Initiating graceful shutdown of Kafka consumer");
+        _isListening = false;
+        
+        // Wait for in-flight messages to complete or timeout
+        var shutdownDeadline = DateTimeOffset.UtcNow.AddSeconds(ShutdownTimeoutSeconds);
+        while (DateTimeOffset.UtcNow < shutdownDeadline && !shutdownToken.IsCancellationRequested)
+        {
+            if (InFlightMessagesCount == 0)
+            {
+                break;
+            }
+            await Task.Delay(100, shutdownToken);
+        }
+
+        if (InFlightMessagesCount == 0)
+        {
+            _logger.LogInformation("Accounting service shutdown completed successfully, all in-flight messages processed and resources cleaned up");
+        }
+        else
+        {
+            _logger.LogWarning("Accounting service shutdown timed out after {TimeoutSeconds} seconds, {PendingMessageCount} in-flight messages were not completed, resources force closed",
+                ShutdownTimeoutSeconds, InFlightMessagesCount);
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        Dispose();
+        await ValueTask.CompletedTask;
     }
 
     public async Task StartListening(CancellationToken cancellationToken = default)
@@ -151,20 +193,6 @@ internal class Consumer : IDisposable
                     _logger.LogInformation("Consume operation cancelled, initiating graceful shutdown");
                     break;
                 }
-            }
-            
-            // Wait for in-flight messages to complete before shutting down
-            DateTimeOffset shutdownDeadline = DateTimeOffset.UtcNow.Add(_shutdownTimeout);
-            while (DateTimeOffset.UtcNow < shutdownDeadline)
-            {
-                lock (_lockObj)
-                {
-                    if (_inFlightMessages == 0)
-                    {
-                        break;
-                    }
-                }
-                await Task.Delay(100, cancellationToken);
             }
             
             _logger.LogInformation("Closing consumer");
