@@ -35,4 +35,3 @@ fi
 
 echo "All configuration parameters are valid."
 exit 0
-EOF && chmod +x /workspace/src/prometheus/validate-config.sh
