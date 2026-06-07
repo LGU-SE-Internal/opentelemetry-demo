@@ -26,5 +26,24 @@ return function (ContainerBuilder $containerBuilder) {
             );
             return new Logger($loggerSettings['name'], [$handler]);
         },
+        'ResourceManager' => function (ContainerInterface $c) {
+            // Resource manager to handle closing all persistent connections
+            return new class {
+                private $connections = [];
+                
+                public function addConnection($connection) {
+                    $this->connections[] = $connection;
+                }
+                
+                public function shutdown(): void {
+                    foreach ($this->connections as $conn) {
+                        if (method_exists($conn, 'close')) {
+                            $conn->close();
+                        }
+                    }
+                    $this->connections = [];
+                }
+            };
+        },
     ]);
 };

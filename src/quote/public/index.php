@@ -187,8 +187,28 @@ $app->add(function (Psr\Http\Message\ServerRequestInterface $request, Psr\Http\S
 
 // Add Error Middleware
 $errorMiddleware = $app->addErrorMiddleware(true, true, true);
-Loop::get()->addSignal(SIGTERM, function() {
-    exit;
+
+// Graceful Shutdown Implementation
+$activeRequestCount = 0;
+$isShuttingDown = false;
+$gracePeriod = (int)getenv('QUOTE_SERVICE_SHUTDOWN_GRACE_PERIOD_SECONDS') ?: 30;
+$logger = $container->get(Psr\Log\LoggerInterface::class);
+global $shutdownHandler;
+
+// Middleware to track active requests
+$app->add(function (ServerRequestInterface $request, Psr\Http\Server\RequestHandlerInterface $handler) use (&$activeRequestCount, &$isShuttingDown) {
+    if ($isShuttingDown) {
+        $response = new Slim\Psr7\Response();
+        return $response->withStatus(503)->withHeader('Connection', 'close');
+    }
+    
+    $activeRequestCount++;
+    try {
+        $response = $handler->handle($request);
+        return $response;
+    } finally {
+        $activeRequestCount--;
+    }
 });
 
 /* workaround for non-async batch processors */
@@ -262,3 +282,75 @@ if ($tlsCertPath) {
 
 $socket = new SocketServer($address, ['tcp' => $socketContext]);
 $server->listen($socket);
+
+// Public API functions as per interface
+function stopAcceptingConnections(): void {
+    global $socket;
+    $socket->close();
+}
+
+function getActiveRequestCount(): int {
+    global $activeRequestCount;
+    return $activeRequestCount;
+}
+
+// Now that socket exists, we can pass it to shutdown handler
+$shutdownHandler = function () use (&$isShuttingDown, &$activeRequestCount, $gracePeriod, $logger, $socket, $container, $server) {
+    if ($isShuttingDown) {
+        return; // Already shutting down
+    }
+    
+    $isShuttingDown = true;
+    $logger->info('shutdown.initiated', ['grace_period_seconds' => $gracePeriod]);
+    
+    // Stop accepting new connections
+    stopAcceptingConnections();
+    
+    $loop = React\EventLoop\Loop::get();
+    $startTime = time();
+    
+    $checkComplete = function () use (&$activeRequestCount, &$checkComplete, $loop, $startTime, $gracePeriod, $logger, $container) {
+        if ($activeRequestCount === 0) {
+            // All requests completed successfully
+            $logger->info('shutdown.completed');
+            
+            // Close all resources
+            $resourceManager = $container->get('ResourceManager');
+            $resourceManager->shutdown();
+            $logger->info('shutdown.resources_closed');
+            
+            exit(0);
+        }
+        
+        if (time() - $startTime >= $gracePeriod) {
+            // Grace period expired
+            $logger->warning('shutdown.timeout', ['dropped_requests' => $activeRequestCount]);
+            
+            // Close all resources
+            $resourceManager = $container->get('ResourceManager');
+            $resourceManager->shutdown();
+            $logger->info('shutdown.resources_closed');
+            
+            exit(1);
+        }
+        
+        // Check again in 100ms
+        $loop->addTimer(0.1, $checkComplete);
+    };
+    
+    $checkComplete();
+};
+
+// Public signal handler functions
+function handleSigInt() {
+    global $shutdownHandler;
+    $shutdownHandler();
+}
+
+function handleSigTerm() {
+    global $shutdownHandler;
+    $shutdownHandler();
+}
+
+Loop::get()->addSignal(SIGTERM, 'handleSigTerm');
+Loop::get()->addSignal(SIGINT, 'handleSigInt');
