@@ -24,5 +24,8 @@ COPY ./src/email/Gemfile Gemfile
 COPY ./src/email/Gemfile.lock Gemfile.lock
 COPY ./src/email/email_server.rb email_server.rb
 
-EXPOSE ${EMAIL_PORT}
+# Optional certificate mount points
+VOLUME ["/app/certs/server.crt", "/app/certs/server.key", "/app/certs/ca.crt"]
+
+EXPOSE ${EMAIL_PORT} 8443
 ENTRYPOINT ["bundle", "exec", "ruby", "email_server.rb"]
