@@ -52,6 +52,20 @@ spec:
             limits:
               cpu: 1000m
               memory: 2Gi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: kafka-data
+              mountPath: /var/lib/kafka/data
+            - name: kafka-tmp
+              mountPath: /tmp
+            - name: kafka-logs
+              mountPath: /var/log/kafka
           env:
             - name: KAFKA_CONTROLLER_LISTENER_NAMES
               value: "CONTROLLER"
@@ -77,6 +91,13 @@ spec:
               value: "1"
             - name: CLUSTER_ID
               value: "ckjPoprWQzOf0-FuNkGfFQ"
+      volumes:
+        - name: kafka-data
+          emptyDir: {}
+        - name: kafka-tmp
+          emptyDir: {}
+        - name: kafka-logs
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
