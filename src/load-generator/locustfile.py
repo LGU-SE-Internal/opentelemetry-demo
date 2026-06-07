@@ -21,52 +21,102 @@ from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
-from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.jinja2 import Jinja2Instrumentor
 from opentelemetry.instrumentation.requests import RequestsInstrumentor
 from opentelemetry.instrumentation.system_metrics import SystemMetricsInstrumentor
 from opentelemetry.instrumentation.urllib3 import URLLib3Instrumentor
 from opentelemetry.instrumentation.logging import LoggingInstrumentor
 from opentelemetry._logs import set_logger_provider
-from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
+from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
 from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.resources import Resource
 
-from openfeature import api
-from openfeature.contrib.provider.ofrep import OFREPProvider
-from openfeature.contrib.hook.opentelemetry import TracingHook
 
-from playwright.async_api import Route, Request
+# Alias exporters for testability
+TraceExporter = OTLPSpanExporter
+MetricExporter = OTLPMetricExporter
+LogExporter = OTLPLogExporter
 
-# Configure tracer provider first (needed for trace context in logs)
-tracer_provider = TracerProvider()
-trace.set_tracer_provider(tracer_provider)
-tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(insecure=True)))
+def initialize_otel_exporters():
+    # Read environment variables with defaults
+    traces_endpoint = os.environ.get(
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "http://otel-collector:4318/v1/traces"
+    )
+    metrics_endpoint = os.environ.get(
+        "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+        "http://otel-collector:4318/v1/metrics"
+    )
+    logs_endpoint = os.environ.get(
+        "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+        "http://otel-collector:4318/v1/logs"
+    )
+    
+    insecure = os.environ.get("OTEL_EXPORTER_OTLP_INSECURE", "False").lower() == "true"
+    
+    client_cert = os.environ.get("OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE", "")
+    client_key = os.environ.get("OTEL_EXPORTER_OTLP_CLIENT_KEY", "")
+    ca_cert = os.environ.get("OTEL_EXPORTER_OTLP_CERTIFICATE_AUTHORITY", "")
+    
+    retry_max_attempts = int(os.environ.get("OTEL_EXPORTER_OTLP_RETRY_MAX_ATTEMPTS", 5))
+    retry_initial_delay = float(os.environ.get("OTEL_EXPORTER_OTLP_RETRY_INITIAL_DELAY", 1.0))
+    retry_max_delay = float(os.environ.get("OTEL_EXPORTER_OTLP_RETRY_MAX_DELAY", 5.0))
+    
+    # Build common exporter parameters
+    common_params = {
+        "insecure": insecure,
+        "timeout": 10
+    }
+    
+    if client_cert and client_key:
+        common_params["client_cert_path"] = client_cert
+        common_params["client_key_path"] = client_key
+    
+    if ca_cert:
+        common_params["certificate_path"] = ca_cert
+    
+    # Add retry configuration for HTTP exporter
+    common_params["retry"] = {
+        "max_attempts": retry_max_attempts,
+        "initial_delay": retry_initial_delay,
+        "max_delay": retry_max_delay,
+        "backoff_multiplier": 2,
+        "retry_on_status_codes": [429, 502, 503, 504]
+    }
+    
+    # Configure tracer provider first (needed for trace context in logs)
+    tracer_provider = TracerProvider()
+    trace.set_tracer_provider(tracer_provider)
+    trace_exporter = TraceExporter(endpoint=traces_endpoint, **common_params)
+    tracer_provider.add_span_processor(BatchSpanProcessor(trace_exporter))
+    
+    # Configure logger provider with the same resource
+    logger_provider = LoggerProvider()
+    set_logger_provider(logger_provider)
+    
+    # Set up log exporter and processor
+    log_exporter = LogExporter(endpoint=logs_endpoint, **common_params)
+    logger_provider.add_log_record_processor(BatchLogRecordProcessor(log_exporter))
+    
+    # Create logging handler that will include trace context
+    handler = LoggingHandler(level=logging.INFO, logger_provider=logger_provider)
+    
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.addHandler(handler)
+    root_logger.setLevel(logging.INFO)
+    
+    # Configure metrics
+    metric_exporter = MetricExporter(endpoint=metrics_endpoint, **common_params)
+    set_meter_provider(MeterProvider([PeriodicExportingMetricReader(metric_exporter)]))
+    
+    # Instrument logging to automatically inject trace context
+    LoggingInstrumentor().instrument(set_logging_format=True)
 
-# Configure logger provider with the same resource
-logger_provider = LoggerProvider()
-set_logger_provider(logger_provider)
-
-# Set up log exporter and processor
-log_exporter = OTLPLogExporter(insecure=True)
-logger_provider.add_log_record_processor(BatchLogRecordProcessor(log_exporter))
-
-# Create logging handler that will include trace context
-handler = LoggingHandler(level=logging.INFO, logger_provider=logger_provider)
-
-# Configure root logger
-root_logger = logging.getLogger()
-root_logger.addHandler(handler)
-root_logger.setLevel(logging.INFO)
-
-# Configure metrics
-metric_exporter = OTLPMetricExporter(insecure=True)
-set_meter_provider(MeterProvider([PeriodicExportingMetricReader(metric_exporter)]))
-
-# Instrument logging to automatically inject trace context
-LoggingInstrumentor().instrument(set_logging_format=True)
+initialize_otel_exporters()
 
 # Instrumenting manually to avoid error with locust gevent monkey
 Jinja2Instrumentor().instrument()
