@@ -273,13 +273,44 @@ internal class Consumer : IDisposable
             or DbUpdateException { InnerException: NpgsqlException { IsTransient: true } };
     }
 
+    private readonly IOrderMessageValidator _validator = new OrderMessageValidator();
+
     private bool ProcessMessageInternal(ConsumeResult<string, byte[]> consumeResult)
     {
         try
         {
             var message = consumeResult.Message;
-            var order = OrderResult.Parser.ParseFrom(message.Value);
+            
+            // Validate message first
+            var metadata = new KafkaMessageMetadata
+            {
+                Topic = consumeResult.Topic,
+                Partition = consumeResult.Partition,
+                Offset = consumeResult.Offset,
+                Timestamp = consumeResult.Message.Timestamp.UtcDateTime,
+                MessageKey = message.Key
+            };
+            
+            var validationResult = _validator.Validate(message.Value, metadata);
+            if (!validationResult.IsValid)
+            {
+                // Log structured error without PII
+                _logger.LogError(
+                    "Order message validation failed for offset {Offset} partition {Partition}: {ErrorCodes} - {Errors}",
+                    metadata.Offset,
+                    metadata.Partition,
+                    string.Join(",", validationResult.ErrorCodes.Select(c => c.ToString())),
+                    string.Join("; ", validationResult.ValidationErrors)
+                );
+                
+                // Route to DLQ
+                SendValidationFailureToDlq(message.Value, validationResult).GetAwaiter().GetResult();
+                return false;
+            }
+
+            var order = validationResult.ValidPayload!;
             Log.OrderReceivedMessage(_logger, order);
+
 
             if (_dbConnectionString == null)
             {
@@ -354,6 +385,35 @@ internal class Consumer : IDisposable
         {
             _logger.LogError(ex, "Order parsing failed");
             return false;
+        }
+    }
+    internal async Task SendValidationFailureToDlq(byte[] rawMessage, ValidationResult<Order> validationResult)
+    {
+        try
+        {
+            var dlqMessage = new Message<string, byte[]>
+            {
+                Key = validationResult.MessageMetadata.MessageKey,
+                Value = rawMessage,
+                Timestamp = new Timestamp(validationResult.MessageMetadata.Timestamp),
+                Headers = new Headers()
+            };
+
+            // Add validation failure headers
+            dlqMessage.Headers.Add("x-validation-error-code", System.Text.Encoding.UTF8.GetBytes(string.Join(",", validationResult.ErrorCodes.Select(c => ((int)c).ToString()))));
+            dlqMessage.Headers.Add("x-validation-errors", System.Text.Encoding.UTF8.GetBytes(string.Join("; ", validationResult.ValidationErrors)));
+            dlqMessage.Headers.Add("x-original-topic", System.Text.Encoding.UTF8.GetBytes(validationResult.MessageMetadata.Topic));
+            dlqMessage.Headers.Add("x-original-partition", System.Text.Encoding.UTF8.GetBytes(validationResult.MessageMetadata.Partition.ToString()));
+            dlqMessage.Headers.Add("x-original-offset", System.Text.Encoding.UTF8.GetBytes(validationResult.MessageMetadata.Offset.ToString()));
+            dlqMessage.Headers.Add("x-original-timestamp", System.Text.Encoding.UTF8.GetBytes(validationResult.MessageMetadata.Timestamp.ToString("O")));
+
+            await _dlqProducer.ProduceAsync(DlqTopicName, dlqMessage);
+            _logger.LogInformation("Invalid order message routed to DLQ topic {DlqTopic}, offset {Offset}", DlqTopicName, validationResult.MessageMetadata.Offset);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogCritical(ex, "Failed to route invalid order message to DLQ, message will be reprocessed");
+            throw;
         }
     }
 
