@@ -411,6 +411,7 @@ services:
     restart: unless-stopped
     ports:
       - "${PAYMENT_PORT}"
+      - "${PAYMENT_HEALTH_PORT:-8080}"
     environment:
       - IPV6_ENABLED
       - PAYMENT_PORT
@@ -420,6 +421,23 @@ services:
       - OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE
       - OTEL_RESOURCE_ATTRIBUTES=${OTEL_RESOURCE_ATTRIBUTES},service.criticality=critical
       - OTEL_SERVICE_NAME=payment
+    healthcheck:
+      livenessProbe:
+        httpGet:
+          path: /health/liveness
+          port: 8080
+        initialDelaySeconds: 0
+        periodSeconds: 10
+        timeoutSeconds: 1
+        failureThreshold: 3
+      readinessProbe:
+        httpGet:
+          path: /health/readiness
+          port: 8080
+        initialDelaySeconds: 5
+        periodSeconds: 10
+        timeoutSeconds: 1
+        failureThreshold: 3
     depends_on:
       otel-collector:
         condition: service_started
