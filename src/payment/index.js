@@ -232,11 +232,53 @@ const server = new grpc.Server({
   interceptors: [rateLimitInterceptor]
 })
 
-server.addService(health.service, new health.Implementation({
-  '': health.servingStatus.SERVING
-}))
+// Health status management for gRPC health checks
+const healthStatuses = {
+  '': health.servingStatus.SERVING,
+  'opentelemetry.demo.payment.v1.PaymentService': health.servingStatus.NOT_SERVING
+};
 
-server.addService(otelDemoPackage.oteldemo.PaymentService.service, { charge: chargeServiceHandler })
+const healthImplementation = new health.Implementation(healthStatuses);
+
+// Add interceptor to gRPC health service to add OTel attributes
+const healthServiceInterceptor = (methodDescriptor) => {
+  const originalMethod = methodDescriptor.func;
+  methodDescriptor.func = (call, callback) => {
+    const serviceName = call.request.service || '';
+    const checkType = serviceName === '' ? 'liveness' : 'readiness';
+    
+    const span = opentelemetry.trace.getActiveSpan();
+    
+    originalMethod(call, (err, response) => {
+      if (span) {
+        span.setAttributes({
+          'rpc.service': 'grpc.health.v1.Health',
+          'health.check.type': checkType,
+          'health.check.status': response?.status === health.servingStatus.SERVING ? 'PASS' : 'FAIL'
+        });
+      }
+      callback(err, response);
+    });
+  };
+  return methodDescriptor;
+};
+
+// Apply interceptor to all health service methods
+const interceptedHealthService = Object.fromEntries(
+  Object.entries(health.service).map(([methodName, methodDescriptor]) => [
+    methodName,
+    healthServiceInterceptor({ ...methodDescriptor })
+  ])
+);
+
+server.addService(interceptedHealthService, healthImplementation);
+
+server.addService(otelDemoPackage.oteldemo.PaymentService.service, { charge: chargeServiceHandler });
+
+// Set payment service status to SERVING once server is bound
+setTimeout(() => {
+  healthImplementation.setStatus('opentelemetry.demo.payment.v1.PaymentService', health.servingStatus.SERVING);
+}, 1000);
 
 
 let ip = "0.0.0.0";
@@ -306,21 +348,22 @@ server.bindAsync(address, serverCredentials, (err, port) => {
     res.status(405).send();
   });
 
-  // Liveness endpoint - always returns UP when process is running
+  // Liveness endpoint - always returns 200 OK empty text when process is running (AC-1)
   app.get('/health/liveness', (req, res) => {
     const start = Date.now();
     const span = opentelemetry.trace.getTracer('paymentservice').startSpan('GET /health/liveness');
     try {
-      res.status(200).json({
-        status: 'UP',
-        timestamp: new Date().toISOString(),
-        version: process.env.IMAGE_VERSION || 'unknown'
-      });
+      res.setHeader('Content-Type', 'text/plain');
+      res.status(200).send('');
+      
       span.setAttributes({
         'http.method': 'GET',
         'http.route': '/health/liveness',
-        'http.status_code': 200
+        'http.status_code': 200,
+        'health.check.type': 'liveness',
+        'health.check.status': 'PASS'
       });
+      
       logger.info({
         method: 'GET',
         path: '/health/liveness',
@@ -421,69 +464,67 @@ server.bindAsync(address, serverCredentials, (err, port) => {
     res.status(405).send();
   });
 
-  // Readiness endpoint - checks all required dependencies
+  // Readiness endpoint - returns 200 OK with READY status when service can process requests (AC-2, AC-3)
   app.get('/health/readiness', async (req, res) => {
     const start = Date.now();
     const span = opentelemetry.trace.getTracer('paymentservice').startSpan('GET /health/readiness');
     const errors = [];
-    const dependencies = {};
 
     // Check gRPC server health
     try {
       await new Promise((resolve, reject) => {
-        healthClient.check({ service: '' }, (err, response) => {
+        healthClient.check({ service: 'opentelemetry.demo.payment.v1.PaymentService' }, (err, response) => {
           if (err) return reject(err);
-          if (response.status !== health.servingStatus.SERVING) return reject(new Error('gRPC server not serving'));
+          if (response.status !== health.servingStatus.SERVING) return reject(new Error('gRPC payment service not serving'));
           resolve();
         });
       });
-      dependencies.grpc_server = 'UP';
     } catch (err) {
-      dependencies.grpc_server = 'DOWN';
-      errors.push(`gRPC server connection failed: ${err.message}`);
+      errors.push(`gRPC payment service connection failed: ${err.message}`);
     }
 
     // Check payment processor (charge module health)
     try {
       // Simulate check for payment processor connectivity
       // In a real implementation this would ping the external payment API
-      dependencies.payment_processor = 'UP';
+      if (!charge.isHealthy()) {
+        throw new Error('Payment processor unhealthy');
+      }
     } catch (err) {
-      dependencies.payment_processor = 'DOWN';
       errors.push(`payment processor API unreachable: ${err.message}`);
     }
 
-    // Check postgres (if configured)
-    try {
-      // Simulate check for postgres connectivity
-      // In a real implementation this would test the database connection
-      dependencies.postgres = 'UP';
-    } catch (err) {
-      dependencies.postgres = 'DOWN';
-      errors.push(`postgres connection failed: ${err.message}`);
-    }
+    // Check all required environment variables are present
+    const requiredEnvVars = ['PAYMENT_PORT'];
+    requiredEnvVars.forEach(varName => {
+      if (!process.env[varName]) {
+        errors.push(`Missing required environment variable: ${varName}`);
+      }
+    });
 
     let statusCode;
+    let healthStatus;
+    let responseBody;
+    res.setHeader('Content-Type', 'application/json');
+    
     if (errors.length > 0) {
       statusCode = 503;
-      res.status(statusCode).json({
-        status: 'DOWN',
-        timestamp: new Date().toISOString(),
-        errors: errors
-      });
+      healthStatus = 'FAIL';
+      responseBody = { status: 'NOT_READY' };
     } else {
       statusCode = 200;
-      res.status(statusCode).json({
-        status: 'UP',
-        timestamp: new Date().toISOString(),
-        dependencies: dependencies
-      });
+      healthStatus = 'PASS';
+      responseBody = { status: 'READY' };
     }
+    
+    res.status(statusCode).json(responseBody);
     
     span.setAttributes({
       'http.method': 'GET',
       'http.route': '/health/readiness',
-      'http.status_code': statusCode
+      'http.status_code': statusCode,
+      'health.check.type': 'readiness',
+      'health.check.status': healthStatus
     });
     
     logger.info({

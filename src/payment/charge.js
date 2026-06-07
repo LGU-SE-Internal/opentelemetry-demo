@@ -35,6 +35,16 @@ function random(arr) {
  * @returns {Promise<{transactionId: string}>} Promise resolving to object containing the unique transaction ID on success
  * @throws {Error} If payment fails for any reason: invalid card details, expired card, unsupported card type, or random simulated failure
  */
+/**
+ * Health check function for the charge module
+ * @returns {boolean} True if the module is healthy, false otherwise
+ */
+module.exports.isHealthy = () => {
+  // Simple health check for now - returns true as long as module is loaded
+  // In a real implementation this would check connectivity to payment processors, etc.
+  return true;
+};
+
 module.exports.charge = async request => {
   const span = tracer.startSpan('charge');
 
