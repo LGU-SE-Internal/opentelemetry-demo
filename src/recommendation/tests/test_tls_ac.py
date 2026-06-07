@@ -2,9 +2,8 @@ import os
 import pytest
 import grpc
 from recommendation_server import serve, create_product_catalog_client
-from opentelemetry.proto.demo.recommendation.v1.recommendation_pb2 import ListRecommendationsRequest
-from opentelemetry.proto.demo.recommendation.v1 import recommendation_pb2_grpc
-from opentelemetry.proto.demo.productcatalog.v1.productcatalog_pb2 import ListProductsRequest
+import demo_pb2
+import demo_pb2_grpc
 
 # Helper: Temporary self-signed cert paths for testing (we'll assume these exist in test env)
 TEST_VALID_SERVER_CERT = "/tmp/test_server.crt"
@@ -51,9 +50,9 @@ def test_ac2_server_tls_enabled_rejects_plaintext(monkeypatch):
     
     # Try plaintext connection - should fail
     with grpc.insecure_channel(f"localhost:{port}") as channel:
-        stub = recommendation_pb2_grpc.RecommendationServiceStub(channel)
+        stub = demo_pb2_grpc.RecommendationServiceStub(channel)
         with pytest.raises(grpc.RpcError) as excinfo:
-            stub.ListRecommendations(ListRecommendationsRequest(user_id="test"))
+            stub.ListRecommendations(demo_pb2.ListRecommendationsRequest(user_id="test"))
         assert excinfo.value.code() in (grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.PERMISSION_DENIED)
     
     # Try TLS connection - should succeed
@@ -61,10 +60,10 @@ def test_ac2_server_tls_enabled_rejects_plaintext(monkeypatch):
         root_certs = f.read()
     credentials = grpc.ssl_channel_credentials(root_certificates=root_certs)
     with grpc.secure_channel(f"localhost:{port}", credentials) as channel:
-        stub = recommendation_pb2_grpc.RecommendationServiceStub(channel)
-        response = stub.ListRecommendations(ListRecommendationsRequest(user_id="test"))
+        stub = demo_pb2_grpc.RecommendationServiceStub(channel)
+        response = stub.ListRecommendations(demo_pb2.ListRecommendationsRequest(user_id="test"))
         assert response is not None
-    
+        assert response is not None
     server.stop(0)
 
 def test_ac3_client_tls_enabled_validates_server_cert(monkeypatch):

@@ -262,35 +262,8 @@ def load_cert_file(path: str) -> bytes:
         raise ValueError(f"Error reading certificate file {path}: {str(e)}") from e
 
 
-if __name__ == "__main__":
-    service_name = must_map_env('OTEL_SERVICE_NAME')
-    api.set_provider(FlagdProvider(host=os.environ.get('FLAGD_HOST', 'flagd'), port=os.environ.get('FLAGD_PORT', 8013)))
-    api.add_hooks([TracingHook()])
-
-    # Initialize Traces and Metrics
-    tracer = trace.get_tracer_provider().get_tracer(service_name)
-    meter = metrics.get_meter_provider().get_meter(service_name)
-    rec_svc_metrics = init_metrics(meter)
-
-    # Initialize Logs
-    logger_provider = LoggerProvider(
-        resource=Resource.create(
-            {
-                'service.name': service_name,
-            }
-        ),
-    )
-    set_logger_provider(logger_provider)
-    log_exporter = OTLPLogExporter(insecure=True)
-    logger_provider.add_log_record_processor(BatchLogRecordProcessor(log_exporter))
-    handler = LoggingHandler(level=logging.NOTSET, logger_provider=logger_provider)
-
-    # Attach OTLP handler to logger
-    logger = logging.getLogger('main')
-    logger.addHandler(handler)
-
-    catalog_addr = must_map_env('PRODUCT_CATALOG_ADDR')
-    
+def create_product_catalog_client(catalog_addr: str, logger=None):
+    """Create ProductCatalogService client with optional TLS/mTLS configuration."""
     # Configure gRPC channel with resilience settings for ProductCatalogService
     service_config = json.dumps({
         "methodConfig": [
@@ -354,11 +327,18 @@ if __name__ == "__main__":
             options=channel_options
         )
     
-    # Add retry logging interceptor
-    retry_interceptor = RetryLoggingInterceptor(logger)
-    intercepted_channel = grpc.intercept_channel(pc_channel, retry_interceptor)
-    product_catalog_stub = demo_pb2_grpc.ProductCatalogServiceStub(intercepted_channel)
+    # Add retry logging interceptor if logger is provided
+    if logger is not None:
+        retry_interceptor = RetryLoggingInterceptor(logger)
+        intercepted_channel = grpc.intercept_channel(pc_channel, retry_interceptor)
+        return demo_pb2_grpc.ProductCatalogServiceStub(intercepted_channel)
+    else:
+        # For test cases without logger
+        return demo_pb2_grpc.ProductCatalogServiceStub(pc_channel)
 
+
+def serve(listen_addr: str, test_mode: bool = False, logger=None):
+    """Start recommendation service gRPC server with optional TLS/mTLS configuration."""
     # Create gRPC server
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
 
@@ -367,8 +347,7 @@ if __name__ == "__main__":
     demo_pb2_grpc.add_RecommendationServiceServicer_to_server(service, server)
     health_pb2_grpc.add_HealthServicer_to_server(service, server)
 
-    # Start server (plaintext or TLS/mTLS)
-    port = must_map_env('RECOMMENDATION_PORT')
+    # Configure server listener (plaintext or TLS/mTLS)
     server_tls_enabled = str_to_bool(os.environ.get('TLS_SERVER_ENABLE', 'false'))
     
     if server_tls_enabled:
@@ -392,27 +371,37 @@ if __name__ == "__main__":
             root_certificates=root_certificates,
             require_client_auth=client_ca_cert_path is not None
         )
-        server.add_secure_port(f'[::]:{port}', server_credentials)
-        logger.info(f'Recommendation service started with TLS enabled, listening on port {port}')
+        server.add_secure_port(listen_addr, server_credentials)
+        if logger:
+            logger.info(f'Recommendation service started with TLS enabled, listening on {listen_addr}')
     else:
         # Use plaintext port (default behavior)
-        server.add_insecure_port(f'[::]:{port}')
-        logger.info(f'Recommendation service started, listening on port {port}')
+        server.add_insecure_port(listen_addr)
+        if logger:
+            logger.info(f'Recommendation service started, listening on {listen_addr}')
     
     server.start()
+    
+    if test_mode:
+        # Return server instance for testing, don't wait for termination
+        # Store port for test access if using random port [::]:0
+        if listen_addr.endswith(':0'):
+            server._port = server.addrs[0].get_port()
+        return server
     
     # Define signal handler for graceful shutdown
     def handle_shutdown_signal(signum, frame):
         signal_name = signal.Signals(signum).name
-        logger.info(f"Graceful shutdown started: stopping new requests, waiting up to 30s for in-flight requests to complete")
+        if logger:
+            logger.info(f"Graceful shutdown started: stopping new requests, waiting up to 30s for in-flight requests to complete")
         # Initiate graceful shutdown with 30s grace period
         shutdown_event = server.stop(grace=30)
         
         def wait_for_shutdown():
             shutdown_event.wait()
-            if shutdown_event.is_set():
+            if shutdown_event.is_set() and logger:
                 logger.info("Graceful shutdown completed: all in-flight requests finished, exiting")
-            else:
+            elif logger:
                 logger.warning("Graceful shutdown timed out after 30s: force terminating with active in-flight requests remaining")
         
         # Wait for shutdown to complete
@@ -425,3 +414,38 @@ if __name__ == "__main__":
     
     # Wait for server termination
     server.wait_for_termination()
+
+
+if __name__ == "__main__":
+    service_name = must_map_env('OTEL_SERVICE_NAME')
+    api.set_provider(FlagdProvider(host=os.environ.get('FLAGD_HOST', 'flagd'), port=os.environ.get('FLAGD_PORT', 8013)))
+    api.add_hooks([TracingHook()])
+
+    # Initialize Traces and Metrics
+    tracer = trace.get_tracer_provider().get_tracer(service_name)
+    meter = metrics.get_meter_provider().get_meter(service_name)
+    rec_svc_metrics = init_metrics(meter)
+
+    # Initialize Logs
+    logger_provider = LoggerProvider(
+        resource=Resource.create(
+            {
+                'service.name': service_name,
+            }
+        ),
+    )
+    set_logger_provider(logger_provider)
+    log_exporter = OTLPLogExporter(insecure=True)
+    logger_provider.add_log_record_processor(BatchLogRecordProcessor(log_exporter))
+    handler = LoggingHandler(level=logging.NOTSET, logger_provider=logger_provider)
+
+    # Attach OTLP handler to logger
+    logger = logging.getLogger('main')
+    logger.addHandler(handler)
+
+    catalog_addr = must_map_env('PRODUCT_CATALOG_ADDR')
+    product_catalog_stub = create_product_catalog_client(catalog_addr, logger=logger)
+
+    # Start server
+    port = must_map_env('RECOMMENDATION_PORT')
+    serve(f'[::]:{port}', logger=logger)
