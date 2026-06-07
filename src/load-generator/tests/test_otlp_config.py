@@ -167,3 +167,75 @@ def test_ac10_backward_compatibility_defaults():
         assert retry_config["max_attempts"] == expected_defaults["retry_max_attempts"]
         assert retry_config["initial_delay"] == expected_defaults["retry_initial_delay"]
         assert retry_config["max_delay"] == expected_defaults["retry_max_delay"]
+
+
+def test_ac1_timeout_default_when_no_env_var():
+    """AC-1: When OTEL_EXPORTER_OTLP_TIMEOUT is not set, all exporters use 10s timeout"""
+    # Ensure no timeout env var is set
+    for k in list(os.environ.keys()):
+        if k == "OTEL_EXPORTER_OTLP_TIMEOUT":
+            del os.environ[k]
+    
+    with patch("locustfile.TraceExporter") as mock_trace, \
+         patch("locustfile.MetricExporter") as mock_metric, \
+         patch("locustfile.LogExporter") as mock_log:
+        
+        locustfile.initialize_otel_exporters()
+        
+        # Check all exporters have timeout=10
+        assert mock_trace.call_args[1]["timeout"] == 10
+        assert mock_metric.call_args[1]["timeout"] == 10
+        assert mock_log.call_args[1]["timeout"] == 10
+
+
+def test_ac2_timeout_uses_env_var_when_valid():
+    """AC-2: When OTEL_EXPORTER_OTLP_TIMEOUT is set to valid positive integer, all exporters use that value"""
+    test_timeout = 20
+    with patch.dict(os.environ, {"OTEL_EXPORTER_OTLP_TIMEOUT": str(test_timeout)}):
+        with patch("locustfile.TraceExporter") as mock_trace, \
+             patch("locustfile.MetricExporter") as mock_metric, \
+             patch("locustfile.LogExporter") as mock_log:
+            
+            locustfile.initialize_otel_exporters()
+            
+            # Check all exporters use the custom timeout value
+            assert mock_trace.call_args[1]["timeout"] == test_timeout
+            assert mock_metric.call_args[1]["timeout"] == test_timeout
+            assert mock_log.call_args[1]["timeout"] == test_timeout
+
+
+def test_ac3_timeout_fallback_to_default_when_invalid():
+    """AC-3: When OTEL_EXPORTER_OTLP_TIMEOUT is set to invalid value, fallback to default 10s"""
+    invalid_values = ["abc", "0", "-5", "10.5", "", "  15  ", "null"]
+    
+    for invalid_val in invalid_values:
+        with patch.dict(os.environ, {"OTEL_EXPORTER_OTLP_TIMEOUT": invalid_val}):
+            with patch("locustfile.TraceExporter") as mock_trace, \
+                 patch("locustfile.MetricExporter") as mock_metric, \
+                 patch("locustfile.LogExporter") as mock_log:
+                
+                locustfile.initialize_otel_exporters()
+                
+                # Check all exporters fall back to 10
+                assert mock_trace.call_args[1]["timeout"] == 10, f"Failed for invalid value '{invalid_val}'"
+                assert mock_metric.call_args[1]["timeout"] == 10, f"Failed for invalid value '{invalid_val}'"
+                assert mock_log.call_args[1]["timeout"] == 10, f"Failed for invalid value '{invalid_val}'"
+
+
+def test_ac5_no_hardcoded_timeout_in_exporter_init():
+    """AC-5: No hardcoded 10-second timeout value remains in OTLP exporter initialization parameters"""
+    # Read the locustfile source code
+    locustfile_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "locustfile.py")
+    with open(locustfile_path, "r") as f:
+        content = f.read()
+    
+    # Find the initialize_otel_exporters function
+    import re
+    func_match = re.search(r"def initialize_otel_exporters\(\):(.*?)(?=\ndef |\Z)", content, re.DOTALL)
+    assert func_match is not None, "initialize_otel_exporters function not found"
+    func_content = func_match.group(1)
+    
+    # Check for hardcoded timeout=10 in exporter calls
+    hardcoded_timeout_pattern = re.compile(r"timeout\s*=\s*10\b")
+    matches = hardcoded_timeout_pattern.findall(func_content)
+    assert len(matches) == 0, f"Hardcoded timeout=10 found in initialize_otel_exporters function: {matches}"
