@@ -8,6 +8,7 @@ require "json"
 require "rack/attack"
 require "open_feature/sdk"
 require "openfeature/flagd/provider"
+require "openssl"
 
 require "opentelemetry/sdk"
 require "opentelemetry-logs-sdk"
@@ -17,7 +18,47 @@ require "opentelemetry-exporter-otlp-logs"
 require "opentelemetry-exporter-otlp-metrics"
 require "opentelemetry/instrumentation/sinatra"
 
-set :port, ENV["EMAIL_PORT"]
+# TLS/mTLS Configuration
+tls_enabled = ENV.fetch("EMAIL_SERVICE_TLS_ENABLED", "false") == "true"
+if tls_enabled
+  cert_path = ENV["EMAIL_SERVICE_SSL_CERT_PATH"]
+  key_path = ENV["EMAIL_SERVICE_SSL_KEY_PATH"]
+  
+  unless cert_path && File.exist?(cert_path) && key_path && File.exist?(key_path)
+    STDERR.puts "Error: Invalid SSL configuration - EMAIL_SERVICE_SSL_CERT_PATH and EMAIL_SERVICE_SSL_KEY_PATH must be provided and point to valid files when TLS is enabled"
+    exit 1
+  end
+
+  mtls_enabled = ENV.fetch("EMAIL_SERVICE_MTLS_ENABLED", "false") == "true"
+  ca_cert_path = ENV["EMAIL_SERVICE_SSL_CA_CERT_PATH"] if mtls_enabled
+
+  if mtls_enabled
+    unless ca_cert_path && File.exist?(ca_cert_path)
+      STDERR.puts "Error: Invalid mTLS configuration - EMAIL_SERVICE_SSL_CA_CERT_PATH must be provided and point to a valid file when mTLS is enabled"
+      exit 1
+    end
+  end
+
+  # Configure SSL settings for the server
+  ssl_settings = {
+    SSLEnable: true,
+    SSLCertificate: OpenSSL::X509::Certificate.new(File.read(cert_path)),
+    SSLPrivateKey: OpenSSL::PKey::RSA.new(File.read(key_path)),
+  }
+
+  if mtls_enabled
+    ssl_settings[:SSLVerifyClient] = OpenSSL::SSL::VERIFY_PEER | OpenSSL::SSL::VERIFY_FAIL_IF_NO_PEER_CERT
+    ssl_settings[:SSLClientCA] = [OpenSSL::X509::Certificate.new(File.read(ca_cert_path))]
+  else
+    ssl_settings[:SSLVerifyClient] = OpenSSL::SSL::VERIFY_NONE
+  end
+
+  set :server_settings, ssl_settings
+  set :port, 8443
+else
+  # Default plain HTTP configuration (backward compatible)
+  set :port, ENV["EMAIL_PORT"] || 8080
+end
 
 # Graceful shutdown state
 $shutting_down = false
