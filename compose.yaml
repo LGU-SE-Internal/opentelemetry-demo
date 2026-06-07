@@ -61,7 +61,7 @@ services:
       - _JAVA_OPTIONS
     depends_on:
       otel-collector:
-        condition: service_started
+        condition: service_healthy
       flagd:
         condition: service_healthy
     logging: *logging
@@ -96,7 +96,7 @@ services:
       valkey-cart:
         condition: service_started
       otel-collector:
-        condition: service_started
+        condition: service_healthy
       flagd:
         condition: service_healthy
     logging: *logging
@@ -146,7 +146,7 @@ services:
       shipping:
         condition: service_started
       otel-collector:
-        condition: service_started
+        condition: service_healthy
       flagd:
         condition: service_healthy
     logging: *logging
@@ -179,7 +179,7 @@ services:
       - OTEL_SERVICE_NAME=currency
     depends_on:
       otel-collector:
-        condition: service_started
+        condition: service_healthy
     logging: *logging
 
   # Email service
@@ -209,7 +209,7 @@ services:
       - OTEL_SERVICE_NAME=email
     depends_on:
       otel-collector:
-        condition: service_started
+        condition: service_healthy
     logging: *logging
 
   # Frontend
@@ -267,7 +267,7 @@ services:
       shipping:
         condition: service_started
       otel-collector:
-        condition: service_started
+        condition: service_healthy
       image-provider:
         condition: service_started
       flagd:
@@ -353,7 +353,7 @@ services:
       - OTEL_SERVICE_NAME=image-provider
     depends_on:
       otel-collector:
-        condition: service_started
+        condition: service_healthy
     logging: *logging
 
   # Load Generator
@@ -440,7 +440,7 @@ services:
         failureThreshold: 3
     depends_on:
       otel-collector:
-        condition: service_started
+        condition: service_healthy
       flagd:
         condition: service_healthy
     logging: *logging
@@ -475,7 +475,7 @@ services:
       - DB_CONNECTION_STRING=postgres://astronomy_user:${POSTGRES_ASTRONOMY_PASSWORD}@${POSTGRES_HOST}/astronomy_db?sslmode=disable
     depends_on:
       otel-collector:
-        condition: service_started
+        condition: service_healthy
       flagd:
         condition: service_healthy
       astronomy-db:
@@ -526,7 +526,7 @@ services:
       astronomy-db:
         condition: service_started
       otel-collector:
-        condition: service_started
+        condition: service_healthy
     logging: *logging
 
   # Quote service
@@ -556,7 +556,7 @@ services:
       - OTEL_SERVICE_NAME=quote
     depends_on:
       otel-collector:
-        condition: service_started
+        condition: service_healthy
     logging: *logging
 
   # Recommendation service
@@ -590,7 +590,7 @@ services:
       product-catalog:
         condition: service_started
       otel-collector:
-        condition: service_started
+        condition: service_healthy
       flagd:
         condition: service_healthy
     logging: *logging
@@ -623,7 +623,7 @@ services:
       - OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE
     depends_on:
       otel-collector:
-        condition: service_started
+        condition: service_healthy
       flagd:
         condition: service_healthy
     logging: *logging
@@ -691,7 +691,7 @@ services:
       - "${FLAGD_UI_PORT}"
     depends_on:
       otel-collector:
-        condition: service_started
+        condition: service_healthy
       flagd:
         condition: service_healthy
     volumes:
@@ -797,12 +797,21 @@ services:
       resources:
         limits:
           memory: 200M
+        requests:
+          cpu: "250m"
+          memory: "256Mi"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:13133/"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
     command:
       - --config=/etc/otelcol-config.yml
       - --config=/etc/otelcol-config-extras.yml
       - --feature-gates=service.profilesSupport
-    user: 0:0
+    user: "10001"
     volumes:
       - ${HOST_FILESYSTEM}:/hostfs:ro
       - ${DOCKER_SOCK}:/var/run/docker.sock:ro
