@@ -7,9 +7,14 @@ FROM apache/kafka:3.9.1@sha256:4ceccc577f03f51f6af8dbfda55194d0d892f4fa7913ffbde
 USER root
 ARG OTEL_JAVA_AGENT_VERSION
 
+RUN microdnf install -y python3 python3-pip procps && \
+    pip3 install flask kafka-python && \
+    microdnf clean all
+
 USER appuser
 
 ADD --chown=appuser:appuser https://github.com/open-telemetry/opentelemetry-java-instrumentation/releases/download/v$OTEL_JAVA_AGENT_VERSION/opentelemetry-javaagent.jar /tmp/opentelemetry-javaagent.jar
+ADD --chown=appuser:appuser kafka_healthcheck.py /home/appuser/kafka_healthcheck.py
 
 ENV KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
 ENV KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
@@ -26,3 +31,7 @@ ENV KAFKA_OPTS="-javaagent:/tmp/opentelemetry-javaagent.jar -Dotel.jmx.target.sy
 ENV CLUSTER_ID=ckjPoprWQzOf0-FuNkGfFQ
 
 HEALTHCHECK --start-period=30s --interval=10s --timeout=5s --retries=3 CMD kafka-broker-api-versions.sh --bootstrap-server localhost:9092
+
+EXPOSE 8080
+
+CMD ["sh", "-c", "python3 /home/appuser/kafka_healthcheck.py & /etc/kafka/docker/run"]
