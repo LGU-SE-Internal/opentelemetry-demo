@@ -6,6 +6,7 @@
 
 # Python
 import os
+import sys
 import json
 import re
 from concurrent import futures
@@ -572,6 +573,37 @@ if __name__ == "__main__":
     health_servicer.set("", health_pb2.HealthCheckResponse.NOT_SERVING)
     health_servicer.set("product.reviews.v1.ProductReviewService", health_pb2.HealthCheckResponse.NOT_SERVING)
 
+    # TLS Configuration
+    tls_cert_path = os.getenv("PRODUCT_REVIEWS_TLS_CERT_PATH")
+    tls_key_path = os.getenv("PRODUCT_REVIEWS_TLS_KEY_PATH")
+    tls_ca_cert_path = os.getenv("PRODUCT_REVIEWS_TLS_CA_CERT_PATH")
+    mtls_enabled = os.getenv("PRODUCT_REVIEWS_MTLS_ENABLED", "false").lower() == "true"
+
+    # Validate TLS configuration
+    if bool(tls_cert_path) != bool(tls_key_path):
+        print("Incomplete TLS configuration: both PRODUCT_REVIEWS_TLS_CERT_PATH and PRODUCT_REVIEWS_TLS_KEY_PATH must be provided", file=sys.stderr)
+        sys.exit(1)
+
+    if mtls_enabled and not tls_ca_cert_path:
+        print("mTLS is enabled but PRODUCT_REVIEWS_TLS_CA_CERT_PATH is not configured", file=sys.stderr)
+        sys.exit(1)
+
+    # Validate file paths if provided
+    def validate_file(path: str, description: str):
+        if not os.path.exists(path):
+            print(f"File not found: {path}", file=sys.stderr)
+            sys.exit(1)
+        if not os.access(path, os.R_OK):
+            print(f"File not readable: {path}", file=sys.stderr)
+            sys.exit(1)
+
+    if tls_cert_path:
+        validate_file(tls_cert_path, "TLS certificate")
+    if tls_key_path:
+        validate_file(tls_key_path, "TLS private key")
+    if tls_ca_cert_path:
+        validate_file(tls_ca_cert_path, "TLS CA certificate")
+
     llm_host = must_map_env('LLM_HOST')
     llm_port = must_map_env('LLM_PORT')
     llm_mock_url = f"http://{llm_host}:{llm_port}/v1"
@@ -617,9 +649,40 @@ if __name__ == "__main__":
 
     # Start server
     port = must_map_env('PRODUCT_REVIEWS_PORT')
-    server.add_insecure_port(f'[::]:{port}')
+    if tls_cert_path and tls_key_path:
+        # Load TLS credentials
+        with open(tls_cert_path, 'rb') as f:
+            cert_chain = f.read()
+        with open(tls_key_path, 'rb') as f:
+            private_key = f.read()
+        
+        if mtls_enabled:
+            with open(tls_ca_cert_path, 'rb') as f:
+                root_certificates = f.read()
+            # Require and validate client certificates
+            server_credentials = grpc.ssl_server_credentials(
+                [(private_key, cert_chain)],
+                root_certificates=root_certificates,
+                require_client_auth=True
+            )
+            server._ssl_client_certificate_request_type = grpc.ServerCertificateConfiguration.REQUIRE_CLIENT_CERTIFICATE_AND_REJECT_IF_NOT_PROVIDED
+        else:
+            # No client certificate required
+            server_credentials = grpc.ssl_server_credentials(
+                [(private_key, cert_chain)]
+            )
+            server._ssl_client_certificate_request_type = grpc.ServerCertificateConfiguration.DONT_REQUEST_CLIENT_CERTIFICATE
+        
+        server.add_secure_port(f'[::]:{port}', server_credentials)
+        server._secure_port = port
+        logger.info(f'Product reviews service starting with TLS enabled, port {port}')
+    else:
+        # Plaintext mode
+        server.add_insecure_port(f'[::]:{port}')
+        server._insecure_port = port
+        logger.info(f'Product reviews service starting in plaintext mode, port {port}')
 
-    async def serve():
+    async def serve(testing: bool = False):
         global service_initialized
         await server.start()
         logger.info(f'Product reviews service started, listening on port {port}')
@@ -630,6 +693,9 @@ if __name__ == "__main__":
         # Mark service as initialized after all startup steps complete
         service_initialized = True
         logger.info('Service initialization completed')
+
+        if testing:
+            return server
         
         await server.wait_for_termination()
 
