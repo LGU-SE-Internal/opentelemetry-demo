@@ -12,38 +12,6 @@ use Psr\Http\Message\ServerRequestInterface as Request;
 use Psr\Log\LoggerInterface;
 use Slim\App;
 
-function calculateQuote(int $itemCount, float $totalWeightKg): float
-{
-    $quote = 0.0;
-    $childSpan = Globals::tracerProvider()->getTracer('manual-instrumentation')
-        ->spanBuilder('calculate-quote')
-        ->setSpanKind(SpanKind::KIND_INTERNAL)
-        ->startSpan();
-    $childSpan->addEvent('Calculating quote');
-
-    try {
-        $costPerItem = 8.99;
-        $quote = round($costPerItem * $itemCount, 2);
-
-        $childSpan->setAttribute('demo.shipping.quote.items_count', $itemCount);
-        $childSpan->setAttribute('demo.shipping.quote.cost.total', $quote);
-        $childSpan->setAttribute('demo.shipping.quote.total_weight_kg', $totalWeightKg);
-
-        $childSpan->addEvent('Quote calculated, returning its value');
-
-        //manual metrics
-        static $counter;
-        $counter ??= Globals::meterProvider()
-            ->getMeter('quotes')
-            ->createCounter('quotes', 'quotes', 'number of quotes calculated');
-        $counter->add(1, ['number_of_items' => $itemCount]);
-    } catch (\Exception $exception) {
-        $childSpan->recordException($exception);
-    } finally {
-        $childSpan->end();
-        return $quote;
-    }
-}
 
 return function (App $app) {
     $app->get('/health', function (Request $request, Response $response) {
@@ -82,24 +50,42 @@ return function (App $app) {
         
         $itemCount = $body['item_count'];
         $totalWeightKg = (float)$body['total_weight_kg'];
+        $forceFailure = isset($body['forceFailure']) ? (bool)$body['forceFailure'] : false;
 
-        $data = calculateQuote($itemCount, $totalWeightKg);
+        try {
+            $quoteService = new QuoteService($logger);
+            $data = $quoteService->calculateQuote($itemCount, $totalWeightKg, $forceFailure);
 
-        $payload = json_encode(['quote' => $data, 'shipping_cost_usd' => $data]);
-        $response->getBody()->write($payload);
+            $payload = json_encode(['quote' => $data, 'shipping_cost_usd' => $data]);
+            $response->getBody()->write($payload);
 
-        $span->addEvent('Quote processed, response sent back', [
-            'demo.shipping.quote.cost.total' => $data
-        ]);
-        //exported as an opentelemetry log (see dependencies.php)
-        $logger->info('Calculated quote', [
-            'total' => $data,
-            'item_count' => $itemCount,
-            'total_weight_kg' => $totalWeightKg,
-            'destination_country' => $body['destination_country']
-        ]);
+            $span->addEvent('Quote processed, response sent back', [
+                'demo.shipping.quote.cost.total' => $data
+            ]);
+            //exported as an opentelemetry log (see dependencies.php)
+            $logger->info('Calculated quote', [
+                'total' => $data,
+                'item_count' => $itemCount,
+                'total_weight_kg' => $totalWeightKg,
+                'destination_country' => $body['destination_country']
+            ]);
 
-        return $response
-            ->withHeader('Content-Type', 'application/json');
+            return $response
+                ->withHeader('Content-Type', 'application/json');
+        } catch (QuoteCalculationException $e) {
+            $span->setStatus(\OpenTelemetry\API\Trace\StatusCode::STATUS_ERROR, 'Quote calculation failed');
+            $span->recordException($e);
+            
+            $traceId = $span->getContext()->getTraceId();
+            $payload = json_encode([
+                'error' => 'Quote calculation failed',
+                'traceId' => $traceId
+            ]);
+            $response->getBody()->write($payload);
+            
+            return $response
+                ->withHeader('Content-Type', 'application/json')
+                ->withStatus(500);
+        }
     })->add(\App\Application\Middleware\QuoteRequestValidationMiddleware::class);
 };
