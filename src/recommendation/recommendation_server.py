@@ -331,13 +331,13 @@ def create_product_catalog_client(catalog_addr: str, logger=None):
     if logger is not None:
         retry_interceptor = RetryLoggingInterceptor(logger)
         intercepted_channel = grpc.intercept_channel(pc_channel, retry_interceptor)
-        return demo_pb2_grpc.ProductCatalogServiceStub(intercepted_channel)
+        return demo_pb2_grpc.ProductCatalogServiceStub(intercepted_channel), pc_channel
     else:
         # For test cases without logger
-        return demo_pb2_grpc.ProductCatalogServiceStub(pc_channel)
+        return demo_pb2_grpc.ProductCatalogServiceStub(pc_channel), pc_channel
 
 
-def serve(listen_addr: str, test_mode: bool = False, logger=None):
+def serve(listen_addr: str, product_catalog_channel=None, test_mode: bool = False, logger=None):
     """Start recommendation service gRPC server with optional TLS/mTLS configuration."""
     # Create gRPC server
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
@@ -346,6 +346,39 @@ def serve(listen_addr: str, test_mode: bool = False, logger=None):
     service = RecommendationService()
     demo_pb2_grpc.add_RecommendationServiceServicer_to_server(service, server)
     health_pb2_grpc.add_HealthServicer_to_server(service, server)
+
+    # Define signal handler for graceful shutdown (registered before server start)
+    def handle_shutdown_signal(signum, frame):
+        signal_name = signal.Signals(signum).name
+        if logger:
+            logger.info(f"Received termination signal {signal_name}, starting graceful shutdown sequence")
+            logger.info("Stopping new gRPC connections, waiting up to 10s for in-flight requests to complete")
+        # Initiate graceful shutdown with 10s grace period per requirements
+        shutdown_event = server.stop(grace=10.0)
+        
+        def wait_for_shutdown():
+            shutdown_completed = shutdown_event.wait()
+            if shutdown_completed and logger:
+                logger.info("All in-flight requests completed within grace period")
+            elif logger:
+                logger.warning("10s grace period timeout reached: terminating remaining active requests")
+            
+            # Close product catalog connections if available
+            if product_catalog_channel:
+                product_catalog_channel.close()
+                if logger:
+                    logger.info("Product catalog service connections closed")
+            
+            if logger:
+                logger.info("Shutdown sequence complete, exiting service")
+        
+        # Wait for shutdown to complete
+        wait_for_shutdown()
+        os._exit(0)
+    
+    # Register signal handlers for SIGTERM and SIGINT before starting server
+    signal.signal(signal.SIGTERM, handle_shutdown_signal)
+    signal.signal(signal.SIGINT, handle_shutdown_signal)
 
     # Configure server listener (plaintext or TLS/mTLS)
     server_tls_enabled = str_to_bool(os.environ.get('TLS_SERVER_ENABLE', 'false'))
@@ -389,29 +422,6 @@ def serve(listen_addr: str, test_mode: bool = False, logger=None):
             server._port = server.addrs[0].get_port()
         return server
     
-    # Define signal handler for graceful shutdown
-    def handle_shutdown_signal(signum, frame):
-        signal_name = signal.Signals(signum).name
-        if logger:
-            logger.info(f"Graceful shutdown started: stopping new requests, waiting up to 30s for in-flight requests to complete")
-        # Initiate graceful shutdown with 30s grace period
-        shutdown_event = server.stop(grace=30)
-        
-        def wait_for_shutdown():
-            shutdown_event.wait()
-            if shutdown_event.is_set() and logger:
-                logger.info("Graceful shutdown completed: all in-flight requests finished, exiting")
-            elif logger:
-                logger.warning("Graceful shutdown timed out after 30s: force terminating with active in-flight requests remaining")
-        
-        # Wait for shutdown to complete
-        wait_for_shutdown()
-        os._exit(0)
-    
-    # Register signal handlers for SIGTERM and SIGINT
-    signal.signal(signal.SIGTERM, handle_shutdown_signal)
-    signal.signal(signal.SIGINT, handle_shutdown_signal)
-    
     # Wait for server termination
     server.wait_for_termination()
 
@@ -444,8 +454,8 @@ if __name__ == "__main__":
     logger.addHandler(handler)
 
     catalog_addr = must_map_env('PRODUCT_CATALOG_ADDR')
-    product_catalog_stub = create_product_catalog_client(catalog_addr, logger=logger)
+    product_catalog_stub, product_catalog_channel = create_product_catalog_client(catalog_addr, logger=logger)
 
     # Start server
     port = must_map_env('RECOMMENDATION_PORT')
-    serve(f'[::]:{port}', logger=logger)
+    serve(f'[::]:{port}', product_catalog_channel=product_catalog_channel, logger=logger)
