@@ -12,6 +12,7 @@ import org.apache.kafka.common.serialization.ByteArrayDeserializer
 import org.apache.kafka.common.serialization.StringDeserializer
 import org.apache.logging.log4j.LogManager
 import org.apache.logging.log4j.Logger
+import org.slf4j.MDC
 import oteldemo.Demo.*
 import java.time.Duration.ofMillis
 import java.util.*
@@ -27,6 +28,7 @@ import io.grpc.Server
 import io.grpc.ServerBuilder
 import io.grpc.Status
 import io.grpc.StatusRuntimeException
+import io.grpc.Context
 import io.grpc.protobuf.services.HealthStatusManager
 import io.grpc.health.v1.HealthCheckResponse.ServingStatus
 import io.grpc.netty.shaded.io.grpc.netty.GrpcSslContexts
@@ -86,6 +88,9 @@ const val HEALTH_CHECK_INTERVAL_MS = 10000L // 10 seconds
 const val MAX_UNHEALTHY_POLL_INTERVAL_MS = 60000L // 60 seconds
 const val SHUTDOWN_WAIT_MS = 5000L // 5 seconds
 const val DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_MS = 30000L // 30 seconds default
+
+// gRPC context keys
+val GRPC_CONTEXT_REQUEST_ID_KEY: Context.Key<String> = Context.key("x-request-id")
 
 // TLS Configuration Environment Variables
 const val ENV_GRPC_TLS_ENABLED = "GRPC_TLS_ENABLED"
@@ -713,62 +718,76 @@ class FraudDetectionServiceImpl : FraudDetectionServiceGrpcKt.FraudDetectionServ
     }
 
     private fun validateRequest(request: CheckFraudRequest) {
-        // AC-1: Validate required fields are non-empty
-        if (request.userId.isBlank()) {
+        // Validate user ID
+        if (request.userId.isNullOrBlank()) {
+            logValidationFailure("user_id", "user_id is required")
             throw Status.INVALID_ARGUMENT
-                .withDescription("user_id is required and cannot be empty")
+                .withDescription("user_id is required")
                 .asRuntimeException()
         }
-        if (request.cardNumber.isBlank()) {
+        
+        // Validate order ID
+        if (request.orderId.isNullOrBlank()) {
+            logValidationFailure("order_id", "order_id is required")
             throw Status.INVALID_ARGUMENT
-                .withDescription("card_number is required and cannot be empty")
+                .withDescription("order_id is required")
                 .asRuntimeException()
         }
-        if (request.orderId.isBlank()) {
-            throw Status.INVALID_ARGUMENT
-                .withDescription("order_id is required and cannot be empty")
-                .asRuntimeException()
-        }
-
-        // AC-2: Validate amount is greater than 0
+        
+        // Validate transaction amount
         if (request.amount <= 0) {
+            logValidationFailure("transaction_amount", "transaction_amount must be greater than 0")
             throw Status.INVALID_ARGUMENT
-                .withDescription("Transaction amount must be greater than 0")
+                .withDescription("transaction_amount must be greater than 0")
                 .asRuntimeException()
         }
-
-        // AC-3: Validate user ID is valid UUID v4
-        if (!isValidUUIDv4(request.userId)) {
+        
+        // Validate address fields
+        val address = request.address
+        if (address == null) {
+            logValidationFailure("address", "address is required")
             throw Status.INVALID_ARGUMENT
-                .withDescription("User ID must be a valid UUID v4")
+                .withDescription("address is required")
                 .asRuntimeException()
         }
-
-        // AC-4: Validate order ID is 12-character uppercase alphanumeric
-        if (!isValidOrderId(request.orderId)) {
+        if (address.street.isNullOrBlank()) {
+            logValidationFailure("address.street", "address.street is required")
             throw Status.INVALID_ARGUMENT
-                .withDescription("Order ID must be 12-character uppercase alphanumeric")
+                .withDescription("address.street is required")
                 .asRuntimeException()
         }
-
-        // AC-5: Validate card number is 13-19 digits only
-        if (!request.cardNumber.all { it.isDigit() }) {
+        if (address.city.isNullOrBlank()) {
+            logValidationFailure("address.city", "address.city is required")
             throw Status.INVALID_ARGUMENT
-                .withDescription("Card number must be 13-19 digits with no separators")
+                .withDescription("address.city is required")
                 .asRuntimeException()
         }
-        if (request.cardNumber.length < 13 || request.cardNumber.length > 19) {
+        if (address.zipCode.isNullOrBlank()) {
+            logValidationFailure("address.zip_code", "address.zip_code is required")
             throw Status.INVALID_ARGUMENT
-                .withDescription("Card number must be 13-19 digits with no separators")
+                .withDescription("address.zip_code is required")
                 .asRuntimeException()
         }
-
-        // AC-6: Validate card number passes Luhn check
-        if (!luhnCheck(request.cardNumber)) {
+        if (address.country.isNullOrBlank()) {
+            logValidationFailure("address.country", "address.country is required")
             throw Status.INVALID_ARGUMENT
-                .withDescription("Card number is invalid (failed Luhn check)")
+                .withDescription("address.country is required")
                 .asRuntimeException()
         }
+    }
+    
+    private fun logValidationFailure(invalidField: String, errorMessage: String) {
+        MDC.put("request_id", GRPC_CONTEXT_REQUEST_ID_KEY.get() ?: "unknown")
+        MDC.put("invalid_field", invalidField)
+        MDC.put("error_message", errorMessage)
+        MDC.put("source", "request-validation")
+        
+        logger.warn("Request validation failed: $errorMessage")
+        
+        MDC.remove("request_id")
+        MDC.remove("invalid_field")
+        MDC.remove("error_message")
+        MDC.remove("source")
     }
 
     private fun isValidUUIDv4(uuid: String): Boolean {
