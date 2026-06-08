@@ -270,4 +270,4 @@ def test_ac9_health_endpoint_returns_200():
         health_url = f"http://localhost:{COLLECTOR_HEALTH_PORT}/"
         resp = requests.get(health_url, timeout=5)
         assert resp.status_code == 200, f"Health endpoint returned {resp.status_code} instead of 200"
-EOF && chmod +x tests/test_otel_collector_production_ready.py
+
