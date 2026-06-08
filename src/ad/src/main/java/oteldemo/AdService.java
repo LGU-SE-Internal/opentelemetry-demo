@@ -115,7 +115,7 @@ public final class AdService {
 
     // Configure circuit breaker
     CircuitBreakerConfig circuitBreakerConfig = CircuitBreakerConfig.custom()
-        .failureThresholdCount(CIRCUIT_BREAKER_FAILURE_THRESHOLD) // open after threshold consecutive failures
+        .failureRateThreshold(CIRCUIT_BREAKER_FAILURE_THRESHOLD) // open after threshold consecutive failures
         .waitDurationInOpenState(Duration.ofMillis(CIRCUIT_BREAKER_RESET_TIMEOUT_MS))
         .permittedNumberOfCallsInHalfOpenState(1)
         .recordExceptions(IOException.class, StatusRuntimeException.class)
