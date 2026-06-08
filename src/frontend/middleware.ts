@@ -1,7 +1,20 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
+import { rateLimit } from 'next-rate-limit';
 import { AddToCartSchema, GetCartSchema, CheckoutSchema, ProductSearchSchema, GetProductSchema } from "./middleware/validationSchemas";
 import { z, ZodError } from "zod";
+
+// Rate limit configuration
+const MAX_REQUESTS = parseInt(process.env.FRONTEND_RATE_LIMIT_MAX_REQUESTS || '100', 10);
+const WINDOW_SECONDS = parseInt(process.env.FRONTEND_RATE_LIMIT_WINDOW_SECONDS || '60', 10);
+const WINDOW_MS = WINDOW_SECONDS * 1000;
+
+const { limit, isRateLimited, getRemaining, getResetTime } = rateLimit({
+  windowMs: WINDOW_MS,
+  max: MAX_REQUESTS,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 function sanitizeString(input: string): string {
   return input
@@ -48,6 +61,58 @@ export async function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
   const method = request.method;
 
+  // Skip rate limiting for internal API endpoints
+  if (pathname.startsWith('/api/internal/')) {
+    return NextResponse.next();
+  }
+
+  // Extract client IP address
+  const xForwardedFor = request.headers.get('X-Forwarded-For');
+  const clientIp = xForwardedFor ? xForwardedFor.split(',')[0].trim() : request.ip || 'unknown';
+
+  // Check rate limit
+  const { limited, reset } = await limit(clientIp);
+  if (limited) {
+    const retryAfter = Math.ceil((reset - Date.now()) / 1000);
+    
+    // Log structured rate limit violation event
+    console.log(JSON.stringify({
+      event: 'rate_limit_violation',
+      timestamp: new Date().toISOString(),
+      client_ip: clientIp,
+      endpoint: pathname,
+      rate_limit_threshold: MAX_REQUESTS,
+      window_length_seconds: WINDOW_SECONDS,
+      retry_after_seconds: retryAfter
+    }));
+
+    // Return 429 response
+    return NextResponse.json(
+      {
+        error: "Too Many Requests",
+        message: `You have exceeded the rate limit of ${MAX_REQUESTS} requests per ${WINDOW_SECONDS}s`,
+        retryAfter: retryAfter
+      },
+      {
+        status: 429,
+        headers: {
+          'Retry-After': retryAfter.toString(),
+          'RateLimit-Limit': MAX_REQUESTS.toString(),
+          'RateLimit-Remaining': '0',
+          'RateLimit-Reset': Math.ceil(reset / 1000).toString()
+        }
+      }
+    );
+  }
+
+  // Add rate limit headers to successful responses
+  const remaining = await getRemaining(clientIp);
+  const resetTime = await getResetTime(clientIp);
+  const responseHeaders = new Headers();
+  responseHeaders.set('RateLimit-Limit', MAX_REQUESTS.toString());
+  responseHeaders.set('RateLimit-Remaining', remaining.toString());
+  responseHeaders.set('RateLimit-Reset', Math.ceil(resetTime / 1000).toString());
+
   // Find matching route schema
   let matchedSchema: z.ZodSchema | undefined;
   for (const [route, methods] of Object.entries(routeSchemas)) {
@@ -60,7 +125,7 @@ export async function middleware(request: NextRequest) {
   }
 
   if (!matchedSchema) {
-    return NextResponse.next();
+    return NextResponse.next({ headers: responseHeaders });
   }
 
   try {
@@ -79,7 +144,7 @@ export async function middleware(request: NextRequest) {
             message: "Invalid JSON in request body",
             details: [{ field: "body", issue: "Invalid JSON format" }],
           },
-          { status: 400 }
+          { status: 400, headers: responseHeaders }
         );
       }
     }
@@ -99,6 +164,7 @@ export async function middleware(request: NextRequest) {
       request: {
         headers: requestHeaders,
       },
+      headers: responseHeaders
     });
   } catch (error) {
     if (error instanceof ZodError) {
@@ -113,7 +179,7 @@ export async function middleware(request: NextRequest) {
           message: "Invalid input data. Please check your request parameters and try again.",
           details,
         },
-        { status: 400 }
+        { status: 400, headers: responseHeaders }
       );
     }
 
@@ -123,17 +189,13 @@ export async function middleware(request: NextRequest) {
         message: "An unexpected error occurred while validating your request.",
         details: [],
       },
-      { status: 500 }
+      { status: 500, headers: responseHeaders }
     );
   }
 }
 
 export const config = {
   matcher: [
-    "/api/cart",
-    "/api/cart/:userId*",
-    "/api/checkout",
-    "/api/products/search",
-    "/api/products/:productId*",
+    "/api/:path*",
   ],
 };
