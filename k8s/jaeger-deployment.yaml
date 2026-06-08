@@ -19,12 +19,7 @@ spec:
     spec:
       securityContext:
         runAsNonRoot: true
-        runAsUser: 1001
-        allowPrivilegeEscalation: false
-        readOnlyRootFilesystem: true
-        capabilities:
-          drop:
-            - ALL
+        runAsUser: 10001
       volumes:
         - name: jaeger-storage
           persistentVolumeClaim:
@@ -46,18 +41,24 @@ spec:
               name: otlp-grpc
             - containerPort: 4318
               name: otlp-http
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
           livenessProbe:
             httpGet:
               path: /health
               port: 14269
-            initialDelaySeconds: 5
+            initialDelaySeconds: 30
             periodSeconds: 10
             failureThreshold: 3
           readinessProbe:
             httpGet:
               path: /health
               port: 14269
-            initialDelaySeconds: 2
+            initialDelaySeconds: 5
             periodSeconds: 5
             failureThreshold: 3
           resources:
@@ -66,7 +67,7 @@ spec:
               memory: 256Mi
             limits:
               cpu: 500m
-              memory: 1Gi
+              memory: 512Mi
           volumeMounts:
             - name: jaeger-storage
               mountPath: /tmp/jaeger
