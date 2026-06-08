@@ -571,20 +571,23 @@ app = express();
     res.status(405).send();
   });
 
-  // Liveness endpoint - always returns 200 OK with JSON {"status": "UP"} when process is running (AC-1)
+  // Liveness endpoint - always returns 200 OK with JSON {"status": "ok", "service": "payment", "timestamp": <unix timestamp ms>} when process is running (AC-1)
   app.get('/health/liveness', (req, res) => {
     const start = Date.now();
     const span = opentelemetry.trace.getTracer('paymentservice').startSpan('GET /health/liveness');
+    const timestamp = Date.now();
     try {
       res.setHeader('Content-Type', 'application/json');
-      res.status(200).json({ status: 'UP' });
+      res.status(200).json({ 
+        status: 'ok',
+        service: 'payment',
+        timestamp: timestamp
+      });
       
       span.setAttributes({
         'http.method': 'GET',
         'http.route': '/health/liveness',
-        'http.status_code': 200,
-        'health.check.type': 'liveness',
-        'health.check.status': 'PASS'
+        'http.status_code': 200
       });
       
       logger.info({
@@ -593,6 +596,66 @@ app = express();
         status: 200,
         duration: Date.now() - start,
         timestamp: new Date().toISOString()
+      });
+    } finally {
+      span.end();
+    }
+  });
+  
+  // Readiness endpoint - returns 200 OK when fully initialized and able to process payment requests (AC-2, AC-3)
+  app.get('/health/readiness', async (req, res) => {
+    const start = Date.now();
+    const tracer = opentelemetry.trace.getTracer('paymentservice');
+    const span = tracer.startSpan('GET /health/readiness');
+    const timestamp = Date.now();
+    
+    const dependencies = {
+      config: 'loaded',
+      paymentProcessor: 'connected'
+    };
+    let ready = true;
+    let statusCode = 200;
+    let status = 'ok';
+    
+    try {
+      // Check if gRPC server is serving (payment processor is ready to handle requests)
+      await new Promise((resolve, reject) => {
+        healthClient.check({ service: '' }, (err, response) => {
+          if (err) return reject(err);
+          if (response.status !== health.servingStatus.SERVING) return reject(new Error('gRPC server not serving'));
+          resolve();
+        });
+      });
+    } catch (err) {
+      ready = false;
+      statusCode = 503;
+      status = 'unavailable';
+      dependencies.paymentProcessor = 'disconnected';
+    }
+    
+    try {
+      res.setHeader('Content-Type', 'application/json');
+      res.status(statusCode).json({
+        status: status,
+        service: 'payment',
+        ready: ready,
+        timestamp: timestamp,
+        dependencies: dependencies
+      });
+      
+      span.setAttributes({
+        'http.method': 'GET',
+        'http.route': '/health/readiness',
+        'http.status_code': statusCode,
+        'readiness.ready': ready
+      });
+      
+      logger.info({
+        method: 'GET',
+        path: '/health/readiness',
+        status: statusCode,
+        duration: Date.now() - start,
+        ready: ready
       });
     } finally {
       span.end();
