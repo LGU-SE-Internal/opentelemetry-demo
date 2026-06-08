@@ -201,21 +201,24 @@ public final class AdService {
    */
   void validateAdCategory(String category) {
     if (category == null || category.isEmpty()) {
-      // Empty category is allowed per existing behavior
-      return;
-    }
-    // Check length first
-    if (category.length() > 64) {
-      invalidCategoryRequestsCounter.add(1, Attributes.of(invalidCategoryReasonKey, "length_exceeded"));
+      invalidCategoryRequestsCounter.add(1, Attributes.of(invalidCategoryReasonKey, "empty_category"));
       throw Status.INVALID_ARGUMENT
-          .withDescription("Invalid category: must not exceed 64 characters in length")
+          .withDescription("Category cannot be empty")
           .asRuntimeException();
     }
-    // Check characters: only a-z, A-Z, 0-9, _
-    if (!category.matches("^[a-zA-Z0-9_]+$")) {
+    // Check length first
+    if (category.length() > 255) {
+      invalidCategoryRequestsCounter.add(1, Attributes.of(invalidCategoryReasonKey, "length_exceeded"));
+      String truncated = category.length() > 20 ? category.substring(0, 20) + "..." : category;
+      throw Status.INVALID_ARGUMENT
+          .withDescription(String.format("Category '%s' exceeds maximum allowed length of 255 characters", truncated))
+          .asRuntimeException();
+    }
+    // Check characters: only a-z, A-Z, 0-9
+    if (!category.matches("^[a-zA-Z0-9]+$")) {
       invalidCategoryRequestsCounter.add(1, Attributes.of(invalidCategoryReasonKey, "invalid_characters"));
       throw Status.INVALID_ARGUMENT
-          .withDescription("Invalid category: must only contain alphanumeric characters and underscores")
+          .withDescription(String.format("Category '%s' contains invalid characters: only alphanumeric characters [a-zA-Z0-9] are allowed", category))
           .asRuntimeException();
     }
   }
