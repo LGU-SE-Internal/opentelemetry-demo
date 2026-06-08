@@ -34,6 +34,9 @@ RUN chown -R appuser:appgroup /var/www
 
 USER appuser
 
+# Configure OpenTelemetry to ignore health check endpoints to avoid telemetry noise
+ENV OTEL_PHP_DISABLED_PATHS="/health,/readiness,/ready"
+
 COPY --from=vendor /tmp/vendor/ vendor/
 
 COPY ./src/quote/app/ app/
