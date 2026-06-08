@@ -562,12 +562,13 @@ func healthReadinessHandler(w http.ResponseWriter, r *http.Request) {
 			"error": errMsg,
 		}
 	} else {
-		// Test if DB is accessible
-		var count int
-		err := db.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM catalog.products").Scan(&count)
+		// Test if DB is accessible with lightweight ping
+		pingCtx, cancel := context.WithTimeout(r.Context(), 50*time.Millisecond)
+		defer cancel()
+		err := db.PingContext(pingCtx)
 		if err != nil {
 			statusCode = http.StatusServiceUnavailable
-			errMsg = fmt.Sprintf("failed to access catalog: %v", err)
+			errMsg = fmt.Sprintf("failed to access database: %v", err)
 			response = map[string]interface{}{
 				"status": "DOWN",
 				"error": errMsg,
@@ -576,7 +577,6 @@ func healthReadinessHandler(w http.ResponseWriter, r *http.Request) {
 			statusCode = http.StatusOK
 			response = map[string]interface{}{
 				"status": "UP",
-				"catalog_count": count,
 			}
 		}
 	}
