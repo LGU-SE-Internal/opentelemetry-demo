@@ -16,6 +16,7 @@ from concurrent import futures
 
 # Pip
 import grpc
+import pybreaker
 from opentelemetry import trace, metrics
 from opentelemetry._logs import set_logger_provider
 from opentelemetry.exporter.otlp.proto.grpc._log_exporter import (
@@ -49,6 +50,7 @@ first_run = True
 
 # Retry configuration from environment variables
 RETRY_MAX_ATTEMPTS = int(os.environ.get('RECOMMENDATION_SERVICE_PRODUCT_CATALOG_RETRY_MAX_ATTEMPTS', '3'))
+RETRY_ATTEMPTS = RETRY_MAX_ATTEMPTS # Alias for tests
 RETRY_INITIAL_BACKOFF_MS = int(os.environ.get('RECOMMENDATION_SERVICE_PRODUCT_CATALOG_RETRY_INITIAL_BACKOFF_MS', '100'))
 RETRY_BACKOFF_MULTIPLIER = float(os.environ.get('RECOMMENDATION_SERVICE_PRODUCT_CATALOG_RETRY_BACKOFF_MULTIPLIER', '2'))
 RETRY_MAX_BACKOFF_MS = int(os.environ.get('RECOMMENDATION_SERVICE_PRODUCT_CATALOG_RETRY_MAX_BACKOFF_MS', '2000'))
@@ -60,7 +62,50 @@ RETRYABLE_STATUS_CODES = {
     grpc.StatusCode.INTERNAL
 }
 
-def list_products_with_retry(client: demo_pb2_grpc.ProductCatalogServiceStub, request: demo_pb2.Empty, metadata = None) -> demo_pb2.ListProductsResponse:
+# Circuit breaker configuration from environment variables
+PRODUCT_CATALOG_CIRCUIT_BREAKER_FAILURE_THRESHOLD = int(os.environ.get('PRODUCT_CATALOG_CIRCUIT_BREAKER_FAILURE_THRESHOLD', '5'))
+PRODUCT_CATALOG_CIRCUIT_BREAKER_RESET_TIMEOUT = int(os.environ.get('PRODUCT_CATALOG_CIRCUIT_BREAKER_RESET_TIMEOUT', '30'))
+PRODUCT_CATALOG_CIRCUIT_BREAKER_HALF_OPEN_MAX_CALLS = int(os.environ.get('PRODUCT_CATALOG_CIRCUIT_BREAKER_HALF_OPEN_MAX_CALLS', '3'))
+
+# Circuit breaker state values for metric
+CIRCUIT_BREAKER_STATE_CLOSED = 0
+CIRCUIT_BREAKER_STATE_OPEN = 1
+CIRCUIT_BREAKER_STATE_HALF_OPEN = 2
+
+# Open circuit error message
+CIRCUIT_OPEN_ERROR_MSG = "Product Catalog Service is temporarily unavailable: circuit breaker is open"
+
+# Global product catalog client stub
+product_catalog_client = None
+
+# Circuit breaker listener to update metrics on state changes
+class CircuitBreakerMetricsListener(pybreaker.CircuitBreakerListener):
+    def __init__(self, metrics):
+        self.metrics = metrics
+        self._update_state_metric(pybreaker.STATE_CLOSED)
+
+    def _update_state_metric(self, state):
+        if state == pybreaker.STATE_CLOSED:
+            value = CIRCUIT_BREAKER_STATE_CLOSED
+        elif state == pybreaker.STATE_OPEN:
+            value = CIRCUIT_BREAKER_STATE_OPEN
+        elif state == pybreaker.STATE_HALF_OPEN:
+            value = CIRCUIT_BREAKER_STATE_HALF_OPEN
+        else:
+            value = CIRCUIT_BREAKER_STATE_CLOSED
+        self.metrics["product_catalog_circuit_breaker_state"].set(value)
+
+    def state_change(self, cb, old_state, new_state):
+        self._update_state_metric(new_state)
+        if new_state == pybreaker.STATE_OPEN:
+            self.metrics["product_catalog_circuit_breaker_trips_total"].add(1)
+
+# Global circuit breaker instance (initialized after metrics are set up)
+product_catalog_circuit_breaker = None
+product_catalog_client = None
+_circuit_breaker_initialized = False
+
+def list_products_with_retry(client: demo_pb2_grpc.ProductCatalogServiceStub, request: demo_pb2.Empty, metadata = None, context = None) -> demo_pb2.ListProductsResponse:
     """
     Wraps ProductCatalogService.ListProducts gRPC call with exponential backoff retry logic.
     
@@ -68,6 +113,7 @@ def list_products_with_retry(client: demo_pb2_grpc.ProductCatalogServiceStub, re
         client: gRPC stub for ProductCatalogService
         request: ListProductsRequest object
         metadata: Optional gRPC call metadata
+        context: gRPC context object
     
     Returns:
         ListProductsResponse object from successful call
@@ -75,60 +121,69 @@ def list_products_with_retry(client: demo_pb2_grpc.ProductCatalogServiceStub, re
     Raises:
         gRPC error: Original error from final failed attempt, with additional context that max retries were exhausted
     """
-    import time
-    
-    attempt = 0
-    last_error = None
-    
-    while attempt <= RETRY_MAX_ATTEMPTS:
-        try:
-            return client.ListProducts(request, metadata=metadata)
-        except grpc.RpcError as e:
-            last_error = e
-            status_code = e.code()
-            
-            # Check if we should retry
-            if status_code not in RETRYABLE_STATUS_CODES or attempt >= RETRY_MAX_ATTEMPTS:
-                break
-            
-            attempt += 1
-            
-            # Calculate backoff duration
-            backoff_ms = min(
-                RETRY_INITIAL_BACKOFF_MS * (RETRY_BACKOFF_MULTIPLIER ** (attempt - 1)),
-                RETRY_MAX_BACKOFF_MS
-            )
-            backoff_sec = backoff_ms / 1000.0
-            
-            # Log the retry attempt
-            logger.info(
-                f"ProductCatalog ListProducts retry attempt {attempt}/{RETRY_MAX_ATTEMPTS} after {status_code.name} error, backing off for {backoff_ms}ms",
-                extra={
-                    "attempt_number": attempt,
-                    "status_code": status_code.name,
-                    "backoff_ms": backoff_ms,
-                    "max_attempts": RETRY_MAX_ATTEMPTS
-                }
-            )
-            
-            # Increment retry metric
-            rec_svc_metrics["product_catalog_retry_attempts"].add(
-                1,
-                {
-                    "status_code": status_code.name,
-                    "attempt_number": str(attempt)
-                }
-            )
-            
-            # Wait before retrying
-            time.sleep(backoff_sec)
-    
-    # If we exhausted all retries, raise the last error with context
-    if last_error is not None:
-        context_message = f"Max retry attempts ({RETRY_MAX_ATTEMPTS}) exhausted for ProductCatalog ListProducts call: {last_error.details()}"
-        # Augment the error details
-        setattr(last_error, "_details", context_message)
-        raise last_error
+    @product_catalog_circuit_breaker
+    def _call_with_retry():
+        import time
+        
+        attempt = 0
+        last_error = None
+        
+        while attempt <= RETRY_MAX_ATTEMPTS:
+            try:
+                return client.ListProducts(request, metadata=metadata)
+            except grpc.RpcError as e:
+                last_error = e
+                status_code = e.code()
+                
+                # Check if we should retry
+                if status_code not in RETRYABLE_STATUS_CODES or attempt >= RETRY_MAX_ATTEMPTS:
+                    break
+                
+                attempt += 1
+                
+                # Calculate backoff duration
+                backoff_ms = min(
+                    RETRY_INITIAL_BACKOFF_MS * (RETRY_BACKOFF_MULTIPLIER ** (attempt - 1)),
+                    RETRY_MAX_BACKOFF_MS
+                )
+                backoff_sec = backoff_ms / 1000.0
+                
+                # Log the retry attempt
+                logger.info(
+                    f"ProductCatalog ListProducts retry attempt {attempt}/{RETRY_MAX_ATTEMPTS} after {status_code.name} error, backing off for {backoff_ms}ms",
+                    extra={
+                        "attempt_number": attempt,
+                        "status_code": status_code.name,
+                        "backoff_ms": backoff_ms,
+                        "max_attempts": RETRY_MAX_ATTEMPTS
+                    }
+                )
+                
+                # Increment retry metric
+                rec_svc_metrics["product_catalog_retry_attempts"].add(
+                    1,
+                    {
+                        "status_code": status_code.name,
+                        "attempt_number": str(attempt)
+                    }
+                )
+                
+                # Wait before retrying
+                time.sleep(backoff_sec)
+        
+        # If we exhausted all retries, raise the last error with context
+        if last_error is not None:
+            context_message = f"Max retry attempts ({RETRY_MAX_ATTEMPTS}) exhausted for ProductCatalog ListProducts call: {last_error.details()}"
+            # Augment the error details
+            setattr(last_error, "_details", context_message)
+            raise last_error
+    try:
+        return _call_with_retry()
+    except pybreaker.CircuitBreakerError:
+        if context:
+            context.abort(grpc.StatusCode.UNAVAILABLE, "Product Catalog Service is temporarily unavailable: circuit breaker is open")
+        else:
+            raise grpc.RpcError(grpc.StatusCode.UNAVAILABLE, "Product Catalog Service is temporarily unavailable: circuit breaker is open")
 
 class RecommendationService(demo_pb2_grpc.RecommendationServiceServicer):
     def ListRecommendations(self, request, context):
@@ -252,7 +307,7 @@ def get_product_list(request_product_ids, result_size=5):
                 first_run = False
                 span.set_attribute("demo.recommendation.cache_hit", False)
                 logger.info("get_product_list: cache miss")
-                cat_response = list_products_with_retry(product_catalog_stub, demo_pb2.Empty())
+                cat_response = list_products_with_retry(product_catalog_stub, demo_pb2.Empty(), context=context)
                 response_ids = [x.id for x in cat_response.products]
                 cached_ids = cached_ids + response_ids
                 cached_ids = cached_ids + cached_ids[:len(cached_ids) // 4]
@@ -263,7 +318,7 @@ def get_product_list(request_product_ids, result_size=5):
                 product_ids = cached_ids
         else:
             span.set_attribute("demo.feature_flag.recommendation_cache", False)
-            cat_response = list_products_with_retry(product_catalog_stub, demo_pb2.Empty())
+            cat_response = list_products_with_retry(product_catalog_stub, demo_pb2.Empty(), context=context)
             product_ids = [x.id for x in cat_response.products]
 
         span.set_attribute("demo.product.count", len(product_ids))
@@ -484,6 +539,30 @@ if __name__ == "__main__":
     meter = metrics.get_meter_provider().get_meter(service_name)
     rec_svc_metrics = init_metrics(meter)
 
+    # Initialize circuit breaker with metrics listener
+    circuit_breaker_listener = CircuitBreakerMetricsListener(rec_svc_metrics)
+    product_catalog_circuit_breaker = pybreaker.CircuitBreaker(
+        fail_max=PRODUCT_CATALOG_CIRCUIT_BREAKER_FAILURE_THRESHOLD,
+        reset_timeout=PRODUCT_CATALOG_CIRCUIT_BREAKER_RESET_TIMEOUT,
+        half_open_max_calls=PRODUCT_CATALOG_CIRCUIT_BREAKER_HALF_OPEN_MAX_CALLS,
+        listeners=[circuit_breaker_listener]
+    )
+
+    def wrap_call(func):
+        @product_catalog_circuit_breaker
+        def wrapper(*args, **kwargs):
+            return func(*args, **kwargs)
+        def wrapped(*args, **kwargs):
+            try:
+                return wrapper(*args, **kwargs)
+            except pybreaker.CircuitBreakerError:
+                context = grpc.ServicerContext()
+                context.set_code(grpc.StatusCode.UNAVAILABLE)
+                context.set_details(CIRCUIT_OPEN_ERROR_MSG)
+                raise context._state.error
+        return wrapped
+    product_catalog_circuit_breaker.wrap = wrap_call
+
     # Initialize Logs
     logger_provider = LoggerProvider(
         resource=Resource.create(
@@ -503,6 +582,7 @@ if __name__ == "__main__":
 
 catalog_addr = must_map_env('PRODUCT_CATALOG_ADDR')
 product_catalog_stub, product_catalog_channel = create_product_catalog_client(catalog_addr, logger=logger)
+product_catalog_client = product_catalog_stub
 
 # Initialize rate limiter
 rate_limit_rps = int(os.environ.get('RECOMMENDATION_SERVICE_RATE_LIMIT_RPS', '0'))
