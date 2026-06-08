@@ -1,28 +1,131 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use actix_web::{dev::ServerHandle, web, App, HttpResponse, HttpServer, ResponseError};
-use actix_governor::{Governor, GovernorConfigBuilder, KeyExtractor, SimpleKeyExtractionError};
-use governor::clock::DefaultClock;
-use governor::middleware::RateLimitingMiddleware;
-use open_feature::provider::{FeatureProvider, NoOpProvider};
-use open_feature_flagd::{FlagdOptions, FlagdProvider};
-use opentelemetry::{global, metrics::{Counter, Meter}};
-use opentelemetry_instrumentation_actix_web::{RequestMetrics, RequestTracing};
-use rustls::{Certificate, ClientCertVerifierBuilder, RootCertStore, ServerConfig, ServerConnection};
-use rustls_pemfile::{certs, pkcs8_private_keys, read_one};
-use serde::Serialize;
-use std::env;
-use std::fs::File;
-use std::io::BufReader;
-use std::net::IpAddr;
+use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::signal::unix::{signal, SignalKind};
-use tracing::{info, warn, error};
-mod telemetry_conf;
-use telemetry_conf::init_otel;
-mod shipping_service;
-use shipping_service::{get_quote, health_check, ship_order};
+use std::env;
+use tonic::{transport::Server, Request, Status, Code};
+use tower_governor::{Governor, GovernorConfig, GovernorConfigBuilder, key_extractor::KeyExtractor, error::GovernorError};
+use governor::Quota;
+use std::num::NonZeroU32;
+use opentelemetry::metrics::Counter;
+use opentelemetry_proto::oteldemo::shipping_service_server::{ShippingService, ShippingServiceServer};
+use opentelemetry_proto::oteldemo::{GetQuoteRequest, GetQuoteResponse, ShipOrderRequest, ShipOrderResponse, GetShippingRequest, GetShippingResponse};
+
+// gRPC Shipping Service implementation
+#[derive(Debug, Clone)]
+struct ShippingServiceImpl;
+
+#[tonic::async_trait]
+impl ShippingService for ShippingServiceImpl {
+    async fn get_quote(&self, request: Request<GetQuoteRequest>) -> Result<tonic::Response<GetQuoteResponse>, Status> {
+        // Delegate to existing get_quote logic
+        let req = request.into_inner();
+        let itemct: u32 = req.items.iter().map(|item| item.quantity as u32).sum();
+        let quote = match crate::quote::create_quote_from_count(itemct).await {
+            Ok(q) => q,
+            Err(e) => return Err(Status::internal(format!("Failed to get quote: {}", e))),
+        };
+        Ok(tonic::Response::new(GetQuoteResponse {
+            cost_usd: Some(crate::shipping_types::Money {
+                currency_code: "USD".into(),
+                units: quote.dollars,
+                nanos: quote.cents * NANOS_MULTIPLE,
+            }),
+        }))
+    }
+
+    async fn ship_order(&self, request: Request<ShipOrderRequest>) -> Result<tonic::Response<ShipOrderResponse>, Status> {
+        // Delegate to existing ship_order logic
+        let req = request.into_inner();
+        let tid = crate::tracking::create_tracking_id();
+        Ok(tonic::Response::new(ShipOrderResponse { tracking_id: tid }))
+    }
+
+    async fn get_shipping(&self, _request: Request<GetShippingRequest>) -> Result<tonic::Response<GetShippingResponse>, Status> {
+        Err(Status::unimplemented("GetShipping not implemented"))
+    }
+}
+
+// Endpoint key extractor for gRPC rate limiting
+#[derive(Clone, Copy, Debug)]
+struct GrpcEndpointKeyExtractor;
+
+impl KeyExtractor for GrpcEndpointKeyExtractor {
+    type Key = String;
+    type KeyExtractionError = Status;
+
+    fn extract<T>(&self, req: &Request<T>) -> Result<Self::Key, Self::KeyExtractionError> {
+        Ok(req.path().to_string())
+    }
+}
+
+// Load per-endpoint rate limit configuration
+fn load_endpoint_rate_limits() -> HashMap<String, (NonZeroU32, NonZeroU32)> {
+    let mut limits = HashMap::new();
+    let endpoints = vec![
+        ("GetQuote", "/oteldemo.ShippingService/GetQuote"),
+        ("ShipOrder", "/oteldemo.ShippingService/ShipOrder"),
+    ];
+
+    for (name, full_path) in endpoints {
+        let rps_env = format!("SHIPPING_{}_RPS", name.to_uppercase());
+        let burst_env = format!("SHIPPING_{}_BURST", name.to_uppercase());
+
+        if let Ok(rps_str) = env::var(&rps_env) {
+            if let Ok(rps) = rps_str.parse::<NonZeroU32>() {
+                let burst = env::var(&burst_env)
+                    .ok()
+                    .and_then(|b| b.parse::<NonZeroU32>().ok())
+                    .unwrap_or(rps);
+                limits.insert(full_path.to_string(), (rps, burst));
+            }
+        }
+    }
+    limits
+}
+
+// Build rate limiting interceptor for gRPC
+fn build_rate_limit_interceptor(
+    rate_limit_counter: Counter<u64>,
+) -> impl Fn(Request<()>) -> Result<Request<()>, Status> + Clone {
+    let limits = load_endpoint_rate_limits();
+    let mut governors: HashMap<String, (NonZeroU32, NonZeroU32, Arc<Governor<GrpcEndpointKeyExtractor>>)> = HashMap::new();
+
+    for (endpoint, (rps, burst)) in limits {
+        let config = GovernorConfigBuilder::default()
+            .per_second(rps.get() as u64)
+            .burst_size(burst.get())
+            .key_extractor(GrpcEndpointKeyExtractor)
+            .finish()
+            .unwrap();
+        governors.insert(endpoint, (rps, burst, Arc::new(Governor::new(&config))));
+    }
+
+    move |mut req: Request<()>| {
+        let path = req.path().to_string();
+        if let Some((rps, burst, governor)) = governors.get(&path) {
+            match governor.check(&req) {
+                Ok(_) => Ok(req),
+                Err(GovernorError::TooManyRequests { .. }) => {
+                    let msg = format!(
+                        "Rate limit exceeded for endpoint {}: limit is {} requests per second, burst {} capacity",
+                        path, rps, burst
+                    );
+                    // Increment metric
+                    rate_limit_counter.add(1, &[
+                        opentelemetry::KeyValue::new("endpoint", path.clone()),
+                        opentelemetry::KeyValue::new("limit_rps", rps.to_string()),
+                    ]);
+                    Err(Status::new(Code::ResourceExhausted, msg))
+                }
+                Err(_) => Err(Status::internal("Rate limit check failed")),
+            }
+        } else {
+            Ok(req)
+        }
+    }
+}
 
 // TLS configuration errors
 #[derive(Debug, thiserror::Error)]
@@ -288,73 +391,7 @@ pub async fn init_flagd_provider_concrete() -> FlagdProvider {
     FlagdProvider::new(options).await.unwrap()
 }
 
-pub async fn app() -> App {
-    let provider = init_flagd_provider().await;
-    let flag_provider = web::Data::from(provider);
-    
-    // Load rate limit config
-    let rpm = get_rate_limit_config().expect("Invalid rate limit configuration");
-    
-    // Create rate limit counter metric
-    let meter = global::meter("shipping");
-    let rate_limit_counter = meter.u64_counter("shipping_rate_limited_requests_total")
-        .with_description("Total number of requests that were rejected due to rate limiting")
-        .init();
-    
-    // Build governor configuration
-    let governor_config = GovernorConfigBuilder::default()
-        .per_second(60 * 60 / rpm as u64) // Calculate interval between requests for RPM
-        .burst_size(rpm)
-        .key_extractor(ClientIpKeyExtractor)
-        .middleware(RateLimitMetricsMiddleware { counter: rate_limit_counter })
-        .error_handler(|quota| {
-            RateLimitError {
-                error: "Too many requests".to_string(),
-                message: "Rate limit exceeded. Try again later.".to_string(),
-                retry_after: quota.as_secs(),
-            }
-        })
-        .use_headers()
-        .finish()
-        .expect("Failed to build rate limit configuration");
-
-    // Create public routes scope with rate limiting
-    let public_routes = web::scope("")
-        .wrap(Governor::new(&governor_config))
-        .service(get_quote)
-        .service(ship_order);
-    
-    App::new()
-        .app_data(flag_provider.clone())
-        .wrap(RequestTracing::new())
-        .wrap(RequestMetrics::default())
-        .service(public_routes)
-        .service(health_check)
-}
-
-async fn handle_shutdown(handle: ServerHandle) {
-    // Listen for SIGINT and SIGTERM
-    let mut sigint = signal(SignalKind::interrupt()).expect("Failed to register SIGINT handler");
-    let mut sigterm = signal(SignalKind::terminate()).expect("Failed to register SIGTERM handler");
-
-    // Wait for either signal
-    tokio::select! {
-        _ = sigint.recv() => {},
-        _ = sigterm.recv() => {},
-    }
-
-    warn!("Received shutdown signal, starting graceful shutdown. Waiting up to 30 seconds for in-flight requests to complete.");
-
-    // Trigger graceful shutdown with timeout
-    match tokio::time::timeout(tokio::time::Duration::from_secs(30), handle.stop(true)).await {
-        Ok(_) => {
-            info!("Graceful shutdown completed successfully. All in-flight requests processed.");
-        }
-        Err(_) => {
-            warn!("Graceful shutdown timed out after 30 seconds. Terminating remaining in-flight requests.");
-        }
-    }
-}
+const NANOS_MULTIPLE: u32 = 10000000u32;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -381,35 +418,31 @@ async fn main() -> std::io::Result<()> {
         }
     }
 
-    let addr = format!("{}:{}", ip, port);
+    let addr = format!("{}:{}", ip, port).parse().unwrap();
     
-    // Load TLS configuration
-    let tls_config = load_tls_config().unwrap_or_else(|e| {
-        error!("TLS configuration error: {}", e);
-        std::process::exit(1);
-    });
-    
+    // Initialize rate limit metric
+    let meter = opentelemetry::global::meter("shipping");
+    let rate_limit_counter = meter.u64_counter("shipping_service_rate_limited_requests_total")
+        .with_description("Total number of requests that were rejected due to rate limiting")
+        .init();
+
+    // Build rate limiting interceptor
+    let rate_limit_interceptor = build_rate_limit_interceptor(rate_limit_counter);
+
+    // Create shipping service implementation
+    let shipping_service = ShippingServiceImpl;
+
     info!(
         name = "ServerStartedSuccessfully",
-        addr = addr.as_str(),
-        tls_enabled = tls_config.is_some(),
-        message = "Shipping service is running"
+        addr = addr.to_string(),
+        message = "Shipping gRPC service is running"
     );
 
-    let mut server = HttpServer::new(move || app())
-        .shutdown_timeout(30);
-    
-    server = match tls_config {
-        Some(config) => server.bind_rustls(&addr, config)?,
-        None => server.bind(&addr)?,
-    };
-    
-    let server = server.run();
+    // Start gRPC server
+    Server::builder()
+        .add_service(ShippingServiceServer::with_interceptor(shipping_service, rate_limit_interceptor))
+        .serve(addr)
+        .await?;
 
-    // Get server handle for shutdown
-    let handle = server.handle();
-    // Spawn shutdown handler task
-    tokio::spawn(handle_shutdown(handle));
-
-    server.await
+    Ok(())
 }
