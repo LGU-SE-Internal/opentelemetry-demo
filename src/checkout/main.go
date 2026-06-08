@@ -5,6 +5,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -50,6 +52,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
@@ -166,33 +169,119 @@ func ValidateCreditCard(cc *pb.CreditCardInfo) error {
 		}
 	}
 	if len(cleanNumber) < 13 || len(cleanNumber) > 19 {
-		return status.Errorf(codes.InvalidArgument, "invalid field credit_card.number: invalid card number")
+		return status.Errorf(codes.InvalidArgument, "invalid field credit_card.number: invalid credit card number")
 	}
 	if !luhnCheck(cleanNumber) {
-		return status.Errorf(codes.InvalidArgument, "invalid field credit_card.number: invalid card number")
+		return status.Errorf(codes.InvalidArgument, "invalid field credit_card.number: invalid credit card number (failed Luhn check)")
 	}
 
 	if cc.ExpirationMonth < 1 || cc.ExpirationMonth > 12 {
 		return status.Errorf(codes.InvalidArgument, "invalid field credit_card.expiration_month: must be between 1 and 12")
 	}
-	if cc.ExpirationYear < 1900 {
-		return status.Errorf(codes.InvalidArgument, "invalid field credit_card.expiration_year: invalid year")
-	}
-	// Check if expiration is in past
-	now := time.Now()
-	currentYear, currentMonth, _ := now.Date()
-	if cc.ExpirationYear < int(currentYear) || (cc.ExpirationYear == int(currentYear) && cc.ExpirationMonth < int(currentMonth)) {
-		return status.Errorf(codes.InvalidArgument, "invalid field credit_card.expiration: date is in the past")
+
+	currentYear, currentMonth, _ := time.Now().Date()
+	if cc.ExpirationYear < int32(currentYear) || (cc.ExpirationYear == int32(currentYear) && cc.ExpirationMonth < int32(currentMonth)) {
+		return status.Errorf(codes.InvalidArgument, "invalid field credit_card.expiration_date: credit card is expired")
 	}
 
-	if cc.Cvv == "" {
-		return status.Errorf(codes.InvalidArgument, "invalid field credit_card.cvv: required field is empty")
-	}
 	if !cvvRegex.MatchString(cc.Cvv) {
 		return status.Errorf(codes.InvalidArgument, "invalid field credit_card.cvv: must be 3 or 4 digits")
 	}
 
 	return nil
+}
+
+// TLSConfig holds TLS configuration for outbound gRPC client connections
+type TLSConfig struct {
+	Enabled        bool
+	CACertPath     string
+	ClientCertPath string
+	ClientKeyPath  string
+	MTLSEnabled    bool
+}
+
+// LoadTLSConfig reads TLS configuration from environment variables and performs basic validation
+func LoadTLSConfig() (*TLSConfig, error) {
+	cfg := &TLSConfig{
+		Enabled:        os.Getenv("CHECKOUT_SERVICE_TLS_ENABLED") == "true",
+		CACertPath:     os.Getenv("CHECKOUT_SERVICE_TLS_CA_CERT_PATH"),
+		ClientCertPath: os.Getenv("CHECKOUT_SERVICE_TLS_CLIENT_CERT_PATH"),
+		ClientKeyPath:  os.Getenv("CHECKOUT_SERVICE_TLS_CLIENT_KEY_PATH"),
+		MTLSEnabled:    os.Getenv("CHECKOUT_SERVICE_TLS_MTLS_ENABLED") == "true",
+	}
+
+	if !cfg.Enabled {
+		return cfg, nil
+	}
+
+	// Validate CA cert path when TLS is enabled
+	if cfg.CACertPath == "" {
+		return nil, fmt.Errorf("CHECKOUT_SERVICE_TLS_CA_CERT_PATH must be provided when TLS is enabled")
+	}
+	if _, err := os.Stat(cfg.CACertPath); os.IsNotExist(err) {
+		return nil, fmt.Errorf("CA certificate file not found at path: %s", cfg.CACertPath)
+	}
+	if _, err := os.ReadFile(cfg.CACertPath); err != nil {
+		return nil, fmt.Errorf("failed to read CA certificate file: %w", err)
+	}
+
+	// Validate client cert/key paths when mTLS is enabled
+	if cfg.MTLSEnabled {
+		if cfg.ClientCertPath == "" {
+			return nil, fmt.Errorf("CHECKOUT_SERVICE_TLS_CLIENT_CERT_PATH must be provided when mTLS is enabled")
+		}
+		if _, err := os.Stat(cfg.ClientCertPath); os.IsNotExist(err) {
+			return nil, fmt.Errorf("client certificate file not found at path: %s", cfg.ClientCertPath)
+		}
+		if _, err := os.ReadFile(cfg.ClientCertPath); err != nil {
+			return nil, fmt.Errorf("failed to read client certificate file: %w", err)
+		}
+
+		if cfg.ClientKeyPath == "" {
+			return nil, fmt.Errorf("CHECKOUT_SERVICE_TLS_CLIENT_KEY_PATH must be provided when mTLS is enabled")
+		}
+		if _, err := os.Stat(cfg.ClientKeyPath); os.IsNotExist(err) {
+			return nil, fmt.Errorf("client key file not found at path: %s", cfg.ClientKeyPath)
+		}
+		if _, err := os.ReadFile(cfg.ClientKeyPath); err != nil {
+			return nil, fmt.Errorf("failed to read client key file: %w", err)
+		}
+	}
+
+	return cfg, nil
+}
+
+// NewGRPCCredentials constructs gRPC dial credentials from the provided TLS config
+func NewGRPCCredentials(cfg *TLSConfig) (grpc.DialOption, error) {
+	if !cfg.Enabled {
+		return grpc.WithTransportCredentials(insecure.NewCredentials()), nil
+	}
+
+	// Load CA certificate
+	caCert, err := os.ReadFile(cfg.CACertPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read CA certificate: %w", err)
+	}
+
+	certPool := x509.NewCertPool()
+	if !certPool.AppendCertsFromPEM(caCert) {
+		return nil, fmt.Errorf("failed to parse CA certificate: invalid PEM format")
+	}
+
+	tlsConfig := &tls.Config{
+		RootCAs: certPool,
+	}
+
+	// Add client credentials if mTLS is enabled
+	if cfg.MTLSEnabled {
+		clientCert, err := tls.LoadX509KeyPair(cfg.ClientCertPath, cfg.ClientKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load client certificate/key pair: %w", err)
+		}
+		tlsConfig.Certificates = []tls.Certificate{clientCert}
+	}
+
+	return grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)), nil
 }
 
 // ValidatePlaceOrderRequest runs all validations on a full PlaceOrderRequest
@@ -298,6 +387,7 @@ type checkout struct {
 	emailSvcAddr          string
 	paymentSvcAddr        string
 	kafkaBrokerSvcAddr    string
+	grpcCreds             grpc.DialOption
 	pb.UnimplementedCheckoutServiceServer
 	KafkaProducerClient     sarama.AsyncProducer
 	shippingSvcClient       pb.ShippingServiceClient
@@ -418,6 +508,18 @@ func main() {
 		logger.Error((err.Error()))
 	}
 
+	// Load TLS configuration
+	tlsConfig, err := LoadTLSConfig()
+	if err != nil {
+		logger.Error("Failed to load TLS configuration", slog.Any("error", err))
+		os.Exit(1)
+	}
+	grpcCreds, err := NewGRPCCredentials(tlsConfig)
+	if err != nil {
+		logger.Error("Failed to create gRPC credentials", slog.Any("error", err))
+		os.Exit(1)
+	}
+
 	provider, err := flagd.NewProvider()
 	if err != nil {
 		logger.Error("Error creating flagd provider", slog.Any("error", err))
@@ -433,37 +535,38 @@ func main() {
 	tracer = tp.Tracer("checkout")
 
 	svc := new(checkout)
+	svc.grpcCreds = grpcCreds
 	svc.httpClient = &http.Client{
 		Transport: otelhttp.NewTransport(http.DefaultTransport),
 	}
 
 	mustMapEnv(&svc.shippingSvcAddr, "SHIPPING_ADDR")
-	c := mustCreateClient(svc.shippingSvcAddr, "shipping")
+	c := mustCreateClient(svc.shippingSvcAddr, "shipping", grpcCreds)
 	svc.shippingSvcClient = pb.NewShippingServiceClient(c)
 	defer c.Close()
 
 	mustMapEnv(&svc.productCatalogSvcAddr, "PRODUCT_CATALOG_ADDR")
-	c = mustCreateClient(svc.productCatalogSvcAddr, "product-catalog")
+	c = mustCreateClient(svc.productCatalogSvcAddr, "product-catalog", grpcCreds)
 	svc.productCatalogSvcClient = pb.NewProductCatalogServiceClient(c)
 	defer c.Close()
 
 	mustMapEnv(&svc.cartSvcAddr, "CART_ADDR")
-	c = mustCreateClient(svc.cartSvcAddr, "cart")
+	c = mustCreateClient(svc.cartSvcAddr, "cart", grpcCreds)
 	svc.cartSvcClient = pb.NewCartServiceClient(c)
 	defer c.Close()
 
 	mustMapEnv(&svc.currencySvcAddr, "CURRENCY_ADDR")
-	c = mustCreateClient(svc.currencySvcAddr, "currency")
+	c = mustCreateClient(svc.currencySvcAddr, "currency", grpcCreds)
 	svc.currencySvcClient = pb.NewCurrencyServiceClient(c)
 	defer c.Close()
 
 	mustMapEnv(&svc.emailSvcAddr, "EMAIL_ADDR")
-	c = mustCreateClient(svc.emailSvcAddr, "email")
+	c = mustCreateClient(svc.emailSvcAddr, "email", grpcCreds)
 	svc.emailSvcClient = pb.NewEmailServiceClient(c)
 	defer c.Close()
 
 	mustMapEnv(&svc.paymentSvcAddr, "PAYMENT_ADDR")
-	c = mustCreateClient(svc.paymentSvcAddr, "payment")
+	c = mustCreateClient(svc.paymentSvcAddr, "payment", grpcCreds)
 	svc.paymentSvcClient = pb.NewPaymentServiceClient(c)
 	defer c.Close()
 
@@ -808,7 +911,7 @@ func circuitBreakerUnaryInterceptor(svcName string) grpc.UnaryClientInterceptor 
 }
 
 // mustCreateClient creates a gRPC client for the given target address with retry and circuit breaker interceptors
-func mustCreateClient(addr string, svcName string) *grpc.ClientConn {
+func mustCreateClient(addr string, svcName string, creds grpc.DialOption) *grpc.ClientConn {
 	// Configure gRPC retry policy
 	retryPolicy := fmt.Sprintf(`{
 		"methodConfig": [{
@@ -826,7 +929,7 @@ func mustCreateClient(addr string, svcName string) *grpc.ClientConn {
 	}`, maxRetryAttempts, initialBackoff, maxBackoff, backoffMultiplier, totalRetryTimeout)
 
 	c, err := grpc.NewClient(addr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		creds,
 		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 		grpc.WithDefaultServiceConfig(retryPolicy),
 		grpc.WithUnaryInterceptor(circuitBreakerUnaryInterceptor(svcName)),
@@ -931,7 +1034,7 @@ func (cs *checkout) chargeCard(ctx context.Context, amount *pb.Money, paymentInf
 	paymentService := cs.paymentSvcClient
 	if flags.PaymentUnreachable.Value(ctx, openfeature.EvaluationContext{}) {
 		badAddress := "badAddress:50051"
-		c := mustCreateClient(badAddress, "payment")
+		c := mustCreateClient(badAddress, "payment", cs.grpcCreds)
 		paymentService = pb.NewPaymentServiceClient(c)
 	}
 
