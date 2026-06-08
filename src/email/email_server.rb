@@ -225,6 +225,80 @@ Rack::Attack.throttled_responder = lambda do |request|
   ]
 end
 
+# @param request [Hash] Request payload containing sender_email, recipient_email, subject, body
+# @return [Array<Hash>] List of validation errors, empty if valid
+def validate_email_request(request)
+  errors = []
+  
+  # Check required fields
+  required_fields = [:sender_email, :recipient_email, :subject, :body]
+  required_fields.each do |field|
+    if request[field].nil? || request[field].to_s.strip.empty?
+      errors << { field: field.to_s, message: "#{field} is required" }
+    end
+  end
+  
+  # Validate email formats only if fields are present
+  if request[:sender_email] && !request[:sender_email].to_s.strip.empty?
+    unless request[:sender_email].match?(URI::MailTo::EMAIL_REGEXP)
+      errors << { field: "sender_email", message: "sender_email has invalid email format" }
+    end
+  end
+  
+  if request[:recipient_email] && !request[:recipient_email].to_s.strip.empty?
+    unless request[:recipient_email].match?(URI::MailTo::EMAIL_REGEXP)
+      errors << { field: "recipient_email", message: "recipient_email has invalid email format" }
+    end
+  end
+  
+  # Validate subject length
+  if request[:subject] && !request[:subject].to_s.strip.empty?
+    if request[:subject].to_s.length > 255
+      errors << { field: "subject", message: "subject exceeds maximum length of 255 characters" }
+    end
+  end
+  
+  # Validate body length
+  if request[:body] && !request[:body].to_s.strip.empty?
+    if request[:body].to_s.length > 10000
+      errors << { field: "body", message: "body exceeds maximum length of 10000 characters" }
+    end
+  end
+  
+  errors
+end
+
+post "/v1/send-email" do
+  content_type :json
+  begin
+    request_body = request.body.read
+    payload = JSON.parse(request_body, symbolize_names: true)
+  rescue JSON::ParserError
+    status 400
+    return {
+      error: "Validation failed",
+      details: [
+        { field: "request", message: "Invalid JSON payload" }
+      ]
+    }.to_json
+  end
+  
+  validation_errors = validate_email_request(payload)
+  
+  unless validation_errors.empty?
+    status 400
+    return {
+      error: "Validation failed",
+      details: validation_errors
+    }.to_json
+  end
+  
+  # For now, return 200 OK for valid requests (SMTP integration can be added later)
+  # In a real implementation, this would forward to the SMTP layer
+  status 200
+  { status: "success", message: "Email request accepted for delivery" }.to_json
+end
+
 post "/send" do
   data = JSON.parse(request.body.read, object_class: OpenStruct)
   request_id = request.uuid
