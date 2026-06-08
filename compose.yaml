@@ -808,11 +808,12 @@ services:
     container_name: otel-collector
     deploy:
       resources:
-        limits:
-          memory: 200M
-        requests:
-          cpu: "250m"
+        reservations:
+          cpus: "0.1"
           memory: "256Mi"
+        limits:
+          cpus: "0.5"
+          memory: "1Gi"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:13133/"]
