@@ -20,6 +20,9 @@ import (
 	"time"
 	"unicode"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/log/global"
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
@@ -31,6 +34,7 @@ import (
 	flagd "github.com/open-feature/go-sdk-contrib/providers/flagd/pkg"
 	"github.com/open-feature/go-sdk/openfeature"
 	"github.com/sony/gobreaker"
+	pb "github.com/open-telemetry/opentelemetry-demo/src/checkout/genproto/oteldemo"
 
 	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
@@ -49,166 +53,103 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
-	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
 	flags "github.com/open-telemetry/opentelemetry-demo/src/checkout/flags"
-	pb "github.com/open-telemetry/opentelemetry-demo/src/checkout/genproto/oteldemo"
 	"github.com/open-telemetry/opentelemetry-demo/src/checkout/kafka"
 	"github.com/open-telemetry/opentelemetry-demo/src/checkout/money"
 )
 
-// Validation helper functions
-
-// ValidateUserID checks if user ID is a valid UUID v4
-func ValidateUserID(userID string) error {
-	if userID == "" {
-		return status.Errorf(codes.InvalidArgument, "invalid field user_id: required field is empty")
-	}
-	_, err := uuid.Parse(userID)
-	if err != nil {
-		return status.Errorf(codes.InvalidArgument, "invalid field user_id: must be valid UUID v4")
-	}
-	return nil
-}
-
-// ValidateItemQuantities checks that all order items have quantity >= 1
-func ValidateItemQuantities(items []*pb.OrderItem) error {
-	if len(items) == 0 {
-		return status.Errorf(codes.InvalidArgument, "invalid field items: required field is empty")
-	}
-	for i, item := range items {
-		if item.Quantity <= 0 {
-			return status.Errorf(codes.InvalidArgument, "invalid field items[%d].quantity: must be greater than 0", i)
-		}
-	}
-	return nil
-}
-
-var (
-	usZipRegex = regexp.MustCompile(`^\d{5}(-\d{4})?$`)
-	euZipRegex = regexp.MustCompile(`^[a-zA-Z0-9]{2,10}$`)
-)
-
-// ValidateAddress checks that all required address fields are present and formatted correctly
-func ValidateAddress(addr *pb.Address) error {
-	if addr == nil {
-		return status.Errorf(codes.InvalidArgument, "invalid field address: required field is missing")
-	}
-	if addr.StreetAddress == "" {
-		return status.Errorf(codes.InvalidArgument, "invalid field address.street: required field is empty")
-	}
-	if addr.City == "" {
-		return status.Errorf(codes.InvalidArgument, "invalid field address.city: required field is empty")
-	}
-	if addr.State == "" {
-		return status.Errorf(codes.InvalidArgument, "invalid field address.state: required field is empty")
-	}
-	if addr.Country == "" {
-		return status.Errorf(codes.InvalidArgument, "invalid field address.country: required field is empty")
-	}
-	if addr.ZipCode == "" {
-		return status.Errorf(codes.InvalidArgument, "invalid field address.zip_code: required field is empty")
-	}
-
-	// Validate zip code based on country
-	switch addr.Country {
-	case "US":
-		if !usZipRegex.MatchString(addr.ZipCode) {
-			return status.Errorf(codes.InvalidArgument, "invalid field address.zip_code: invalid format for country US")
-		}
-	default:
-		// Assume EU/other alphanumeric zip
-		if !euZipRegex.MatchString(addr.ZipCode) {
-			return status.Errorf(codes.InvalidArgument, "invalid field address.zip_code: invalid format for country %s", addr.Country)
-		}
-	}
-	return nil
-}
-
-// luhnCheck performs Luhn algorithm validation for credit card numbers
-func luhnCheck(cardNumber string) bool {
-	var sum int
-	alternate := false
-	for i := len(cardNumber) - 1; i >= 0; i-- {
-		d := int(cardNumber[i] - '0')
-		if alternate {
-			d *= 2
-			if d > 9 {
-				d -= 9
-			}
-		}
-		sum += d
-		alternate = !alternate
-	}
-	return sum%10 == 0
-}
-
-var cvvRegex = regexp.MustCompile(`^\d{3,4}$`)
-
-// ValidateCreditCard checks credit card number (Luhn check), expiration date (not past), CVV (valid length)
-func ValidateCreditCard(cc *pb.CreditCardInfo) error {
-	if cc == nil {
-		return status.Errorf(codes.InvalidArgument, "invalid field credit_card: required field is missing")
-	}
-	if cc.Number == "" {
-		return status.Errorf(codes.InvalidArgument, "invalid field credit_card.number: required field is empty")
-	}
-	// Remove any non-digit characters from card number
-	cleanNumber := ""
-	for _, c := range cc.Number {
-		if unicode.IsDigit(c) {
-			cleanNumber += string(c)
-		}
-	}
-	if len(cleanNumber) < 13 || len(cleanNumber) > 19 {
-		return status.Errorf(codes.InvalidArgument, "invalid field credit_card.number: invalid card number")
-	}
-	if !luhnCheck(cleanNumber) {
-		return status.Errorf(codes.InvalidArgument, "invalid field credit_card.number: invalid card number")
-	}
-
-	if cc.ExpirationMonth < 1 || cc.ExpirationMonth > 12 {
-		return status.Errorf(codes.InvalidArgument, "invalid field credit_card.expiration_month: must be between 1 and 12")
-	}
-	if cc.ExpirationYear < 1900 {
-		return status.Errorf(codes.InvalidArgument, "invalid field credit_card.expiration_year: invalid year")
-	}
-	// Check if expiration is in past
-	now := time.Now()
-	currentYear, currentMonth, _ := now.Date()
-	if cc.ExpirationYear < int(currentYear) || (cc.ExpirationYear == int(currentYear) && cc.ExpirationMonth < int(currentMonth)) {
-		return status.Errorf(codes.InvalidArgument, "invalid field credit_card.expiration: date is in the past")
-	}
-
-	if cc.Cvv == "" {
-		return status.Errorf(codes.InvalidArgument, "invalid field credit_card.cvv: required field is empty")
-	}
-	if !cvvRegex.MatchString(cc.Cvv) {
-		return status.Errorf(codes.InvalidArgument, "invalid field credit_card.cvv: must be 3 or 4 digits")
-	}
-
-	return nil
-}
-
-// ValidatePlaceOrderRequest runs all validations on a full PlaceOrderRequest
+// ValidatePlaceOrderRequest validates all fields of a PlaceOrderRequest
+// Returns: nil if valid, error with gRPC status code INVALID_ARGUMENT and descriptive message if invalid
 func ValidatePlaceOrderRequest(req *pb.PlaceOrderRequest) error {
-	if err := ValidateUserID(req.UserId); err != nil {
-		return err
+	// AC-1: Check user_id is not empty
+	if req.UserId == "" {
+		return status.Error(codes.InvalidArgument, "user_id is required")
 	}
-	if err := ValidateItemQuantities(req.Items); err != nil {
-		return err
+
+	// AC-2: Check user_currency is 3-letter uppercase ISO 4217 code
+	if len(req.UserCurrency) != 3 {
+		return status.Error(codes.InvalidArgument, "user_currency must be a valid 3-letter ISO 4217 currency code")
 	}
-	if err := ValidateAddress(req.Address); err != nil {
-		return err
+	for _, c := range req.UserCurrency {
+		if !unicode.IsUpper(c) || !unicode.IsLetter(c) {
+			return status.Error(codes.InvalidArgument, "user_currency must be a valid 3-letter ISO 4217 currency code")
+		}
 	}
-	if err := ValidateCreditCard(req.CreditCard); err != nil {
-		return err
+
+	// AC-3: Check email format
+	emailRegex := regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
+	if !emailRegex.MatchString(req.Email) {
+		return status.Error(codes.InvalidArgument, "email is invalid")
 	}
+
+	// AC-4: Check address is not nil
+	if req.Address == nil {
+		return status.Error(codes.InvalidArgument, "address is required")
+	}
+
+	// AC-5 to AC-9: Check all address fields are not empty
+	if req.Address.StreetAddress == "" {
+		return status.Error(codes.InvalidArgument, "street_address is required")
+	}
+	if req.Address.City == "" {
+		return status.Error(codes.InvalidArgument, "city is required")
+	}
+	if req.Address.State == "" {
+		return status.Error(codes.InvalidArgument, "state is required")
+	}
+	if req.Address.Country == "" {
+		return status.Error(codes.InvalidArgument, "country is required")
+	}
+	if req.Address.ZipCode == "" {
+		return status.Error(codes.InvalidArgument, "zip_code is required")
+	}
+
+	// AC-10: Check credit_card is not nil
+	if req.CreditCard == nil {
+		return status.Error(codes.InvalidArgument, "credit_card is required")
+	}
+
+	// AC-11: Check credit card number is 13-19 digits
+	ccNum := req.CreditCard.CreditCardNumber
+	if len(ccNum) < 13 || len(ccNum) > 19 {
+		return status.Error(codes.InvalidArgument, "credit_card_number must be between 13 and 19 digits")
+	}
+	for _, c := range ccNum {
+		if !unicode.IsDigit(c) {
+			return status.Error(codes.InvalidArgument, "credit_card_number must be between 13 and 19 digits")
+		}
+	}
+
+	// AC-12: Check CVV is 3-4 digits
+	cvv := req.CreditCard.CreditCardCvv
+	if cvv < 100 || cvv > 9999 {
+		return status.Error(codes.InvalidArgument, "credit_card_cvv must be 3 or 4 digits")
+	}
+
+	// AC-13: Check expiration month is between 1 and 12
+	expMonth := req.CreditCard.CreditCardExpirationMonth
+	if expMonth < 1 || expMonth > 12 {
+		return status.Error(codes.InvalidArgument, "credit_card_expiration_month must be between 1 and 12")
+	}
+
+	// AC-14 & AC-15: Check expiration date is not in past
+	expYear := req.CreditCard.CreditCardExpirationYear
+	currentYear := int32(time.Now().Year())
+	currentMonth := int32(time.Now().Month())
+
+	if expYear < currentYear {
+		return status.Error(codes.InvalidArgument, "credit_card_expiration_year must not be in the past")
+	}
+	if expYear == currentYear && expMonth < currentMonth {
+		return status.Error(codes.InvalidArgument, "credit card is expired")
+	}
+
+	// All checks passed
 	return nil
 }
 
@@ -545,6 +486,11 @@ func (cs *checkout) Watch(req *healthpb.HealthCheckRequest, ws healthpb.Health_W
 }
 
 func (cs *checkout) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*pb.PlaceOrderResponse, error) {
+	// Validate request first
+	if err := ValidatePlaceOrderRequest(req); err != nil {
+		return nil, err
+	}
+	
 	span := trace.SpanFromContext(ctx)
 	span.SetAttributes(
 		attribute.String("user.id", req.UserId),
