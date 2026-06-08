@@ -16,9 +16,7 @@ use Slim\App;
 return function (App $app) {
     $app->get('/health', function (Request $request, Response $response) {
         $payload = json_encode([
-            'status' => 'healthy',
-            'service' => 'quote',
-            'timestamp' => time(),
+            'status' => 'ok',
         ]);
         $response->getBody()->write($payload);
         
@@ -26,14 +24,47 @@ return function (App $app) {
             ->withHeader('Content-Type', 'application/json')
             ->withStatus(200);
     });
+    $app->map(['POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'HEAD'], '/health', function (Request $request, Response $response) {
+        $payload = json_encode([
+            'status' => 'error',
+            'message' => 'Method not allowed'
+        ]);
+        $response->getBody()->write($payload);
+        
+        return $response
+            ->withHeader('Content-Type', 'application/json')
+            ->withStatus(405);
+    });
     
-    $app->get('/ready', function (Request $request, Response $response) {
+    // Readiness check endpoint (primary endpoint per spec)
+    $app->get('/readiness', function (Request $request, Response $response) {
         // For quote service, all initialization completes before server starts
         // So service is always ready when endpoints are reachable
         $payload = json_encode([
-            'status' => 'ready',
-            'service' => 'quote',
-            'timestamp' => time(),
+            'status' => 'ok',
+        ]);
+        $response->getBody()->write($payload);
+        
+        return $response
+            ->withHeader('Content-Type', 'application/json')
+            ->withStatus(200);
+    });
+    $app->map(['POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'HEAD'], '/readiness', function (Request $request, Response $response) {
+        $payload = json_encode([
+            'status' => 'error',
+            'message' => 'Method not allowed'
+        ]);
+        $response->getBody()->write($payload);
+        
+        return $response
+            ->withHeader('Content-Type', 'application/json')
+            ->withStatus(405);
+    });
+
+    // Backward compatibility for existing /ready endpoint
+    $app->get('/ready', function (Request $request, Response $response) {
+        $payload = json_encode([
+            'status' => 'ok',
         ]);
         $response->getBody()->write($payload);
         

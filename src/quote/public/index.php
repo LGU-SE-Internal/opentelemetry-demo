@@ -115,7 +115,7 @@ $app->add(function (Psr\Http\Message\ServerRequestInterface $request, Psr\Http\S
     $method = $request->getMethod();
     
     // Skip rate limiting for health and readiness endpoints
-    $excludedPaths = ['/health', '/healthz', '/ready', '/livez'];
+    $excludedPaths = ['/health', '/healthz', '/ready', '/readiness', '/livez'];
     if (in_array($path, $excludedPaths)) {
         return $handler->handle($request);
     }
