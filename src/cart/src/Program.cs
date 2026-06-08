@@ -154,15 +154,39 @@ if (string.IsNullOrEmpty(valkeyAddress))
     Environment.Exit(1);
 }
 
+// Load Redis retry policy settings from environment variables
+var redisRetrySettings = new RedisRetryPolicySettings();
+if (int.TryParse(builder.Configuration["CART_REDIS_MAX_RETRY_ATTEMPTS"], out int maxRetries))
+{
+    redisRetrySettings.MaxRetryAttempts = maxRetries;
+}
+if (int.TryParse(builder.Configuration["CART_REDIS_INITIAL_BACKOFF_MS"], out int initialBackoff))
+{
+    redisRetrySettings.InitialBackoffMs = initialBackoff;
+}
+if (int.TryParse(builder.Configuration["CART_REDIS_MAX_BACKOFF_MS"], out int maxBackoff))
+{
+    redisRetrySettings.MaxBackoffMs = maxBackoff;
+}
+builder.Services.AddSingleton(redisRetrySettings);
+
 builder.Logging
     .AddOpenTelemetry(options => options.AddOtlpExporter())
     .AddConsole();
 
-builder.Services.AddSingleton<ICartStore>(x =>
+builder.Services.AddSingleton<ValkeyCartStore>(x =>
 {
     var store = new ValkeyCartStore(x.GetRequiredService<ILogger<ValkeyCartStore>>(), valkeyAddress);
     store.Initialize();
     return store;
+});
+
+builder.Services.AddSingleton<ICartStore>(x =>
+{
+    var innerStore = x.GetRequiredService<ValkeyCartStore>();
+    var logger = x.GetRequiredService<ILogger<RetryingCartStore>>();
+    var settings = x.GetRequiredService<RedisRetryPolicySettings>();
+    return new RetryingCartStore(innerStore, logger, settings);
 });
 
 builder.Services.AddOpenFeature(openFeatureBuilder =>
@@ -269,7 +293,7 @@ app.Use(async (context, next) =>
     }
 });
 
-var ValkeyCartStore = (ValkeyCartStore)app.Services.GetRequiredService<ICartStore>();
+var ValkeyCartStore = app.Services.GetRequiredService<ValkeyCartStore>();
 app.Services.GetRequiredService<StackExchangeRedisInstrumentation>().AddConnection(ValkeyCartStore.GetConnection());
 
 app.MapGrpcService<CartService>();
