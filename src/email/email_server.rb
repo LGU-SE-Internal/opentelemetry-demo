@@ -11,6 +11,7 @@ require "open_feature/sdk"
 require "openfeature/flagd/provider"
 require "openssl"
 require "prometheus/client"
+require "stoplight"
 
 # Initialize Prometheus registry
 Prometheus::Client.configure do |config|
@@ -22,6 +23,65 @@ PROMETHEUS_REGISTRY = Prometheus::Client.registry
 $email_delivery_success_total = PROMETHEUS_REGISTRY.counter(:email_delivery_success_total, docstring: "Increments on every successful email delivery")
 $email_delivery_failed_total = PROMETHEUS_REGISTRY.counter(:email_delivery_failed_total, docstring: "Increments when delivery fails permanently", labels: [:failure_type])
 $email_delivery_retry_total = PROMETHEUS_REGISTRY.counter(:email_delivery_retry_total, docstring: "Increments each time a retry attempt is initiated", labels: [:retry_attempt])
+
+# Circuit Breaker metrics
+$circuit_breaker_state_gauge = PROMETHEUS_REGISTRY.gauge(:email_service_smtp_circuit_breaker_state, docstring: "Current state of SMTP circuit breaker (1 for active state)", labels: [:state])
+$circuit_breaker_transitions_counter = PROMETHEUS_REGISTRY.counter(:email_service_smtp_circuit_breaker_transitions_total, docstring: "Total number of circuit breaker state transitions", labels: [:from_state, :to_state])
+
+# Initialize gauge values to 0
+%w[closed open half_open].each { |state| $circuit_breaker_state_gauge.set(0, labels: { state: state }) }
+$circuit_breaker_state_gauge.set(1, labels: { state: "closed" })
+
+# Circuit Breaker configuration
+CIRCUIT_BREAKER_DEFAULTS = {
+  failure_threshold: ENV.fetch('SMTP_CIRCUIT_FAILURE_THRESHOLD', 5).to_i,
+  recovery_timeout: ENV.fetch('SMTP_CIRCUIT_RECOVERY_TIMEOUT', 30).to_i,
+  expected_exceptions: [Net::OpenTimeout, Net::ReadTimeout, Net::SMTPFatalError, Net::SMTPServerBusy, Errno::ETIMEDOUT, Errno::ECONNRESET, SocketError]
+}.freeze
+
+# Wraps existing SMTP delivery calls with circuit breaker protection
+# @param mail [Mail] Ruby Mail object to deliver
+# @return [Boolean] true if delivery was successful
+# @raise [Stoplight::Error::Open] if circuit is open, no delivery attempt made
+# @raise [StandardError] any SMTP delivery error from upstream if circuit is closed
+def deliver_with_circuit_breaker(mail)
+  circuit = Stoplight('smtp-delivery') do
+    mail.deliver
+  end
+  .with_threshold(CIRCUIT_BREAKER_DEFAULTS[:failure_threshold])
+  .with_timeout(CIRCUIT_BREAKER_DEFAULTS[:recovery_timeout])
+  .with_expected_errors(CIRCUIT_BREAKER_DEFAULTS[:expected_exceptions])
+
+  # Add state transition handler
+  circuit.on_transition do |from, to|
+    $circuit_breaker_transitions_counter.increment(labels: { from_state: from.to_s, to_state: to.to_s })
+    # Update OTel transitions counter
+    $otel_circuit_transitions_counter.add(1, attributes: { 'from_state' => from.to_s, 'to_state' => to.to_s })
+    # Update Prometheus gauge
+    %w[closed open half_open].each { |state| $circuit_breaker_state_gauge.set(0, labels: { state: state }) }
+    $circuit_breaker_state_gauge.set(1, labels: { state: to.to_s })
+    # Update OTel state gauge
+    %w[closed open half_open].each { |state| $otel_circuit_state_gauge.set(0, attributes: { 'state' => state }) }
+    $otel_circuit_state_gauge.set(1, attributes: { 'state' => to.to_s })
+    # Add span event for state change
+    current_span = OpenTelemetry::Trace.current_span
+    current_span.add_event(
+      'circuit_breaker_state_change',
+      attributes: {
+        'from' => from.to_s,
+        'to' => to.to_s,
+        'failure_count' => circuit.failures.count
+      }
+    )
+  end
+
+  # Get current state and add to span
+  current_state = circuit.state.to_s
+  current_span = OpenTelemetry::Trace.current_span
+  current_span.set_attribute('smtp.circuit_breaker.state', current_state)
+
+  circuit.run
+end
 
 require "opentelemetry/sdk"
 require "opentelemetry-logs-sdk"
@@ -167,6 +227,22 @@ OpenTelemetry.meter_provider.add_metric_reader(otlp_metric_exporter)
 meter = OpenTelemetry.meter_provider.meter("email")
 $confirmation_counter = meter.create_counter("demo.notification.confirmations", unit: "1", description: "Counts the number of order confirmation emails sent")
 $rate_limited_counter = meter.create_counter("email_service_rate_limited_requests_total", unit: "1", description: "Counts the number of rate-limited email requests")
+
+# Circuit Breaker OpenTelemetry metrics
+$otel_circuit_state_gauge = meter.create_gauge(
+  "email_service.smtp.circuit_breaker.state",
+  unit: "1",
+  description: "Current state of SMTP circuit breaker (1 for active state)"
+)
+$otel_circuit_transitions_counter = meter.create_counter(
+  "email_service.smtp.circuit_breaker.transitions_total",
+  unit: "1",
+  description: "Total number of circuit breaker state transitions"
+)
+
+# Initialize OTel gauge values
+%w[closed open half_open].each { |state| $otel_circuit_state_gauge.set(0, attributes: { 'state' => state }) }
+$otel_circuit_state_gauge.set(1, attributes: { 'state' => 'closed' })
 
 # Rate limit configuration
 RATE_LIMIT_THRESHOLD = ENV.fetch("EMAIL_RATE_LIMIT_THRESHOLD", 100).to_i
@@ -395,6 +471,17 @@ error do
   OpenTelemetry::Trace.current_span.record_exception(env['sinatra.error'])
 end
 
+error Stoplight::Error::Open do
+  content_type :json
+  status 503
+  headers['Retry-After'] = CIRCUIT_BREAKER_DEFAULTS[:recovery_timeout].to_s
+  {
+    error: "Email service temporarily unavailable: SMTP circuit is open",
+    code: "SMTP_CIRCUIT_OPEN",
+    retry_after: CIRCUIT_BREAKER_DEFAULTS[:recovery_timeout]
+  }.to_json
+end
+
 def send_email(data)
   # create and start a manual span
   tracer.in_span("send_email") do |span|
@@ -407,13 +494,14 @@ def send_email(data)
     whitespace_length = [0, confirmation_content.length * (memory_leak_multiplier-1)].max
 
     retry_smtp_delivery do
-      Pony.mail(
+      mail = Pony.build_mail(
         to:       data.email,
         from:     "noreply@example.com",
         subject:  "Your confirmation email",
         body:     confirmation_content + " " * whitespace_length,
         via:      :test
       )
+      deliver_with_circuit_breaker(mail)
     end
 
     $email_delivery_success_total.add(1)
