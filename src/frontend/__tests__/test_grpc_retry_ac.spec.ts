@@ -1,6 +1,7 @@
 import { jest, describe, test, expect, beforeEach, beforeAll } from '@jest/globals';
 import { status as GrpcStatus } from '@grpc/grpc-js';
-import { withGrpcRetry, GrpcRetryConfig, READ_ONLY_GRPC_METHODS, RetryMetrics, CircuitBreakerOpenError } from '../utils/grpcRetry';
+import { withGrpcRetry, GrpcRetryConfig, READ_ONLY_GRPC_METHODS, RetryMetrics, CircuitBreakerOpenError, setMetrics, reloadConfig } from '../utils/grpcRetry';
+
 
 // Mock dependencies
 jest.mock('@opentelemetry/api', () => ({
@@ -49,10 +50,14 @@ describe('gRPC Retry Acceptance Criteria Tests', () => {
     process.env.FRONTEND_GRPC_CIRCUIT_BREAKER_ERROR_THRESHOLD = '50';
     process.env.FRONTEND_GRPC_CIRCUIT_BREAKER_RESET_TIMEOUT_MS = '10000';
     jest.useFakeTimers();
+    // Set mock metrics for all tests
+    setMetrics(mockMetrics);
   });
 
   beforeEach(() => {
     jest.clearAllMocks();
+    // Reload config and clear circuit breakers between tests
+    reloadConfig();
   });
 
   test('AC1_retry_readonly_transient_error_with_exponential_backoff', async () => {
