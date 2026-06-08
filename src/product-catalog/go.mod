@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/XSAM/otelsql v0.42.0
+	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/lib/pq v1.12.3
 	github.com/open-feature/go-sdk v1.17.2
 	github.com/open-feature/go-sdk-contrib/hooks/open-telemetry v0.3.7
@@ -45,6 +46,7 @@ require (
 	github.com/open-feature/flagd/core v0.15.5 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2 // indirect
+	github.com/stretchr/objx v0.5.2 // indirect
 	github.com/twmb/murmur3 v1.1.8 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/propagators/autoprop v0.68.0 // indirect

@@ -17,17 +17,20 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
 
-	_ "github.com/lib/pq"
+	"github.com/cenkalti/backoff/v4"
+	"github.com/lib/pq"
 	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/contrib/instrumentation/runtime"
@@ -54,6 +57,157 @@ import (
 	"github.com/XSAM/otelsql"
 	flags "github.com/opentelemetry/opentelemetry-demo/src/product-catalog/flags"
 )
+
+// RetryConfig holds configuration for PostgreSQL retry logic
+type RetryConfig struct {
+	MaxRetries     int           // Maximum number of retry attempts (default 3)
+	InitialBackoff time.Duration // Initial backoff delay between retries (default 100ms)
+}
+
+// DBOperation is a function type representing any PostgreSQL database operation
+type DBOperation func(ctx context.Context) error
+
+// OperationType classifies database operations for idempotency checks
+type OperationType string
+
+const (
+	OperationTypeRead              OperationType = "read"
+	OperationTypeIdempotentWrite   OperationType = "idempotent_write"
+	OperationTypeNonIdempotentWrite OperationType = "non_idempotent_write"
+)
+
+var retryConfig RetryConfig
+
+// NewRetryConfig loads retry configuration from environment variables, falls back to defaults
+func NewRetryConfig() RetryConfig {
+	cfg := RetryConfig{
+		MaxRetries:     3,
+		InitialBackoff: 100 * time.Millisecond,
+	}
+
+	if maxRetriesStr := os.Getenv("PRODUCT_CATALOG_DB_MAX_RETRIES"); maxRetriesStr != "" {
+		if maxRetries, err := strconv.Atoi(maxRetriesStr); err == nil && maxRetries >= 0 {
+			cfg.MaxRetries = maxRetries
+		}
+	}
+
+	if initialBackoffMsStr := os.Getenv("PRODUCT_CATALOG_DB_INITIAL_BACKOFF_MS"); initialBackoffMsStr != "" {
+		if ms, err := strconv.Atoi(initialBackoffMsStr); err == nil && ms > 0 {
+			cfg.InitialBackoff = time.Duration(ms) * time.Millisecond
+		}
+	}
+
+	return cfg
+}
+
+// IsTransientPostgresError checks if a given PostgreSQL error is a transient error eligible for retry
+// Transient errors include: connection timeouts, connection reset/refused, 5xx Postgres error codes
+func IsTransientPostgresError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Check for connection errors
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return netErr.Timeout() || strings.Contains(netErr.Error(), "connection reset") || strings.Contains(netErr.Error(), "connection refused")
+	}
+
+	// Check for Postgres specific errors
+	var pqErr *pq.Error
+	if errors.As(err, &pqErr) {
+		// 5xx error codes are transient server errors
+		if len(pqErr.Code) >= 1 && pqErr.Code[0] == '5' {
+			return true
+		}
+	}
+
+	// Check for context canceled/deadline exceeded
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return false
+	}
+
+	// Check other common transient error messages
+	errMsg := err.Error()
+	if strings.Contains(errMsg, "connection reset") || 
+	   strings.Contains(errMsg, "connection refused") || 
+	   strings.Contains(errMsg, "connection timeout") ||
+	   strings.Contains(errMsg, "timeout") && strings.Contains(errMsg, "connect") {
+		return true
+	}
+
+	return false
+}
+
+// RetryOperation executes the given database operation with retry logic per configuration
+// Parameters:
+//   ctx: Request context, cancels retries immediately if context is canceled
+//   op: Database operation to execute
+//   opType: Type of operation to determine idempotency eligibility for retry
+//   span: Active OpenTelemetry span to add retry count attribute to
+// Returns:
+//   nil if operation succeeds on first or retried attempt, error from final failed attempt otherwise
+func RetryOperation(ctx context.Context, op DBOperation, opType OperationType, span trace.Span) error {
+	// Non-idempotent writes are never retried
+	if opType == OperationTypeNonIdempotentWrite {
+		return op(ctx)
+	}
+
+	retryCount := 0
+	defer func() {
+		if span != nil && retryCount > 0 {
+			span.SetAttributes(attribute.Int("db.retry_count", retryCount))
+		}
+	}()
+
+	// Create exponential backoff with jitter
+	expBackoff := backoff.NewExponentialBackOff()
+	expBackoff.InitialInterval = retryConfig.InitialBackoff
+	expBackoff.Multiplier = 2
+	expBackoff.RandomizationFactor = 0.1
+	expBackoff.MaxElapsedTime = 0 // We control max retries manually
+	expBackoff.Reset()
+
+	for {
+		err := op(ctx)
+		if err == nil {
+			return nil
+		}
+
+		// Check if error is transient
+		if !IsTransientPostgresError(err) {
+			return err
+		}
+
+		// Check if we have retries left
+		if retryCount >= retryConfig.MaxRetries {
+			logger.ErrorContext(ctx, "All database operation retry attempts failed",
+				"attempts", retryCount + 1,
+				"error", err,
+				"operation_type", opType,
+			)
+			return err
+		}
+
+		retryCount++
+		nextDelay := expBackoff.NextBackOff()
+
+		logger.WarnContext(ctx, "Retrying transient database error",
+			"retry_count", retryCount,
+			"error", err,
+			"next_delay", nextDelay,
+			"operation_type", opType,
+		)
+
+		// Wait for next backoff or context cancellation
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(nextDelay):
+			// Continue to next retry
+		}
+	}
+}
 
 var (
 	logger *slog.Logger
@@ -330,6 +484,8 @@ func main() {
 		logger.Error(fmt.Sprintf("Error initializing database: %v", err))
 		os.Exit(1)
 	}
+	// Initialize retry configuration
+	retryConfig = NewRetryConfig()
 	catalogLoaded.Store(true)
 	defer func() {
 		if db != nil {
