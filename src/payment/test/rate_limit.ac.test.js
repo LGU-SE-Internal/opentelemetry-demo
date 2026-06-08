@@ -4,7 +4,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { expect } = require('chai');
 
-const PROTO_PATH = path.join(__dirname, '../../../protos/opentelemetry/proto/demo/v1/demo.proto');
+const PROTO_PATH = path.join(__dirname, '../../../pb/demo.proto');
 const packageDefinition = protoLoader.loadSync(PROTO_PATH, { keepCase: true, enums: String, defaults: true, oneofs: true });
 const otelDemoProto = grpc.loadPackageDefinition(packageDefinition).oteldemo;
 
