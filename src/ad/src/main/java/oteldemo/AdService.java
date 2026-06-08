@@ -65,6 +65,7 @@ import dev.openfeature.sdk.MutableContext;
 import dev.openfeature.sdk.OpenFeatureAPI;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import io.grpc.netty.shaded.io.grpc.netty.GrpcSslContexts;
 import io.grpc.netty.shaded.io.netty.handler.ssl.SslContext;
 import io.grpc.netty.shaded.io.netty.handler.ssl.SslContextBuilder;
@@ -485,8 +486,8 @@ public final class AdService {
         }
 
         List<Ad> allAds = new ArrayList<>();
-        AdRequestType adRequestType;
-        AdResponseType adResponseType;
+        AtomicReference<AdRequestType> adRequestType = new AtomicReference<>();
+        AtomicReference<AdResponseType> adResponseType = new AtomicReference<>();
 
         Baggage baggage = Baggage.fromContextOrNull(Context.current());
         MutableContext evaluationContext = new MutableContext();
@@ -524,18 +525,18 @@ public final class AdService {
                 Collection<Ad> categoryAds = service.getAdsByCategory(req.getContextKeys(i));
                 ads.addAll(categoryAds);
               }
-              adRequestType = AdRequestType.TARGETED;
-              adResponseType = AdResponseType.TARGETED;
+              adRequestType.set(AdRequestType.TARGETED);
+              adResponseType.set(AdResponseType.TARGETED);
             } else {
               logger.info("Non-targeted ad request received, preparing random response.");
               ads = service.getRandomAds();
-              adRequestType = AdRequestType.NOT_TARGETED;
-              adResponseType = AdResponseType.RANDOM;
+              adRequestType.set(AdRequestType.NOT_TARGETED);
+              adResponseType.set(AdResponseType.RANDOM);
             }
             if (ads.isEmpty()) {
               // Serve random ads.
               ads = service.getRandomAds();
-              adResponseType = AdResponseType.RANDOM;
+              adResponseType.set(AdResponseType.RANDOM);
             }
             
             // Throw 1/10 of the time to simulate a failure when the feature flag is enabled
