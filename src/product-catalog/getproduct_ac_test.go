@@ -10,7 +10,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
-	pb "github.com/open-telemetry/opentelemetry-demo/src/product-catalog/genproto/oteldemo/proto/v1"
+	pb "github.com/opentelemetry/opentelemetry-demo/src/product-catalog/genproto/oteldemo"
 )
 
 // Test_AC1_GetProduct_NotFound_ReturnsCorrectStatus tests AC-1:

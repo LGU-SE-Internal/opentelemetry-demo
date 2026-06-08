@@ -504,7 +504,7 @@ func getProductFromDB(ctx context.Context, productID string) (*pb.Product, error
 
 	if err := row.Scan(&id, &name, &description, &picture, &currencyCode, &units, &nanos, &categoriesStr); err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("product not found")
+			return nil, sql.ErrNoRows
 		}
 		return nil, fmt.Errorf("failed to scan product row: %w", err)
 	}
@@ -733,10 +733,16 @@ func (p *productCatalog) GetProduct(ctx context.Context, req *pb.GetProductReque
 
 	found, err := getProductFromDB(ctx, req.Id)
 	if err != nil {
-		msg := fmt.Sprintf("Product Not Found: %s", req.Id)
+		if errors.Is(err, sql.ErrNoRows) {
+			msg := fmt.Sprintf("product with ID %q not found", req.Id)
+			span.SetStatus(otelcodes.Error, msg)
+			span.AddEvent(msg)
+			return nil, status.Error(codes.NotFound, msg)
+		}
+		msg := fmt.Sprintf("failed to get product: %v", err)
 		span.SetStatus(otelcodes.Error, msg)
 		span.AddEvent(msg)
-		return nil, status.Error(codes.NotFound, msg)
+		return nil, status.Error(codes.Internal, msg)
 	}
 
 	span.AddEvent("Product Found")
