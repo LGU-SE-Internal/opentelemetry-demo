@@ -10,6 +10,8 @@
 #include <thread>
 #include <atomic>
 #include "httplib.h"
+#include <shared_mutex>
+#include <nlohmann/json.hpp>
 
 #include "opentelemetry/trace/context.h"
 #include "opentelemetry/semconv/incubating/rpc_attributes.h"
@@ -30,6 +32,8 @@
 #include <fstream>
 #include <cerrno>
 #include <cstring>
+#include <algorithm>
+#include <cctype>
 
 using namespace std;
 using namespace opentelemetry::baggage;
@@ -54,8 +58,8 @@ namespace semconv     = opentelemetry::semconv;
 
 namespace
 {
-  std::unordered_map<std::string, double> currency_conversion
-  {
+  // Hardcoded default rates
+  const std::unordered_map<std::string, double> HARDCODED_DEFAULT_RATES = {
     {"EUR", 1.0},
     {"USD", 1.1305},
     {"JPY", 126.40},
@@ -91,11 +95,134 @@ namespace
     {"ZAR", 16.0583},
   };
 
+  // Thread-safe rate storage
+  std::unordered_map<std::string, double> current_rates = HARDCODED_DEFAULT_RATES;
+  mutable std::shared_mutex rates_mutex;
+
+  // Background refresh thread variables
+  std::thread refresh_thread;
+  std::atomic<bool> refresh_running{false};
+  std::string configured_rates_file_path;
+
   std::string version = std::getenv("VERSION"); 
   std::string name{ "currency" };
 
   nostd::unique_ptr<metrics_api::Counter<uint64_t>> currency_counter;
   nostd::shared_ptr<opentelemetry::logs::Logger> logger;
+
+  // Public interface function implementations
+  std::unordered_map<std::string, double> get_current_rates() {
+    std::shared_lock<std::shared_mutex> lock(rates_mutex);
+    return current_rates;
+  }
+
+  std::unordered_map<std::string, double> apply_env_overrides(std::unordered_map<std::string, double> base_rates) {
+    extern char** environ;
+    for (char** env = environ; *env != nullptr; ++env) {
+      std::string env_str(*env);
+      if (env_str.starts_with("CURRENCY_RATE_")) {
+        size_t eq_pos = env_str.find('=');
+        if (eq_pos == std::string::npos) continue;
+
+        std::string var_name = env_str.substr(0, eq_pos);
+        std::string var_value = env_str.substr(eq_pos + 1);
+        std::string currency_code = var_name.substr(15); // Length of "CURRENCY_RATE_"
+
+        // Convert to uppercase
+        std::transform(currency_code.begin(), currency_code.end(), currency_code.begin(),
+                       [](unsigned char c) { return std::toupper(c); });
+
+        try {
+          double rate = std::stod(var_value);
+          base_rates[currency_code] = rate;
+          logger->Info("Applied environment override for " + currency_code + ": " + std::to_string(rate));
+        } catch (const std::exception& e) {
+          logger->Error("Failed to parse environment override for " + currency_code + ": value '" + var_value + "' is not a valid number");
+        }
+      }
+    }
+    return base_rates;
+  }
+
+  bool load_rates_from_file(const std::string& file_path) {
+    try {
+      std::ifstream file(file_path);
+      if (!file.is_open()) {
+        logger->Error("Failed to open rates file: " + file_path);
+        return false;
+      }
+
+      nlohmann::json j;
+      file >> j;
+
+      if (!j.contains("rates") || !j["rates"].is_object()) {
+        logger->Error("Invalid rates file format: missing or invalid 'rates' object");
+        return false;
+      }
+
+      std::unordered_map<std::string, double> new_rates = HARDCODED_DEFAULT_RATES;
+
+      for (auto& [code, rate_val] : j["rates"].items()) {
+        try {
+          double rate = rate_val.get<double>();
+          new_rates[code] = rate;
+        } catch (const nlohmann::json::exception& e) {
+          logger->Error("Invalid rate value for currency " + code + " in file: " + e.what());
+        }
+      }
+
+      // Apply environment overrides
+      new_rates = apply_env_overrides(new_rates);
+
+      // Atomic update
+      {
+        std::unique_lock<std::shared_mutex> lock(rates_mutex);
+        current_rates.swap(new_rates);
+      }
+
+      logger->Info("Successfully loaded rates from file: " + file_path);
+      return true;
+    } catch (const nlohmann::json::parse_error& e) {
+      logger->Error("Failed to parse rates file: " + std::string(e.what()));
+      return false;
+    } catch (const std::exception& e) {
+      logger->Error("Error loading rates from file: " + std::string(e.what()));
+      return false;
+    }
+  }
+
+  void start_refresh_loop(int interval_seconds) {
+    if (interval_seconds < 10) {
+      logger->Warning("Refresh interval " + std::to_string(interval_seconds) + "s is below minimum 10s, using 10s");
+      interval_seconds = 10;
+    }
+
+    if (refresh_running.exchange(true)) {
+      logger->Warning("Refresh loop already running, ignoring start request");
+      return;
+    }
+
+    configured_rates_file_path = std::getenv("CURRENCY_RATES_FILE") ? std::getenv("CURRENCY_RATES_FILE") : "";
+
+    refresh_thread = std::thread([interval_seconds]() {
+      while (refresh_running.load()) {
+        std::this_thread::sleep_for(std::chrono::seconds(interval_seconds));
+        if (!configured_rates_file_path.empty()) {
+          logger->Info("Refreshing rates from file: " + configured_rates_file_path);
+          load_rates_from_file(configured_rates_file_path);
+        }
+      }
+    });
+  }
+
+  // Helper for test AC-9
+  std::string convert_currency(double amount, const std::string& from_code, const std::string& to_code) {
+    std::shared_lock<std::shared_mutex> lock(rates_mutex);
+    double from_rate = current_rates.at(from_code);
+    double to_rate = current_rates.at(to_code);
+    double result = (amount / from_rate) * to_rate;
+    return std::to_string(result);
+  }
 
 class HealthServer final : public grpc::health::v1::Health::Service
 {
@@ -136,7 +263,7 @@ class CurrencyService final : public oteldemo::CurrencyService::Service
 
     span->AddEvent("Processing supported currencies request");
 
-    for (auto &code : currency_conversion) {
+    for (auto &code : get_current_rates()) {
       response->add_currency_codes(code.first);
     }
 
@@ -210,7 +337,8 @@ class CurrencyService final : public oteldemo::CurrencyService::Service
         return Status(grpc::INVALID_ARGUMENT, "from currency code cannot be empty");
       }
       
-      double rate = currency_conversion[from_code];
+      std::shared_lock<std::shared_mutex> lock(rates_mutex);
+      double rate = current_rates[from_code];
       double one_euro = getDouble(from) / rate ;
 
       string to_code = request->to_code();
@@ -223,7 +351,7 @@ class CurrencyService final : public oteldemo::CurrencyService::Service
         return Status(grpc::INVALID_ARGUMENT, "to currency code cannot be empty");
       }
       
-      double to_rate = currency_conversion[to_code];
+      double to_rate = current_rates[to_code];
 
       double final = one_euro * to_rate;
       getUnitsAndNanos(*response, final);
@@ -462,7 +590,46 @@ int main(int argc, char **argv) {
   initLogger();
   currency_counter = initIntCounter("demo.exchange.conversions", version);
   logger = getLogger(name);
+
+  // Load initial rates configuration
+  const char* rates_file = std::getenv("CURRENCY_RATES_FILE");
+  if (rates_file != nullptr && strlen(rates_file) > 0) {
+    logger->Info("Loading initial rates from file: " + std::string(rates_file));
+    load_rates_from_file(rates_file);
+  } else {
+    // Apply environment overrides to hardcoded defaults
+    std::unique_lock<std::shared_mutex> lock(rates_mutex);
+    current_rates = apply_env_overrides(current_rates);
+    logger->Info("Using hardcoded default rates with environment overrides applied");
+  }
+
+  // Start refresh loop if configured
+  int refresh_interval = 3600; // default 1 hour
+  const char* refresh_interval_env = std::getenv("CURRENCY_RATES_REFRESH_INTERVAL_SECONDS");
+  if (refresh_interval_env != nullptr) {
+    try {
+      refresh_interval = std::stoi(refresh_interval_env);
+      if (refresh_interval < 10) {
+        logger->Warning("Refresh interval " + std::to_string(refresh_interval) + "s is below minimum, using 10s");
+        refresh_interval = 10;
+      }
+    } catch (const std::exception& e) {
+      logger->Error("Invalid refresh interval value, using default 3600s");
+    }
+  }
+
+  if (rates_file != nullptr && strlen(rates_file) > 0) {
+    start_refresh_loop(refresh_interval);
+    logger->Info("Automatic rate refresh configured with interval " + std::to_string(refresh_interval) + "s");
+  }
+
   RunServer(port);
+
+  // Cleanup refresh thread
+  refresh_running = false;
+  if (refresh_thread.joinable()) {
+    refresh_thread.join();
+  }
 
   return 0;
 }
