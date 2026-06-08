@@ -558,6 +558,12 @@ services:
       otel-collector:
         condition: service_healthy
     logging: *logging
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:${QUOTE_PORT}/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
     user: appuser
     privileged: false
     allow_privilege_escalation: false
@@ -565,12 +571,6 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:${QUOTE_PORT}/health"]
-      interval: 5s
-      timeout: 3s
-      retries: 3
-      start_period: 10s
 
   # Recommendation service
   recommendation:
