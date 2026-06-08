@@ -26,14 +26,10 @@ spec:
               containerPort: 9092
               protocol: TCP
           livenessProbe:
-            exec:
-              command:
-                - kafka-broker-api-versions.sh
-                - --bootstrap-server
-                - localhost:9092
-            initialDelaySeconds: 60
-            periodSeconds: 30
-            timeoutSeconds: 5
+            tcpSocket:
+              port: 9092
+            initialDelaySeconds: 30
+            periodSeconds: 10
             failureThreshold: 3
           readinessProbe:
             exec:
@@ -41,17 +37,16 @@ spec:
                 - kafka-broker-api-versions.sh
                 - --bootstrap-server
                 - localhost:9092
-            initialDelaySeconds: 30
-            periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 2
+            initialDelaySeconds: 20
+            periodSeconds: 5
+            failureThreshold: 3
           resources:
             requests:
               cpu: 500m
               memory: 1Gi
             limits:
-              cpu: 1000m
-              memory: 2Gi
+              cpu: 2
+              memory: 4Gi
           securityContext:
             runAsNonRoot: true
             allowPrivilegeEscalation: false
