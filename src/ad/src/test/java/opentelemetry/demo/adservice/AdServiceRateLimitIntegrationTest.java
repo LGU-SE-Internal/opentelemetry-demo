@@ -14,16 +14,17 @@
  * limitations under the License.
  */
 
-package opentelemetry.demo.adservice;
+package oteldemo;
 
 import io.grpc.*;
-import io.grpc.netty.NettyChannelBuilder;
+import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.opentelemetry.demo.adservice.AdServiceGrpc;
-import org.opentelemetry.demo.adservice.AdRequest;
-import org.opentelemetry.demo.adservice.AdResponse;
+import oteldemo.Demo.AdRequest;
+import oteldemo.Demo.AdResponse;
+import oteldemo.AdServiceGrpc;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
