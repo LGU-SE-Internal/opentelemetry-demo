@@ -25,18 +25,35 @@ public class CartService : Oteldemo.CartService.CartServiceBase
         _featureFlagHelper = featureFlagService;
     }
 
-    public override async Task<Empty> AddItem(AddItemRequest request, ServerCallContext context)
+    public override async Task<Cart> AddItem(AddItemRequest request, ServerCallContext context)
     {
         var activity = Activity.Current;
         activity?.SetTag("user.id", request.UserId);
-        activity?.SetTag("demo.product.id", request.Item.ProductId);
-        activity?.SetTag("demo.product.quantity", request.Item.Quantity);
+        activity?.SetTag("demo.product.id", request.ProductId);
+        activity?.SetTag("demo.product.quantity", request.Quantity);
+
+        // Validate inputs
+        if (string.IsNullOrWhiteSpace(request.UserId))
+        {
+            throw new RpcException(new Status(StatusCode.InvalidArgument, "User ID must not be empty or contain only whitespace"));
+        }
+        if (string.IsNullOrWhiteSpace(request.ProductId))
+        {
+            throw new RpcException(new Status(StatusCode.InvalidArgument, "Product ID must not be empty or contain only whitespace"));
+        }
+        if (request.Quantity < 1)
+        {
+            throw new RpcException(new Status(StatusCode.InvalidArgument, "Quantity must be a positive integer greater than 0"));
+        }
+        if (request.Quantity > 100)
+        {
+            throw new RpcException(new Status(StatusCode.InvalidArgument, "Quantity must not exceed maximum allowed value of 100"));
+        }
 
         try
         {
-            await _cartStore.AddItemAsync(request.UserId, request.Item.ProductId, request.Item.Quantity);
-
-            return Empty;
+            var cart = await _cartStore.AddItemAsync(request.UserId, request.ProductId, request.Quantity);
+            return cart;
         }
         catch (RpcException ex)
         {
@@ -51,6 +68,12 @@ public class CartService : Oteldemo.CartService.CartServiceBase
         var activity = Activity.Current;
         activity?.SetTag("user.id", request.UserId);
         activity?.AddEvent(new("Fetch cart"));
+
+        // Validate inputs
+        if (string.IsNullOrWhiteSpace(request.UserId))
+        {
+            throw new RpcException(new Status(StatusCode.InvalidArgument, "User ID must not be empty or contain only whitespace"));
+        }
 
         try
         {
@@ -77,6 +100,12 @@ public class CartService : Oteldemo.CartService.CartServiceBase
         var activity = Activity.Current;
         activity?.SetTag("user.id", request.UserId);
         activity?.AddEvent(new("Empty cart"));
+
+        // Validate inputs
+        if (string.IsNullOrWhiteSpace(request.UserId))
+        {
+            throw new RpcException(new Status(StatusCode.InvalidArgument, "User ID must not be empty or contain only whitespace"));
+        }
 
         try
         {

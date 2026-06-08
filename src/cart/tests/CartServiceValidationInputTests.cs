@@ -3,6 +3,9 @@ using Grpc.Core;
 using Moq;
 using Otel.Demo.CartService.V1;
 using Xunit;
+using OpenFeature;
+using cart.cartstore;
+using cart.services;
 
 namespace Otel.Demo.CartService.Tests;
 
@@ -18,7 +21,9 @@ public class CartServiceValidationInputTests
     public CartServiceValidationInputTests()
     {
         _mockCartStore = new Mock<ICartStore>();
-        _cartService = new CartService(_mockCartStore.Object);
+        var mockBadCartStore = new Mock<ICartStore>();
+        var mockFeatureClient = new Mock<IFeatureClient>();
+        _cartService = new CartService(_mockCartStore.Object, mockBadCartStore.Object, mockFeatureClient.Object);
     }
 
     [Fact]
