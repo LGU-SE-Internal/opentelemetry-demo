@@ -204,4 +204,61 @@ def fetch_avg_product_review_score_from_db(request_product_id):
             try:
                 connection.close()
             except Exception as e:
+@postgres_retry(operation_type="read")
+def get_product_reviews(product_id: str, limit: int = 10, offset: int = 0) -> list[dict]:
+    """Retrieves paginated reviews for a given product ID, no side effects"""
+    connection = None
+    try:
+        with psycopg2.connect(db_connection_str) as connection:
+            with connection.cursor() as cursor:
+                query = """
+                    SELECT username, description, score 
+                    FROM reviews.productreviews 
+                    WHERE product_id= %s
+                    LIMIT %s OFFSET %s
+                """
+                cursor.execute(query, (product_id, limit, offset))
+                records = cursor.fetchall()
+                return [
+                    {
+                        "username": record[0],
+                        "description": record[1],
+                        "rating": float(record[2])
+                    } for record in records
+                ]
+    except Exception as e:
+        raise e
+    finally:
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception as e:
+                pass
+
+@postgres_retry(operation_type="read")
+def get_review_summary(product_id: str) -> dict:
+    """Returns aggregated review metrics (average rating, count) for a given product ID, no side effects"""
+    connection = None
+    try:
+        with psycopg2.connect(db_connection_str) as connection:
+            with connection.cursor() as cursor:
+                query = """
+                    SELECT AVG(score) as average_rating, COUNT(*) as review_count
+                    FROM reviews.productreviews 
+                    WHERE product_id= %s
+                """
+                cursor.execute(query, (product_id,))
+                record = cursor.fetchone()
+                average_rating = float(record[0]) if record[0] is not None else None
+                return {
+                    "average_rating": round(average_rating, 1) if average_rating else None,
+                    "review_count": int(record[1])
+                }
+    except Exception as e:
+        raise e
+    finally:
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception as e:
                 pass
