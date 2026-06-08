@@ -8,7 +8,6 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,7 +20,81 @@ import (
 
 	"github.com/IBM/sarama"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/otel/trace"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
+
+// Logger interface for structured logging
+type Logger interface {
+	Debug(ctx context.Context, msg string, fields ...zap.Field)
+	Info(ctx context.Context, msg string, fields ...zap.Field)
+	Warn(ctx context.Context, msg string, fields ...zap.Field)
+	Error(ctx context.Context, msg string, fields ...zap.Field)
+}
+
+// ZapLogger implements Logger interface using Zap
+type ZapLogger struct {
+	logger *zap.Logger
+}
+
+var globalLogger Logger
+
+// NewZapLogger creates a new ZapLogger instance with JSON output
+func NewZapLogger() (*ZapLogger, error) {
+	config := zap.NewProductionConfig()
+	config.EncoderConfig.TimeKey = "timestamp"
+	config.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+	config.EncoderConfig.LevelKey = "severity"
+	config.EncoderConfig.EncodeLevel = zapcore.LowercaseLevelEncoder
+	logger, err := config.Build()
+	if err != nil {
+		return nil, err
+	}
+	return &ZapLogger{logger: logger}, nil
+}
+
+// getTraceFields extracts trace and span IDs from context if available
+func getTraceFields(ctx context.Context) []zap.Field {
+	spanCtx := trace.SpanContextFromContext(ctx)
+	if !spanCtx.IsValid() {
+		return nil
+	}
+	return []zap.Field{
+		zap.String("trace_id", spanCtx.TraceID().String()),
+		zap.String("span_id", spanCtx.SpanID().String()),
+	}
+}
+
+func (l *ZapLogger) Debug(ctx context.Context, msg string, fields ...zap.Field) {
+	traceFields := getTraceFields(ctx)
+	l.logger.Debug(msg, append(traceFields, fields...)...)
+}
+
+func (l *ZapLogger) Info(ctx context.Context, msg string, fields ...zap.Field) {
+	traceFields := getTraceFields(ctx)
+	l.logger.Info(msg, append(traceFields, fields...)...)
+}
+
+func (l *ZapLogger) Warn(ctx context.Context, msg string, fields ...zap.Field) {
+	traceFields := getTraceFields(ctx)
+	l.logger.Warn(msg, append(traceFields, fields...)...)
+}
+
+func (l *ZapLogger) Error(ctx context.Context, msg string, fields ...zap.Field) {
+	traceFields := getTraceFields(ctx)
+	l.logger.Error(msg, append(traceFields, fields...)...)
+}
+
+// InitGlobalLogger initializes the global logger instance
+func InitGlobalLogger() error {
+	logger, err := NewZapLogger()
+	if err != nil {
+		return err
+	}
+	globalLogger = logger
+	return nil
+}
 
 // Define error types
 var (
@@ -137,10 +210,11 @@ type KafkaConsumer struct {
 	inFlightMessages    []*sarama.ConsumerMessage
 	inFlightMu          sync.Mutex
 	topics              []string
+	consumerGroupID     string
 }
 
 // NewKafkaConsumer creates a new KafkaConsumer instance with configured shutdown timeout
-func NewKafkaConsumer(brokers []string, topics []string, config *sarama.Config) (*KafkaConsumer, error) {
+func NewKafkaConsumer(ctx context.Context, brokers []string, topics []string, config *sarama.Config) (*KafkaConsumer, error) {
 	consumer, err := sarama.NewConsumer(brokers, config)
 	if err != nil {
 		return nil, err
@@ -154,7 +228,10 @@ func NewKafkaConsumer(brokers []string, topics []string, config *sarama.Config) 
 		if err == nil {
 			timeout = parsed
 		} else {
-			log.Printf("Warning: Invalid KAFKA_CONSUMER_SHUTDOWN_TIMEOUT value '%s', using default 30s: %v", timeoutStr, err)
+			globalLogger.Warn(ctx, "Invalid KAFKA_CONSUMER_SHUTDOWN_TIMEOUT value, using default 30s",
+				zap.String("timeout_value", timeoutStr),
+				zap.Error(err),
+			)
 		}
 	}
 
@@ -169,11 +246,12 @@ func NewKafkaConsumer(brokers []string, topics []string, config *sarama.Config) 
 
 // NewKafkaConsumerWithTLS creates a Kafka consumer client configured with TLS settings
 // Parameters:
+//   ctx: context for logging and tracing
 //   brokers: list of Kafka broker addresses
-//   groupID: consumer group ID (unused for now, kept for interface compatibility)
+//   groupID: consumer group ID
 //   tlsConfig: *KafkaTLSConfig (nil for non-TLS connections)
 // Returns configured consumer client or error if TLS configuration is invalid
-func NewKafkaConsumerWithTLS(brokers []string, groupID string, tlsConfig *KafkaTLSConfig) (*KafkaConsumer, error) {
+func NewKafkaConsumerWithTLS(ctx context.Context, brokers []string, groupID string, tlsConfig *KafkaTLSConfig) (*KafkaConsumer, error) {
 	config := sarama.NewConfig()
 	config.Consumer.Return.Errors = true
 	config.Consumer.Offsets.AutoCommit.Enable = false // We will commit offsets manually during shutdown
@@ -190,6 +268,7 @@ func NewKafkaConsumerWithTLS(brokers []string, groupID string, tlsConfig *KafkaT
 			stopConsume:      make(chan struct{}),
 			pendingOffsets:   make(map[string]map[int32]int64),
 			topics:           []string{}, // Topics will be set later by caller
+			consumerGroupID:  groupID,
 		}, nil
 	}
 
@@ -234,6 +313,7 @@ func NewKafkaConsumerWithTLS(brokers []string, groupID string, tlsConfig *KafkaT
 		stopConsume:      make(chan struct{}),
 		pendingOffsets:   make(map[string]map[int32]int64),
 		topics:           []string{}, // Topics will be set later by caller
+		consumerGroupID:  groupID,
 	}, nil
 }
 
@@ -304,14 +384,17 @@ func (c *KafkaConsumer) Shutdown(ctx context.Context) error {
 		return nil
 	}
 
-	log.Println("Graceful shutdown initiated: stopping new Kafka message consumption")
+	globalLogger.Info(ctx, "Graceful shutdown initiated: stopping new Kafka message consumption")
 	close(c.stopConsume)
 
 	// Count in-flight messages
 	c.inFlightMu.Lock()
 	inFlightCount := len(c.inFlightMessages)
 	c.inFlightMu.Unlock()
-	log.Printf("Waiting for %d in-flight Kafka messages to complete processing", inFlightCount)
+	globalLogger.Info(ctx, "Waiting for in-flight Kafka messages to complete processing",
+		zap.Int("in_flight_count", inFlightCount),
+		zap.String("consumer_group_id", c.consumerGroupID),
+	)
 
 	// Wait for in-flight messages to complete, or timeout
 	waitDone := make(chan struct{})
@@ -327,14 +410,24 @@ func (c *KafkaConsumer) Shutdown(ctx context.Context) error {
 		// Timeout occurred
 		c.inFlightMu.Lock()
 		defer c.inFlightMu.Unlock()
-		log.Printf("Error: Shutdown timeout reached with %d incomplete messages:", len(c.inFlightMessages))
+		globalLogger.Error(ctx, "Shutdown timeout reached with incomplete messages",
+			zap.Int("incomplete_count", len(c.inFlightMessages)),
+			zap.String("consumer_group_id", c.consumerGroupID),
+		)
 		for _, msg := range c.inFlightMessages {
-			log.Printf("  Topic: %s, Partition: %d, Offset: %d", msg.Topic, msg.Partition, msg.Offset)
+			globalLogger.Error(ctx, "Incomplete Kafka message",
+				zap.String("kafka_topic", msg.Topic),
+				zap.Int32("kafka_partition", msg.Partition),
+				zap.Int64("kafka_offset", msg.Offset),
+				zap.String("consumer_group_id", c.consumerGroupID),
+			)
 		}
 		return ShutdownTimeoutError
 	}
 
-	log.Println("All in-flight messages processed, committing pending offsets")
+	globalLogger.Info(ctx, "All in-flight messages processed, committing pending offsets",
+		zap.String("consumer_group_id", c.consumerGroupID),
+	)
 
 	// Commit pending offsets
 	if offsetManager, ok := c.consumer.(sarama.OffsetManager); ok {
@@ -343,7 +436,12 @@ func (c *KafkaConsumer) Shutdown(ctx context.Context) error {
 			for partition, offset := range partitions {
 				pom, err := offsetManager.ManagePartition(topic, partition)
 				if err != nil {
-					log.Printf("Warning: Failed to get partition offset manager for %s/%d: %v", topic, partition, err)
+					globalLogger.Warn(ctx, "Failed to get partition offset manager",
+						zap.String("kafka_topic", topic),
+						zap.Int32("kafka_partition", partition),
+						zap.String("consumer_group_id", c.consumerGroupID),
+						zap.Error(err),
+					)
 					continue
 				}
 				pom.MarkOffset(offset, "")
@@ -351,19 +449,28 @@ func (c *KafkaConsumer) Shutdown(ctx context.Context) error {
 		}
 		c.offsetMu.Unlock()
 
-	// Commit all marked offsets
-	offsetManager.Commit()
-	log.Println("Offsets committed successfully: shutting down Kafka consumer")
+		// Commit all marked offsets
+		offsetManager.Commit()
+		globalLogger.Info(ctx, "Offsets committed successfully: shutting down Kafka consumer",
+			zap.String("consumer_group_id", c.consumerGroupID),
+		)
 	} else {
-		log.Println("Warning: Consumer does not support offset management, skipping offset commit")
+		globalLogger.Warn(ctx, "Consumer does not support offset management, skipping offset commit",
+			zap.String("consumer_group_id", c.consumerGroupID),
+		)
 	}
 
-	log.Println("Offsets committed successfully: shutting down Kafka consumer")
+	globalLogger.Info(ctx, "Offsets committed successfully: shutting down Kafka consumer",
+		zap.String("consumer_group_id", c.consumerGroupID),
+	)
 
 	// Close the consumer
 	err := c.consumer.Close()
 	if err != nil {
-		log.Printf("Warning: Error closing Kafka consumer: %v", err)
+		globalLogger.Warn(ctx, "Error closing Kafka consumer",
+			zap.String("consumer_group_id", c.consumerGroupID),
+			zap.Error(err),
+		)
 	}
 
 	return nil
@@ -467,6 +574,13 @@ func ReadyHandler(checker ReadinessChecker) http.HandlerFunc {
 }
 
 func main() {
+	// Initialize structured logger first
+	if err := InitGlobalLogger(); err != nil {
+		fmt.Printf("Failed to initialize logger: %v\n", err)
+		os.Exit(1)
+	}
+	ctx := context.Background()
+
 	// Configuration
 	kafkaAddr := os.Getenv("KAFKA_ADDR")
 	if kafkaAddr == "" {
@@ -480,10 +594,16 @@ func main() {
 	}
 	httpPortInt, err := strconv.Atoi(httpPortStr)
 	if err != nil {
-		log.Fatalf("Invalid port value '%s': must be numeric", httpPortStr)
+		globalLogger.Error(ctx, "Invalid port value: must be numeric",
+			zap.String("port_value", httpPortStr),
+		)
+		os.Exit(1)
 	}
 	if httpPortInt < 1 || httpPortInt > 65535 {
-		log.Fatalf("Invalid port value '%d': must be between 1 and 65535", httpPortInt)
+		globalLogger.Error(ctx, "Invalid port value: must be between 1 and 65535",
+			zap.Int("port_value", httpPortInt),
+		)
+		os.Exit(1)
 	}
 	httpPort := strconv.Itoa(httpPortInt)
 
@@ -501,14 +621,20 @@ func main() {
 		}
 	}
 	if len(topics) == 0 {
-		log.Fatal("Kafka topics list cannot be empty")
+		globalLogger.Error(ctx, "Kafka topics list cannot be empty")
+		os.Exit(1)
 	}
-	log.Printf("Consuming from Kafka topics: %s", strings.Join(topics, ", "))
+	globalLogger.Info(ctx, "Consuming from Kafka topics",
+		zap.String("kafka_topics", strings.Join(topics, ", ")),
+	)
 
 	// Load TLS configuration
 	tlsConfig, err := LoadKafkaTLSConfig()
 	if err != nil {
-		log.Fatalf("Failed to load Kafka TLS configuration: %v", err)
+		globalLogger.Error(ctx, "Failed to load Kafka TLS configuration",
+			zap.Error(err),
+		)
+		os.Exit(1)
 	}
 
 	// Initialize health checker
@@ -516,27 +642,34 @@ func main() {
 
 	// Initialize Kafka consumer
 	var kafkaConsumer *KafkaConsumer
+	var groupID string
 	if tlsConfig.Enabled {
 		// Get consumer group ID
-		groupID := os.Getenv("KAFKA_CONSUMER_GROUP_ID")
+		groupID = os.Getenv("KAFKA_CONSUMER_GROUP_ID")
 		if groupID == "" {
 			groupID = "kafka-collector-group"
 		}
-		kafkaConsumer, err = NewKafkaConsumerWithTLS([]string{kafkaAddr}, groupID, tlsConfig)
+		kafkaConsumer, err = NewKafkaConsumerWithTLS(ctx, []string{kafkaAddr}, groupID, tlsConfig)
 	} else {
 		// Use regular non-TLS consumer for backward compatibility
 		config := sarama.NewConfig()
 		config.Consumer.Return.Errors = true
 		config.Consumer.Offsets.AutoCommit.Enable = false // We will commit offsets manually during shutdown
-		kafkaConsumer, err = NewKafkaConsumer([]string{kafkaAddr}, topics, config)
+		groupID = "kafka-collector-group"
+		kafkaConsumer, err = NewKafkaConsumer(ctx, []string{kafkaAddr}, topics, config)
 	}
 	if err != nil {
-		log.Fatalf("Failed to initialize Kafka consumer: %v", err)
+		globalLogger.Error(ctx, "Failed to initialize Kafka consumer",
+			zap.String("consumer_group_id", groupID),
+			zap.Error(err),
+		)
+		os.Exit(1)
 	}
 	// Set topics on the consumer for TLS case
 	if tlsConfig.Enabled {
 		kafkaConsumer.topics = topics
 	}
+	kafkaConsumer.consumerGroupID = groupID
 	readinessChecker := KafkaReadinessChecker{
 		consumer: kafkaConsumer.consumer,
 		topics:   topics,
@@ -546,7 +679,11 @@ func main() {
 			ctx, cancel := context.WithTimeout(context.Background(), kafkaConsumer.shutdownTimeout)
 			defer cancel()
 			if err := kafkaConsumer.Shutdown(ctx); err != nil {
-				log.Fatalf("Kafka consumer shutdown failed: %v", err)
+				globalLogger.Error(ctx, "Kafka consumer shutdown failed",
+					zap.String("consumer_group_id", kafkaConsumer.consumerGroupID),
+					zap.Error(err),
+				)
+				os.Exit(1)
 			}
 		}
 	}()
@@ -568,19 +705,27 @@ func main() {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
-		log.Printf("Kafka collector server starting on port %s", httpPort)
+		globalLogger.Info(ctx, "Kafka collector server starting on port",
+			zap.String("http_port", httpPort),
+		)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Failed to start server: %v", err)
+			globalLogger.Error(ctx, "Failed to start server",
+				zap.Error(err),
+			)
+			os.Exit(1)
 		}
 	}()
 
 	<-sigChan
-	log.Println("Shutting down server...")
+	globalLogger.Info(ctx, "Shutting down server...")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := server.Shutdown(ctx); err != nil {
-		log.Fatalf("Server shutdown failed: %v", err)
+		globalLogger.Error(ctx, "Server shutdown failed",
+			zap.Error(err),
+		)
+		os.Exit(1)
 	}
-	log.Println("Server gracefully stopped")
+	globalLogger.Info(ctx, "Server gracefully stopped")
 }
