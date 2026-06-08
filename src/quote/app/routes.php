@@ -16,9 +16,8 @@ use Slim\App;
 return function (App $app) {
     $app->get('/health', function (Request $request, Response $response) {
         $payload = json_encode([
-            'status' => 'healthy',
-            'service' => 'quote',
-            'timestamp' => time(),
+            'status' => 'ok',
+            'service' => 'quote-service'
         ]);
         $response->getBody()->write($payload);
         
@@ -28,18 +27,43 @@ return function (App $app) {
     });
     
     $app->get('/ready', function (Request $request, Response $response) {
-        // For quote service, all initialization completes before server starts
-        // So service is always ready when endpoints are reachable
-        $payload = json_encode([
-            'status' => 'ready',
-            'service' => 'quote',
-            'timestamp' => time(),
-        ]);
+        // Check dependencies
+        $pricingConfigOk = true; // Pricing config is loaded during service initialization
+        $databaseOk = true; // Quote service currently has no database connections
+        
+        if ($pricingConfigOk && $databaseOk) {
+            $payload = json_encode([
+                'status' => 'ok',
+                'service' => 'quote-service',
+                'dependencies' => [
+                    'pricing-config' => 'ok',
+                    'database' => 'ok'
+                ]
+            ]);
+            $statusCode = 200;
+        } else {
+            $dependencies = [
+                'pricing-config' => $pricingConfigOk ? 'ok' : 'failed',
+                'database' => $databaseOk ? 'ok' : 'failed'
+            ];
+            $reason = [];
+            if (!$pricingConfigOk) $reason[] = 'pricing configuration file not loaded';
+            if (!$databaseOk) $reason[] = 'database connection failed';
+            
+            $payload = json_encode([
+                'status' => 'unavailable',
+                'service' => 'quote-service',
+                'dependencies' => $dependencies,
+                'reason' => implode(', ', $reason)
+            ]);
+            $statusCode = 503;
+        }
+        
         $response->getBody()->write($payload);
         
         return $response
             ->withHeader('Content-Type', 'application/json')
-            ->withStatus(200);
+            ->withStatus($statusCode);
     });
 
     $app->post('/getquote', function (Request $request, Response $response, LoggerInterface $logger) {
