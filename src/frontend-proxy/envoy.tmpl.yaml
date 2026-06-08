@@ -14,6 +14,61 @@
 {{ $retryBudgetFraction := getenv "ENVOY_RETRY_BUDGET_FRACTION" "0.2" | toFloat }}
 {{ $retryBudgetMinRetryConcurrency := getenv "ENVOY_RETRY_BUDGET_MIN_RETRY_CONCURRENCY" "10" | toInt }}
 
+{{/* Rate limit configuration defaults per route type */}}
+{{ $publicRoutes := list "frontend" "static" }}
+{{ $internalAPIRoutes := list "products" "cart" "checkout" "shipping" "payment" "user" }}
+
+{{/* Helper function to get route rate limit config */}}
+{{ define "get_rate_limit_config" }}
+  {{ $routeName := . }}
+  {{ $defaultRPS := 100 }}
+  {{ $defaultBurst := 20 }}
+  {{ if has $routeName $internalAPIRoutes }}
+    {{ $defaultRPS = 1000 }}
+    {{ $defaultBurst = 200 }}
+  {{ end }}
+  {{ $rps := getenv (printf "FRONTEND_PROXY_RATE_LIMIT_%s_RPS" (upper $routeName)) (toString $defaultRPS) | toInt }}
+  {{ $burst := getenv (printf "FRONTEND_PROXY_RATE_LIMIT_%s_BURST" (upper $routeName)) (toString $defaultBurst) | toInt }}
+  {{ if gt $rps 0 }}
+  typed_per_filter_config:
+    envoy.filters.http.local_ratelimit:
+      "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+      stat_prefix: http_local_rate_limiter
+      token_bucket:
+        max_tokens: {{ $burst }}
+        tokens_per_fill: {{ $rps }}
+        fill_interval: "1s"
+      filter_enabled:
+        runtime_key: "local_rate_limit_enabled"
+        default_value:
+          numerator: 100
+          denominator: HUNDRED
+      filter_enforced:
+        runtime_key: "local_rate_limit_enforced"
+        default_value:
+          numerator: 100
+          denominator: HUNDRED
+      response_headers_to_add:
+        - append: false
+          header:
+            key: "x-ratelimit-limit"
+            value: "{{ $rps }}"
+        - append: false
+          header:
+            key: "x-ratelimit-remaining"
+            value: "%LOCAL_RATE_LIMIT_REMAINING%"
+        - append: false
+          header:
+            key: "x-ratelimit-reset"
+            value: "%LOCAL_RATE_LIMIT_RESET%"
+        - append: false
+          header:
+            key: "retry-after"
+            value: "1"
+      enable_x_ratelimit_headers: DRAFT_VERSION_03
+  {{ end }}
+{{ end }}
+
 static_resources:
   listeners:
     - address:
@@ -243,6 +298,18 @@ static_resources:
                       budget_percent:
                         value: {{ mul $retryBudgetFraction 100 }}
                       min_retry_concurrency: {{ $retryBudgetMinRetryConcurrency }}
+                  - name: envoy.filters.http.local_ratelimit
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+                      stat_prefix: http_local_rate_limiter
+                      status:
+                        code: TOO_MANY_REQUESTS
+                      response_headers_to_add:
+                        - append: false
+                          header:
+                            key: "content-type"
+                            value: "text/plain"
+                      enable_x_ratelimit_headers: DRAFT_VERSION_03
                   - name: envoy.filters.http.router
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
