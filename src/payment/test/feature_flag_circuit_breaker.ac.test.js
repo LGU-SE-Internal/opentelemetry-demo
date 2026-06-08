@@ -2,15 +2,21 @@ const { expect } = require('chai');
 const sinon = require('sinon');
 const { OpenFeature } = require('@openfeature/server-sdk');
 const promClient = require('prom-client');
-const { getFlagValue } = require('../feature_flags'); // This will exist once implementation is done
 
 describe('Feature Flag Circuit Breaker Acceptance Criteria', () => {
   let sandbox;
   let flagEvalStub;
+  let getFlagValue;
 
   beforeEach(() => {
     sandbox = sinon.createSandbox();
     promClient.register.clear();
+    
+    // Clear require cache to reload feature_flags module fresh each test
+    delete require.cache[require.resolve('../feature_flags')];
+    // Reload the module so metrics are re-registered
+    const featureFlags = require('../feature_flags');
+    getFlagValue = featureFlags.getFlagValue;
     
     // Stub OpenFeature client evaluation
     const client = OpenFeature.getClient('paymentservice');
@@ -20,6 +26,7 @@ describe('Feature Flag Circuit Breaker Acceptance Criteria', () => {
   afterEach(() => {
     sandbox.restore();
   });
+
 
   /**
    * AC-1: Given the circuit is closed, when 5 consecutive flagd API calls fail
@@ -46,13 +53,13 @@ describe('Feature Flag Circuit Breaker Acceptance Criteria', () => {
     expect(flagEvalStub.callCount).to.equal(5); // No additional call
 
     // Verify metrics
-    const stateMetric = await promClient.register.getSingleMetric('feature_flag.circuit_breaker.state').get();
+    const stateMetric = await promClient.register.getSingleMetric('feature_flag_circuit_breaker_state').get();
     expect(stateMetric.values[0].value).to.equal(1); // 1 = open state
 
-    const opensMetric = await promClient.register.getSingleMetric('feature_flag.circuit_breaker.opens_total').get();
+    const opensMetric = await promClient.register.getSingleMetric('feature_flag_circuit_breaker_opens_total').get();
     expect(opensMetric.values[0].value).to.equal(1);
 
-    const fallbackMetric = await promClient.register.getSingleMetric('feature_flag.circuit_breaker.fallback_calls_total').get();
+    const fallbackMetric = await promClient.register.getSingleMetric('feature_flag_circuit_breaker_fallback_calls_total').get();
     expect(fallbackMetric.values[0].value).to.equal(6); // 5 failures + 1 open circuit
   });
 
@@ -82,7 +89,7 @@ describe('Feature Flag Circuit Breaker Acceptance Criteria', () => {
     expect(flagEvalStub.callCount).to.equal(6); // Should have called again
 
     // Verify circuit is now closed
-    const stateMetric = await promClient.register.getSingleMetric('feature_flag.circuit_breaker.state').get();
+    const stateMetric = await promClient.register.getSingleMetric('feature_flag_circuit_breaker_state').get();
     expect(stateMetric.values[0].value).to.equal(0); // 0 = closed state
 
     // Test failure scenario in half-open
@@ -100,9 +107,9 @@ describe('Feature Flag Circuit Breaker Acceptance Criteria', () => {
     expect(flagEvalStub.callCount).to.equal(12);
 
     // Verify circuit is open again
-    const reopenedStateMetric = await promClient.register.getSingleMetric('feature_flag.circuit_breaker.state').get();
+    const reopenedStateMetric = await promClient.register.getSingleMetric('feature_flag_circuit_breaker_state').get();
     expect(reopenedStateMetric.values[0].value).to.equal(1);
-    const opensCountMetric = await promClient.register.getSingleMetric('feature_flag.circuit_breaker.opens_total').get();
+    const opensCountMetric = await promClient.register.getSingleMetric('feature_flag_circuit_breaker_opens_total').get();
     expect(opensCountMetric.values[0].value).to.equal(2);
   });
 
@@ -149,20 +156,21 @@ describe('Feature Flag Circuit Breaker Acceptance Criteria', () => {
    */
   it('test_ac5_all_circuit_breaker_metrics_exposed_and_updated', async () => {
     // Check all metrics exist
-    expect(promClient.register.getSingleMetric('feature_flag.circuit_breaker.state')).to.exist;
-    expect(promClient.register.getSingleMetric('feature_flag.circuit_breaker.opens_total')).to.exist;
-    expect(promClient.register.getSingleMetric('feature_flag.circuit_breaker.fallback_calls_total')).to.exist;
+    // Check all metrics exist
+    expect(promClient.register.getSingleMetric('feature_flag_circuit_breaker_state')).to.exist;
+    expect(promClient.register.getSingleMetric('feature_flag_circuit_breaker_opens_total')).to.exist;
+    expect(promClient.register.getSingleMetric('feature_flag_circuit_breaker_fallback_calls_total')).to.exist;
 
     // Initial state: closed, 0 opens, 0 fallbacks
-    let stateMetric = await promClient.register.getSingleMetric('feature_flag.circuit_breaker.state').get();
+    let stateMetric = await promClient.register.getSingleMetric('feature_flag_circuit_breaker_state').get();
     expect(stateMetric.values[0].value).to.equal(0); // closed
     expect(stateMetric.values[0].labels.service).to.equal('paymentservice');
 
-    let opensMetric = await promClient.register.getSingleMetric('feature_flag.circuit_breaker.opens_total').get();
+    let opensMetric = await promClient.register.getSingleMetric('feature_flag_circuit_breaker_opens_total').get();
     expect(opensMetric.values[0].value).to.equal(0);
     expect(opensMetric.values[0].labels.service).to.equal('paymentservice');
 
-    let fallbackMetric = await promClient.register.getSingleMetric('feature_flag.circuit_breaker.fallback_calls_total').get();
+    let fallbackMetric = await promClient.register.getSingleMetric('feature_flag_circuit_breaker_fallback_calls_total').get();
     expect(fallbackMetric.values[0].value).to.equal(0);
     expect(fallbackMetric.values[0].labels.service).to.equal('paymentservice');
 
@@ -171,7 +179,7 @@ describe('Feature Flag Circuit Breaker Acceptance Criteria', () => {
     await getFlagValue('test-flag', false);
 
     // Fallback count should be 1
-    fallbackMetric = await promClient.register.getSingleMetric('feature_flag.circuit_breaker.fallback_calls_total').get();
+    fallbackMetric = await promClient.register.getSingleMetric('feature_flag_circuit_breaker_fallback_calls_total').get();
     expect(fallbackMetric.values[0].value).to.equal(1);
   });
 
@@ -192,9 +200,8 @@ describe('Feature Flag Circuit Breaker Acceptance Criteria', () => {
     // Assert
     expect(result).to.equal(expectedValue);
     expect(flagEvalStub.callCount).to.equal(1);
-
     // No fallbacks recorded
-    const fallbackMetric = await promClient.register.getSingleMetric('feature_flag.circuit_breaker.fallback_calls_total').get();
+    const fallbackMetric = await promClient.register.getSingleMetric('feature_flag_circuit_breaker_fallback_calls_total').get();
     expect(fallbackMetric.values[0].value).to.equal(0);
   });
 });
