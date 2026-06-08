@@ -36,6 +36,8 @@
     <PackageReference Include="FluentValidation.Grpc.AspNetCore" />
     <PackageReference Include="Polly" Version="8.4.2" />
     <PackageReference Include="Polly.Core" Version="8.4.2" />
+    <PackageReference Include="AspNetCoreRateLimit" Version="5.0.0" />
+    <PackageReference Include="AspNetCoreRateLimit.Redis" Version="5.0.0" />
   </ItemGroup>
 
   <ItemGroup>
