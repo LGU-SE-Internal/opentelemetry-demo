@@ -58,7 +58,9 @@ dependencies {
                 "dev.openfeature.contrib.providers:flagd:0.13.3",
                 'dev.openfeature:sdk:1.20.2',
                 "io.prometheus:prometheus-metrics-core:${prometheusMetricsVersion}",
-                "io.prometheus:prometheus-metrics-exporter-httpserver:${prometheusMetricsVersion}"
+                "io.prometheus:prometheus-metrics-exporter-httpserver:${prometheusMetricsVersion}",
+                "io.github.resilience4j:resilience4j-retry:2.2.0",
+                "io.github.resilience4j:resilience4j-circuitbreaker:2.2.0"
 
         runtimeOnly "com.fasterxml.jackson.core:jackson-core:${jacksonVersion}",
                 "com.fasterxml.jackson.core:jackson-databind:${jacksonVersion}"

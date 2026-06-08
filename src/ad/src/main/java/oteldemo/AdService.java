@@ -73,9 +73,62 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.security.cert.CertificateException;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
+import io.github.resilience4j.retry.Retry;
+import io.github.resilience4j.retry.RetryConfig;
+import io.github.resilience4j.core.IntervalFunction;
+import java.time.Duration;
 
 
 public final class AdService {
+
+  // Resilience4j components
+  private static final Retry retry;
+  private static final CircuitBreaker circuitBreaker;
+
+  // Configuration from environment variables
+  private static final int MAX_RETRY_ATTEMPTS = Integer.parseInt(System.getenv().getOrDefault("AD_SERVICE_UPSTREAM_RETRY_MAX_ATTEMPTS", "3"));
+  private static final int INITIAL_RETRY_DELAY_MS = Integer.parseInt(System.getenv().getOrDefault("AD_SERVICE_UPSTREAM_RETRY_INITIAL_DELAY_MS", "100"));
+  private static final int CIRCUIT_BREAKER_FAILURE_THRESHOLD = Integer.parseInt(System.getenv().getOrDefault("AD_SERVICE_CIRCUIT_BREAKER_FAILURE_THRESHOLD", "5"));
+  private static final int CIRCUIT_BREAKER_RESET_TIMEOUT_MS = Integer.parseInt(System.getenv().getOrDefault("AD_SERVICE_CIRCUIT_BREAKER_RESET_TIMEOUT_MS", "30000"));
+
+  static {
+    // Configure retry with exponential backoff and jitter
+    RetryConfig retryConfig = RetryConfig.custom()
+        .maxAttempts(MAX_RETRY_ATTEMPTS + 1) // +1 because first attempt is not counted as retry
+        .intervalFunction(IntervalFunction.ofExponentialRandomBackoff(INITIAL_RETRY_DELAY_MS, 2, 0.1, 10000)) // 10% jitter
+        .retryOnException(exception -> {
+          if (exception instanceof StatusRuntimeException statusEx) {
+            Status.Code code = statusEx.getStatus().getCode();
+            return code == Status.Code.UNAVAILABLE ||
+                   code == Status.Code.RESOURCE_EXHAUSTED ||
+                   code == Status.Code.ABORTED ||
+                   code == Status.Code.INTERNAL;
+          }
+          // Retry on network/IO exceptions
+          return exception instanceof IOException;
+        })
+        .build();
+
+    retry = Retry.of("adUpstreamRetry", retryConfig);
+
+    // Configure circuit breaker
+    CircuitBreakerConfig circuitBreakerConfig = CircuitBreakerConfig.custom()
+        .failureThresholdCount(CIRCUIT_BREAKER_FAILURE_THRESHOLD) // open after threshold consecutive failures
+        .waitDurationInOpenState(Duration.ofMillis(CIRCUIT_BREAKER_RESET_TIMEOUT_MS))
+        .permittedNumberOfCallsInHalfOpenState(1)
+        .recordExceptions(IOException.class, StatusRuntimeException.class)
+        .build();
+
+    circuitBreaker = CircuitBreaker.of("adUpstreamCircuitBreaker", circuitBreakerConfig);
+
+    // Add retry event listener to track attempts
+    retry.getEventPublisher()
+        .onRetry(event -> {
+          Span.current().setAttribute("ad_service.upstream.retry_attempts", event.getNumberOfRetryAttempts());
+        });
+  }
 
   private static final Logger logger = LogManager.getLogger(AdService.class);
 
@@ -454,37 +507,53 @@ public final class AdService {
 
         span.setAttribute("demo.ad.context_keys", req.getContextKeysList().toString());
         span.setAttribute("demo.ad.context_keys.count", req.getContextKeysCount());
-        if (req.getContextKeysCount() > 0) {
-          logger.info("Targeted ad request received for " + req.getContextKeysList());
-          for (int i = 0; i < req.getContextKeysCount(); i++) {
-            Collection<Ad> ads = service.getAdsByCategory(req.getContextKeys(i));
-            allAds.addAll(ads);
-          }
-          adRequestType = AdRequestType.TARGETED;
-          adResponseType = AdResponseType.TARGETED;
-        } else {
-          logger.info("Non-targeted ad request received, preparing random response.");
-          allAds = service.getRandomAds();
-          adRequestType = AdRequestType.NOT_TARGETED;
-          adResponseType = AdResponseType.RANDOM;
-        }
-        if (allAds.isEmpty()) {
-          // Serve random ads.
-          allAds = service.getRandomAds();
-          adResponseType = AdResponseType.RANDOM;
-        }
-        span.setAttribute("demo.ad.count", allAds.size());
-        span.setAttribute("demo.ad.request_type", adRequestType.name());
-        span.setAttribute("demo.ad.response_type", adResponseType.name());
-
-        adRequestsCounter.add(
-            1,
-            Attributes.of(
-                adRequestTypeKey, adRequestType.name(), adResponseTypeKey, adResponseType.name()));
-
-        // Throw 1/10 of the time to simulate a failure when the feature flag is enabled
-        if (ffClient.getBooleanValue(AD_FAILURE, false, evaluationContext) && random.nextInt(10) == 0) {
-          throw new StatusRuntimeException(Status.UNAVAILABLE);
+        
+        // Add circuit breaker state attribute
+        span.setAttribute("ad_service.circuit_breaker.state", circuitBreaker.getState().name());
+        // Initialize retry attempts attribute to 0
+        span.setAttribute("ad_service.upstream.retry_attempts", 0);
+        
+        // Wrap ad retrieval with circuit breaker and retry
+        java.util.function.Supplier<List<Ad>> adSupplier = CircuitBreaker.decorateSupplier(circuitBreaker, 
+          Retry.decorateSupplier(retry, () -> {
+            List<Ad> ads = new ArrayList<>();
+            if (req.getContextKeysCount() > 0) {
+              logger.info("Targeted ad request received for " + req.getContextKeysList());
+              for (int i = 0; i < req.getContextKeysCount(); i++) {
+                Collection<Ad> categoryAds = service.getAdsByCategory(req.getContextKeys(i));
+                ads.addAll(categoryAds);
+              }
+              adRequestType = AdRequestType.TARGETED;
+              adResponseType = AdResponseType.TARGETED;
+            } else {
+              logger.info("Non-targeted ad request received, preparing random response.");
+              ads = service.getRandomAds();
+              adRequestType = AdRequestType.NOT_TARGETED;
+              adResponseType = AdResponseType.RANDOM;
+            }
+            if (ads.isEmpty()) {
+              // Serve random ads.
+              ads = service.getRandomAds();
+              adResponseType = AdResponseType.RANDOM;
+            }
+            
+            // Throw 1/10 of the time to simulate a failure when the feature flag is enabled
+            if (ffClient.getBooleanValue(AD_FAILURE, false, evaluationContext) && random.nextInt(10) == 0) {
+              throw new StatusRuntimeException(Status.UNAVAILABLE);
+            }
+            
+            return ads;
+          })
+        );
+        
+        try {
+          allAds = adSupplier.get();
+          // Set retry success attribute
+          span.setAttribute("ad_service.upstream.retry_success", true);
+        } catch (Exception e) {
+          // Set retry success attribute to false on failure
+          span.setAttribute("ad_service.upstream.retry_success", false);
+          throw e;
         }
 
         if (ffClient.getBooleanValue(AD_MANUAL_GC_FEATURE_FLAG, false, evaluationContext)) {
