@@ -50,6 +50,7 @@ first_run = True
 
 # Retry configuration from environment variables
 RETRY_MAX_ATTEMPTS = int(os.environ.get('RECOMMENDATION_SERVICE_PRODUCT_CATALOG_RETRY_MAX_ATTEMPTS', '3'))
+RETRY_ATTEMPTS = RETRY_MAX_ATTEMPTS # Alias for tests
 RETRY_INITIAL_BACKOFF_MS = int(os.environ.get('RECOMMENDATION_SERVICE_PRODUCT_CATALOG_RETRY_INITIAL_BACKOFF_MS', '100'))
 RETRY_BACKOFF_MULTIPLIER = float(os.environ.get('RECOMMENDATION_SERVICE_PRODUCT_CATALOG_RETRY_BACKOFF_MULTIPLIER', '2'))
 RETRY_MAX_BACKOFF_MS = int(os.environ.get('RECOMMENDATION_SERVICE_PRODUCT_CATALOG_RETRY_MAX_BACKOFF_MS', '2000'))
@@ -70,6 +71,12 @@ PRODUCT_CATALOG_CIRCUIT_BREAKER_HALF_OPEN_MAX_CALLS = int(os.environ.get('PRODUC
 CIRCUIT_BREAKER_STATE_CLOSED = 0
 CIRCUIT_BREAKER_STATE_OPEN = 1
 CIRCUIT_BREAKER_STATE_HALF_OPEN = 2
+
+# Open circuit error message
+CIRCUIT_OPEN_ERROR_MSG = "Product Catalog Service is temporarily unavailable: circuit breaker is open"
+
+# Global product catalog client stub
+product_catalog_client = None
 
 # Circuit breaker listener to update metrics on state changes
 class CircuitBreakerMetricsListener(pybreaker.CircuitBreakerListener):
@@ -95,6 +102,8 @@ class CircuitBreakerMetricsListener(pybreaker.CircuitBreakerListener):
 
 # Global circuit breaker instance (initialized after metrics are set up)
 product_catalog_circuit_breaker = None
+product_catalog_client = None
+_circuit_breaker_initialized = False
 
 def list_products_with_retry(client: demo_pb2_grpc.ProductCatalogServiceStub, request: demo_pb2.Empty, metadata = None, context = None) -> demo_pb2.ListProductsResponse:
     """
@@ -521,7 +530,6 @@ def serve(listen_addr: str, product_catalog_channel=None, test_mode: bool = Fals
 
 
 if __name__ == "__main__":
-    global product_catalog_circuit_breaker
     service_name = must_map_env('OTEL_SERVICE_NAME')
     api.set_provider(FlagdProvider(host=os.environ.get('FLAGD_HOST', 'flagd'), port=os.environ.get('FLAGD_PORT', 8013)))
     api.add_hooks([TracingHook()])
@@ -539,6 +547,21 @@ if __name__ == "__main__":
         half_open_max_calls=PRODUCT_CATALOG_CIRCUIT_BREAKER_HALF_OPEN_MAX_CALLS,
         listeners=[circuit_breaker_listener]
     )
+
+    def wrap_call(func):
+        @product_catalog_circuit_breaker
+        def wrapper(*args, **kwargs):
+            return func(*args, **kwargs)
+        def wrapped(*args, **kwargs):
+            try:
+                return wrapper(*args, **kwargs)
+            except pybreaker.CircuitBreakerError:
+                context = grpc.ServicerContext()
+                context.set_code(grpc.StatusCode.UNAVAILABLE)
+                context.set_details(CIRCUIT_OPEN_ERROR_MSG)
+                raise context._state.error
+        return wrapped
+    product_catalog_circuit_breaker.wrap = wrap_call
 
     # Initialize Logs
     logger_provider = LoggerProvider(
@@ -559,6 +582,7 @@ if __name__ == "__main__":
 
 catalog_addr = must_map_env('PRODUCT_CATALOG_ADDR')
 product_catalog_stub, product_catalog_channel = create_product_catalog_client(catalog_addr, logger=logger)
+product_catalog_client = product_catalog_stub
 
 # Initialize rate limiter
 rate_limit_rps = int(os.environ.get('RECOMMENDATION_SERVICE_RATE_LIMIT_RPS', '0'))
