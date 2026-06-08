@@ -12,7 +12,7 @@ use Psr\Http\Message\ServerRequestInterface as Request;
 use Psr\Log\LoggerInterface;
 use Slim\App;
 
-function calculateQuote($jsonObject): float
+function calculateQuote(int $itemCount, float $totalWeightKg): float
 {
     $quote = 0.0;
     $childSpan = Globals::tracerProvider()->getTracer('manual-instrumentation')
@@ -22,15 +22,12 @@ function calculateQuote($jsonObject): float
     $childSpan->addEvent('Calculating quote');
 
     try {
-        if (!array_key_exists('numberOfItems', $jsonObject)) {
-            throw new \InvalidArgumentException('numberOfItems not provided');
-        }
-        $numberOfItems = intval($jsonObject['numberOfItems']);
         $costPerItem = 8.99;
-        $quote = round($costPerItem * $numberOfItems, 2);
+        $quote = round($costPerItem * $itemCount, 2);
 
-        $childSpan->setAttribute('demo.shipping.quote.items_count', $numberOfItems);
+        $childSpan->setAttribute('demo.shipping.quote.items_count', $itemCount);
         $childSpan->setAttribute('demo.shipping.quote.cost.total', $quote);
+        $childSpan->setAttribute('demo.shipping.quote.total_weight_kg', $totalWeightKg);
 
         $childSpan->addEvent('Quote calculated, returning its value');
 
@@ -39,7 +36,7 @@ function calculateQuote($jsonObject): float
         $counter ??= Globals::meterProvider()
             ->getMeter('quotes')
             ->createCounter('quotes', 'quotes', 'number of quotes calculated');
-        $counter->add(1, ['number_of_items' => $numberOfItems]);
+        $counter->add(1, ['number_of_items' => $itemCount]);
     } catch (\Exception $exception) {
         $childSpan->recordException($exception);
     } finally {
@@ -81,136 +78,14 @@ return function (App $app) {
         $span = Span::getCurrent();
         $span->addEvent('Received get quote request, processing it');
 
-        $rawPayload = $request->getBody()->__toString();
-        $jsonObject = $request->getParsedBody();
+        $body = $request->getParsedBody();
         
-        // Get request ID
-        $requestId = $request->getAttribute('request_id') ?? $request->getHeaderLine('X-Request-ID') ?: uniqid('quote_', true);
-        
-        // Get client IP
-        $xForwardedFor = $request->getHeaderLine('X-Forwarded-For');
-        if (!empty($xForwardedFor)) {
-            $ips = explode(',', $xForwardedFor);
-            $clientIp = trim($ips[0]);
-        } else {
-            $serverParams = $request->getServerParams();
-            $clientIp = $serverParams['REMOTE_ADDR'] ?? 'unknown';
-        }
-        
-        // Validate JSON payload
-        if ($jsonObject === null) {
-            $errorMsg = 'Invalid JSON payload';
-            
-            $payload = json_encode([
-                'error' => 'Invalid request parameter',
-                'message' => $errorMsg,
-                'requestId' => $requestId
-            ]);
-            $response->getBody()->write($payload);
-            return $response
-                ->withHeader('Content-Type', 'application/json')
-                ->withStatus(400);
-        }
-        
-        // Validate presence of numberOfItems
-        if (!array_key_exists('numberOfItems', $jsonObject)) {
-            $errorMsg = 'Missing required field: numberOfItems';
-            
-            $payload = json_encode([
-                'error' => 'Invalid request parameter',
-                'message' => $errorMsg,
-                'requestId' => $requestId
-            ]);
-            $response->getBody()->write($payload);
-            return $response
-                ->withHeader('Content-Type', 'application/json')
-                ->withStatus(400);
-        }
-        
-        $numberOfItems = $jsonObject['numberOfItems'];
-        $logFile = '/var/log/quote-service/validation_errors.log';
-        
-        // Validate numberOfItems is integer
-        if (!is_int($numberOfItems)) {
-            $errorMsg = 'numberOfItems must be an integer';
-            $errorType = 'non-integer';
-            
-            // Write structured log entry
-            $logEntry = json_encode([
-                'client_ip' => $clientIp,
-                'invalid_value' => $numberOfItems,
-                'request_id' => $requestId,
-                'error_type' => $errorType,
-                'timestamp' => gmdate('Y-m-d\TH:i:s\Z')
-            ]) . PHP_EOL;
-            file_put_contents($logFile, $logEntry, FILE_APPEND | LOCK_EX);
-            
-            $payload = json_encode([
-                'error' => 'Invalid request parameter',
-                'message' => $errorMsg,
-                'requestId' => $requestId
-            ]);
-            $response->getBody()->write($payload);
-            return $response
-                ->withHeader('Content-Type', 'application/json')
-                ->withStatus(400);
-        }
-        
-        // Validate numberOfItems is at least 1
-        if ($numberOfItems < 1) {
-            $errorMsg = $numberOfItems === 0 ? 'numberOfItems must be at least 1' : 'numberOfItems must be a positive integer';
-            $errorType = 'negative/zero';
-            
-            // Write structured log entry
-            $logEntry = json_encode([
-                'client_ip' => $clientIp,
-                'invalid_value' => $numberOfItems,
-                'request_id' => $requestId,
-                'error_type' => $errorType,
-                'timestamp' => gmdate('Y-m-d\TH:i:s\Z')
-            ]) . PHP_EOL;
-            file_put_contents($logFile, $logEntry, FILE_APPEND | LOCK_EX);
-            
-            $payload = json_encode([
-                'error' => 'Invalid request parameter',
-                'message' => $errorMsg,
-                'requestId' => $requestId
-            ]);
-            $response->getBody()->write($payload);
-            return $response
-                ->withHeader('Content-Type', 'application/json')
-                ->withStatus(400);
-        }
-        
-        // Validate numberOfItems does not exceed 1000
-        if ($numberOfItems > 1000) {
-            $errorMsg = 'numberOfItems cannot exceed 1000';
-            $errorType = 'over_maximum';
-            
-            // Write structured log entry
-            $logEntry = json_encode([
-                'client_ip' => $clientIp,
-                'invalid_value' => $numberOfItems,
-                'request_id' => $requestId,
-                'error_type' => $errorType,
-                'timestamp' => gmdate('Y-m-d\TH:i:s\Z')
-            ]) . PHP_EOL;
-            file_put_contents($logFile, $logEntry, FILE_APPEND | LOCK_EX);
-            
-            $payload = json_encode([
-                'error' => 'Invalid request parameter',
-                'message' => $errorMsg,
-                'requestId' => $requestId
-            ]);
-            $response->getBody()->write($payload);
-            return $response
-                ->withHeader('Content-Type', 'application/json')
-                ->withStatus(400);
-        }
+        $itemCount = $body['item_count'];
+        $totalWeightKg = (float)$body['total_weight_kg'];
 
-        $data = calculateQuote($jsonObject);
+        $data = calculateQuote($itemCount, $totalWeightKg);
 
-        $payload = json_encode(['quote' => $data]);
+        $payload = json_encode(['quote' => $data, 'shipping_cost_usd' => $data]);
         $response->getBody()->write($payload);
 
         $span->addEvent('Quote processed, response sent back', [
@@ -219,9 +94,12 @@ return function (App $app) {
         //exported as an opentelemetry log (see dependencies.php)
         $logger->info('Calculated quote', [
             'total' => $data,
+            'item_count' => $itemCount,
+            'total_weight_kg' => $totalWeightKg,
+            'destination_country' => $body['destination_country']
         ]);
 
         return $response
             ->withHeader('Content-Type', 'application/json');
-    });
+    })->add(\App\Application\Middleware\QuoteRequestValidationMiddleware::class);
 };
