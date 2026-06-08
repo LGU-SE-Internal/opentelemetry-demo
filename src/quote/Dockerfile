@@ -24,9 +24,15 @@ COPY --from=installer /usr/bin/install-php-extensions /usr/local/bin/
 
 RUN install-php-extensions opcache pcntl protobuf opentelemetry
 
+# Create non-root user
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup -u 10001
+
 WORKDIR /var/www
 
-USER www-data
+# Set ownership of service directory to non-root user
+RUN chown -R appuser:appgroup /var/www
+
+USER appuser
 
 COPY --from=vendor /tmp/vendor/ vendor/
 
