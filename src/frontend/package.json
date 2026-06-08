@@ -45,6 +45,7 @@
     "express-rate-limit": "^8.5.2",
     "next": "16.2.6",
     "next-rate-limit": "^0.0.3",
+    "opossum": "^9.0.0",
     "rate-limit": "^0.1.1",
     "react": "19.2.6",
     "react-dom": "19.2.6",
@@ -56,6 +57,7 @@
   "devDependencies": {
     "@types/jest": "^30.0.0",
     "@types/node": "25.9.1",
+    "@types/opossum": "^8.1.9",
     "@types/react": "19.2.15",
     "@types/react-dom": "19.2.3",
     "@types/styled-components": "5.1.36",
@@ -71,7 +73,7 @@
     "supertest": "^7.2.2",
     "ts-jest": "^29.4.11",
     "ts-proto": "2.11.8",
-    "typescript": "6.0.3"
+    "typescript": "^6.0.3"
   },
   "overrides": {
     "@cypress/request": "4.0.0",
