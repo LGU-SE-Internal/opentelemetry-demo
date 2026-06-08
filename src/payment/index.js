@@ -657,6 +657,86 @@ app = express();
     }
   });
 
+  // Add top-level /health endpoint for liveness probe per issue #1426
+  app.get('/health', async (req, res) => {
+    const start = Date.now();
+    const tracer = opentelemetry.trace.getTracer('paymentservice');
+    const span = tracer.startSpan('GET /health');
+    
+    res.status(200).json({ status: 'UP' });
+    
+    span.setAttributes({
+      'http.method': 'GET',
+      'http.route': '/health',
+      'http.status_code': 200,
+      'health.check.type': 'liveness',
+      'health.check.status': 'UP'
+    });
+    
+    logger.info({
+      method: 'GET',
+      path: '/health',
+      status: 200,
+      duration: Date.now() - start
+    });
+    
+    span.end();
+  });
+  
+  // Add top-level /ready endpoint for readiness probe per issue #1426
+  app.get('/ready', async (req, res) => {
+    const start = Date.now();
+    const tracer = opentelemetry.trace.getTracer('paymentservice');
+    const span = tracer.startSpan('GET /ready');
+    
+    try {
+      // Check if all dependencies are initialized
+      await new Promise((resolve, reject) => {
+        healthClient.check({ service: '' }, (err, response) => {
+          if (err) return reject(err);
+          if (response.status !== health.servingStatus.SERVING) return reject(new Error('gRPC server not serving'));
+          resolve();
+        });
+      });
+      
+      // If all checks pass
+      res.status(200).json({ status: 'READY', dependencies: ['currency-service: connected'] });
+      
+      span.setAttributes({
+        'http.method': 'GET',
+        'http.route': '/ready',
+        'http.status_code': 200
+      });
+      
+      logger.info({
+        method: 'GET',
+        path: '/ready',
+        status: 200,
+        duration: Date.now() - start
+      });
+    } catch (err) {
+      // If any check fails
+      res.status(503).json({ status: 'NOT_READY', errors: ['currency-service: unreachable'] });
+      
+      span.setAttributes({
+        'http.method': 'GET',
+        'http.route': '/ready',
+        'http.status_code': 503,
+        'error.message': err.message
+      });
+      
+      logger.info({
+        method: 'GET',
+        path: '/ready',
+        status: 503,
+        duration: Date.now() - start,
+        error: err.message
+      });
+    } finally {
+      span.end();
+    }
+  });
+
   // Catch all other routes return 404
   app.use((req, res) => {
     res.status(404).send();
