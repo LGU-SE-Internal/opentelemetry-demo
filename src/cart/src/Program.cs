@@ -82,26 +82,60 @@ var builder = WebApplication.CreateBuilder(args);
 bool tlsEnabled = bool.TryParse(builder.Configuration["CART_SERVICE_TLS_ENABLED"], out bool te) && te;
 string tlsCertPath = builder.Configuration["CART_SERVICE_TLS_CERT_PATH"] ?? string.Empty;
 string tlsKeyPath = builder.Configuration["CART_SERVICE_TLS_KEY_PATH"] ?? string.Empty;
-bool mtlsEnabled = bool.TryParse(builder.Configuration["CART_SERVICE_MTLS_ENABLED"], out bool me) && me;
-string mtlsCaCertPath = builder.Configuration["CART_SERVICE_MTLS_CA_CERT_PATH"] ?? string.Empty;
+string mtlsMode = builder.Configuration["CART_SERVICE_MTLS_MODE"] ?? "disabled";
+string mtlsCaCertPath = builder.Configuration["CART_SERVICE_TLS_CA_CERT_PATH"] ?? string.Empty;
+
+// Validate mTLS mode value
+if (mtlsMode is not "disabled" and not "optional" and not "required")
+{
+    throw new InvalidOperationException($"Invalid CART_SERVICE_MTLS_MODE value: {mtlsMode}. Must be one of 'disabled', 'optional', 'required'");
+}
 
 if (tlsEnabled)
 {
-    if (string.IsNullOrEmpty(tlsCertPath))
+    if (string.IsNullOrEmpty(tlsCertPath) || string.IsNullOrEmpty(tlsKeyPath))
     {
-        throw new InvalidOperationException("CART_SERVICE_TLS_CERT_PATH is required when TLS is enabled");
+        throw new InvalidOperationException("Missing required TLS configuration: CART_SERVICE_TLS_CERT_PATH and CART_SERVICE_TLS_KEY_PATH must be set when TLS is enabled");
     }
     if (!File.Exists(tlsCertPath))
     {
-        throw new InvalidOperationException("CART_SERVICE_TLS_CERT_PATH points to non-existent file");
-    }
-    if (string.IsNullOrEmpty(tlsKeyPath))
-    {
-        throw new InvalidOperationException("CART_SERVICE_TLS_KEY_PATH is required when TLS is enabled");
+        throw new InvalidOperationException($"Invalid TLS certificate or private key: File not found at {tlsCertPath}");
     }
     if (!File.Exists(tlsKeyPath))
     {
-        throw new InvalidOperationException("CART_SERVICE_TLS_KEY_PATH points to non-existent file");
+        throw new InvalidOperationException($"Invalid TLS certificate or private key: File not found at {tlsKeyPath}");
+    }
+
+    X509Certificate2 serverCert;
+    try
+    {
+        serverCert = X509Certificate2.CreateFromPemFile(tlsCertPath, tlsKeyPath);
+    }
+    catch (System.Security.Cryptography.CryptographicException ex)
+    {
+        throw new InvalidOperationException($"Invalid TLS certificate or private key: {ex.Message}");
+    }
+
+    // Validate mTLS configuration if needed
+    X509Certificate2? caCert = null;
+    if (mtlsMode is "optional" or "required")
+    {
+        if (string.IsNullOrEmpty(mtlsCaCertPath))
+        {
+            throw new InvalidOperationException("Missing required CA certificate path: CART_SERVICE_TLS_CA_CERT_PATH must be set when mTLS mode is optional or required");
+        }
+        if (!File.Exists(mtlsCaCertPath))
+        {
+            throw new InvalidOperationException($"Invalid CA certificate file: File not found at {mtlsCaCertPath}");
+        }
+        try
+        {
+            caCert = new X509Certificate2(mtlsCaCertPath);
+        }
+        catch (System.Security.Cryptography.CryptographicException ex)
+        {
+            throw new InvalidOperationException($"Invalid CA certificate file: {ex.Message}");
+        }
     }
 
     // Configure Kestrel TLS
@@ -109,42 +143,45 @@ if (tlsEnabled)
     {
         options.ConfigureHttpsDefaults(httpsOptions =>
         {
-            httpsOptions.ServerCertificate = System.Security.Cryptography.X509Certificates.X509Certificate2.CreateFromPemFile(tlsCertPath, tlsKeyPath);
+            httpsOptions.ServerCertificate = serverCert;
             httpsOptions.SslProtocols = System.Security.Authentication.SslProtocols.Tls12 | System.Security.Authentication.SslProtocols.Tls13;
 
-            if (mtlsEnabled)
+            if (mtlsMode == "optional")
             {
-                if (string.IsNullOrEmpty(mtlsCaCertPath))
+                httpsOptions.ClientCertificateMode = Microsoft.AspNetCore.Server.Kestrel.Https.ClientCertificateMode.AllowCertificate;
+            }
+            else if (mtlsMode == "required")
+            {
+                httpsOptions.ClientCertificateMode = Microsoft.AspNetCore.Server.Kestrel.Https.ClientCertificateMode.RequireCertificate;
+            }
+
+            if (mtlsMode is "optional" or "required" && caCert != null)
+            {
+                httpsOptions.ClientCertificateValidation = (cert, chain, errors) =>
                 {
-                    throw new InvalidOperationException("CART_SERVICE_MTLS_CA_CERT_PATH is required when mTLS is enabled");
-                }
-                if (!File.Exists(mtlsCaCertPath))
-                {
-                    throw new InvalidOperationException("CART_SERVICE_MTLS_CA_CERT_PATH points to non-existent file");
-                }
-                try
-                {
-                    var caCert = new System.Security.Cryptography.X509Certificates.X509Certificate2(mtlsCaCertPath);
-                    httpsOptions.ClientCertificateMode = Microsoft.AspNetCore.Server.Kestrel.Https.ClientCertificateMode.RequireCertificate;
-                    httpsOptions.ClientCertificateValidation = (cert, chain, errors) =>
+                    if (mtlsMode == "optional" && cert == null)
                     {
-                        if (errors != System.Net.Security.SslPolicyErrors.None) return false;
-                        chain.ChainPolicy.TrustMode = System.Security.Cryptography.X509Certificates.X509ChainTrustMode.CustomRootTrust;
-                        chain.ChainPolicy.CustomTrustStore.Add(caCert);
-                        return chain.Build(cert);
-                    };
-                }
-                catch (System.Security.Cryptography.CryptographicException)
-                {
-                    throw new InvalidOperationException("CART_SERVICE_MTLS_CA_CERT_PATH contains invalid PEM format");
-                }
+                        // No client certificate provided, allowed in optional mode
+                        return true;
+                    }
+
+                    if (errors != SslPolicyErrors.None && errors != SslPolicyErrors.RemoteCertificateChainErrors)
+                    {
+                        return false;
+                    }
+
+                    chain!.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
+                    chain.ChainPolicy.CustomTrustStore.Add(caCert);
+                    chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+                    return chain.Build(cert!);
+                };
             }
         });
     });
 }
-else if (mtlsEnabled)
+else if (mtlsMode is "optional" or "required")
 {
-    throw new InvalidOperationException("CART_SERVICE_MTLS_ENABLED requires CART_SERVICE_TLS_ENABLED to be true");
+    throw new InvalidOperationException("mTLS mode cannot be set to optional or required when TLS is disabled (CART_SERVICE_TLS_ENABLED must be true)");
 }
 
 string valkeyAddress = builder.Configuration["VALKEY_ADDR"];
