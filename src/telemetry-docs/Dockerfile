@@ -50,10 +50,15 @@ USER 101
 
 COPY --from=site-builder /app/site /static
 COPY src/telemetry-docs/nginx.conf.template /nginx.conf.template
+COPY src/telemetry-docs/entrypoint.sh /entrypoint.sh
+
+USER root
+RUN chmod +x /entrypoint.sh
+USER 101
 
 EXPOSE ${TELEMETRY_DOCS_PORT}
 
-STOPSIGNAL SIGQUIT
+STOPSIGNAL SIGTERM
 
 # Start nginx
-CMD ["/bin/sh" , "-c" , "envsubst '$OTEL_COLLECTOR_HOST $OTEL_COLLECTOR_PORT_GRPC $OTEL_SERVICE_NAME $TELEMETRY_DOCS_PORT' < /nginx.conf.template > /etc/nginx/nginx.conf && exec nginx -g 'daemon off;'"]
+ENTRYPOINT ["/entrypoint.sh"]
