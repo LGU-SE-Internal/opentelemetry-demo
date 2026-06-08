@@ -64,3 +64,5 @@ test-venv/
 .agentm/
 .agentm/
 .agentm/
+.agentm/
+test_venv/
