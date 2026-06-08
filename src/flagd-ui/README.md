@@ -167,3 +167,72 @@ FLAGD_UI_TLS_CLIENT_CA_PATH=/path/to/ca.crt
 - If the service fails to start with "Missing required TLS configuration" error: Verify both `FLAGD_UI_TLS_CERT_PATH` and `FLAGD_UI_TLS_KEY_PATH` are set and non-empty when `FLAGD_UI_TLS_ENABLED=true`
 - If the service fails to start with invalid file errors: Verify the certificate/key/CA files exist, are readable by the service user, and are valid PEM format
 - If clients cannot connect with TLS handshake errors: Verify the client trusts the server certificate CA, and for mTLS, the client certificate is signed by the configured CA and not expired
+
+## Health Check Endpoints
+
+The service exposes two health check endpoints for Kubernetes monitoring:
+
+### Liveness Probe (`GET /health/live` or `GET /health/liveness`)
+- **Purpose**: Verify the service process is running
+- **Authentication**: None (publicly accessible)
+- **Success Response**:
+  - Status Code: `200 OK`
+  - Content-Type: `application/json`
+  - Body:
+    ```json
+    {
+      "status": "ok",
+      "check": "liveness",
+      "timestamp": "<UTC ISO 8601 timestamp>"
+    }
+    ```
+- **Failure Conditions**: Only fails if the service process is not running (connection timeout/refused)
+- **Kubernetes Usage**:
+  ```yaml
+  livenessProbe:
+    httpGet:
+      path: /health/live
+      port: 4000
+    initialDelaySeconds: 5
+    periodSeconds: 10
+  ```
+
+### Readiness Probe (`GET /health/ready` or `GET /health/readiness`)
+- **Purpose**: Verify the service is fully initialized and ready to serve user traffic
+- **Authentication**: None (publicly accessible)
+- **Success Response**:
+  - Status Code: `200 OK`
+  - Content-Type: `application/json`
+  - Body:
+    ```json
+    {
+      "status": "ok",
+      "check": "readiness",
+      "timestamp": "<UTC ISO 8601 timestamp>"
+    }
+    ```
+- **Failure Response**:
+  - Status Code: `503 Service Unavailable`
+  - Content-Type: `application/json`
+  - Body:
+    ```json
+    {
+      "status": "error",
+      "check": "readiness",
+      "reason": "<comma-separated list of unready components>",
+      "timestamp": "<UTC ISO 8601 timestamp>"
+    }
+    ```
+- **Checks Performed**:
+  1. Phoenix server is fully booted
+  2. Static assets are compiled and available
+  3. Connection to flagd service is established (if configured)
+- **Kubernetes Usage**:
+  ```yaml
+  readinessProbe:
+    httpGet:
+      path: /health/ready
+      port: 4000
+    initialDelaySeconds: 10
+    periodSeconds: 5
+  ```
