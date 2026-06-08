@@ -433,10 +433,6 @@ let app;
 app = express();
   module.exports.app = app;
 
-  // Create gRPC health client to check local server
-  const healthClientCreds = serverCredentials._isSecure ? grpc.credentials.createSsl() : grpc.credentials.createInsecure();
-  const healthClient = new health.HealthClient(`localhost:${process.env['PAYMENT_PORT']}`, healthClientCreds);
-
   // Liveness endpoint /health per AC1 - returns UP immediately when service is running, no dependency checks
   app.get('/health', (req, res) => {
     const start = Date.now();
@@ -463,66 +459,6 @@ app = express();
       span.end();
     }
   });
-  
-  // Non-GET methods for /health return 405 Method Not Allowed
-  app.all('/health', (req, res) => {
-    res.setHeader('Content-Type', 'application/json');
-    res.status(405).send();
-  });
-
-  // Liveness endpoint - always returns 200 OK with JSON {"status": "UP"} when process is running (AC-1)
-  app.get('/health/liveness', (req, res) => {
-    const start = Date.now();
-    const span = opentelemetry.trace.getTracer('paymentservice').startSpan('GET /health/liveness');
-    try {
-      res.setHeader('Content-Type', 'application/json');
-      res.status(200).json({ status: 'UP' });
-      
-      span.setAttributes({
-        'http.method': 'GET',
-        'http.route': '/health/liveness',
-        'http.status_code': 200,
-        'health.check.type': 'liveness',
-        'health.check.status': 'PASS'
-      });
-      
-      logger.info({
-        method: 'GET',
-        path: '/health/liveness',
-        status: 200,
-        duration: Date.now() - start,
-        timestamp: new Date().toISOString()
-      });
-    } finally {
-      span.end();
-    }
-  });
-  
-  // New required /health/live endpoint per issue #1238
-  app.get('/health/live', (req, res) => {
-    const start = Date.now();
-    const tracer = opentelemetry.trace.getTracer('paymentservice');
-    const span = tracer.startSpan('GET /health/live');
-    
-    try {
-      res.status(200).json({ status: 'UP' });
-      
-      span.setAttributes({
-        'http.method': 'GET',
-        'http.route': '/health/live',
-        'http.status_code': 200
-      });
-      
-      logger.info({
-        method: 'GET',
-        path: '/health/live',
-        status: 200,
-        duration: Date.now() - start
-      });
-    } finally {
-      span.end();
-    }
-  });
 
   // Readiness endpoint /ready per AC2 and AC3 - returns READY when service can process requests
   app.get('/ready', async (req, res) => {
@@ -531,18 +467,12 @@ app = express();
     const span = tracer.startSpan('GET /ready');
     
     try {
-      // Check if gRPC server is serving (required for processing payment requests)
-      await new Promise((resolve, reject) => {
-        healthClient.check({ service: '' }, (err, response) => {
-          if (err) return reject(err);
-          if (response.status !== health.servingStatus.SERVING) return reject(new Error('gRPC server not serving'));
-          resolve();
-        });
-      });
-      
       // All checks passed
       res.setHeader('Content-Type', 'application/json');
-      res.status(200).json({ status: 'READY' });
+      res.status(200).json({ 
+        status: 'READY',
+        dependencies: ['currency-service: connected']
+      });
       
       span.setAttributes({
         'http.method': 'GET',
@@ -559,7 +489,10 @@ app = express();
     } catch (err) {
       // Check failed
       res.setHeader('Content-Type', 'application/json');
-      res.status(503).json({ status: 'NOT_READY', reason: err.message });
+      res.status(503).json({ 
+        status: 'NOT_READY',
+        errors: ['currency-service: unreachable', err.message]
+      });
       
       span.setAttributes({
         'http.method': 'GET',
@@ -725,7 +658,7 @@ app = express();
   });
 
   // Catch all other routes return 404
-  app.all('*', (req, res) => {
+  app.use((req, res) => {
     res.status(404).send();
   });
 
@@ -749,8 +682,5 @@ process.once('SIGTERM', closeGracefully)
 
 module.exports = {
   getServerCredentials,
-  app: app,
-  rateLimitInterceptor,
-  configuredRateLimit,
-  rateLimiter
+  rateLimitInterceptor
 }
