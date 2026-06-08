@@ -47,4 +47,10 @@ defmodule FlagdUiWeb.Endpoint do
   plug FlagdUiWeb.Router
 
   def get_root_path, do: config(:url) |> Enum.find(fn {k, _} -> k == :path end) |> elem(1)
+
+  def socket_count do
+    # Count active LiveView sockets
+    Phoenix.PubSub.subscribers(FlagdUi.PubSub, "phoenix:live_socket")
+    |> length()
+  end
 end
