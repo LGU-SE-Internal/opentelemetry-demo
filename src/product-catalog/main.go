@@ -330,9 +330,8 @@ func main() {
 	reflection.Register(srv)
 
 	pb.RegisterProductCatalogServiceServer(srv, svc)
-
-	healthcheck := health.NewServer()
-	healthpb.RegisterHealthServer(srv, healthcheck)
+	// Use our custom health check implementation that verifies DB connectivity
+	healthpb.RegisterHealthServer(srv, svc)
 
 	// Create a custom handler to route gRPC and HTTP requests
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -598,6 +597,17 @@ func healthReadinessHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *productCatalog) Check(ctx context.Context, req *healthpb.HealthCheckRequest) (*healthpb.HealthCheckResponse, error) {
+	// Add timeout to ensure health check completes within 100ms per AC-3
+	pingCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+
+	if err := db.PingContext(pingCtx); err != nil {
+		logger.ErrorContext(ctx, "gRPC health check failed: database ping error", slog.Any("error", err))
+		return &healthpb.HealthCheckResponse{
+			Status: healthpb.HealthCheckResponse_NOT_SERVING,
+		}, status.Errorf(codes.Unavailable, "database connection failed: %v", err)
+	}
+
 	return &healthpb.HealthCheckResponse{Status: healthpb.HealthCheckResponse_SERVING}, nil
 }
 
