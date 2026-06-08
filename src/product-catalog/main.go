@@ -47,7 +47,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
@@ -85,28 +84,30 @@ type TLSConfig struct {
 func LoadTLSConfigFromEnv() (TLSConfig, error) {
 	var cfg TLSConfig
 	
-	enabledStr := os.Getenv("PRODUCT_CATALOG_GRPC_TLS_ENABLED")
+	enabledStr := os.Getenv("PRODUCT_CATALOG_TLS_ENABLED")
 	cfg.Enabled = strings.ToLower(enabledStr) == "true"
 	
-	cfg.CertPath = os.Getenv("PRODUCT_CATALOG_GRPC_TLS_CERT_PATH")
-	cfg.KeyPath = os.Getenv("PRODUCT_CATALOG_GRPC_TLS_KEY_PATH")
-	cfg.CAPath = os.Getenv("PRODUCT_CATALOG_GRPC_TLS_CA_PATH")
+	cfg.CertPath = os.Getenv("PRODUCT_CATALOG_TLS_CERT_PATH")
+	cfg.KeyPath = os.Getenv("PRODUCT_CATALOG_TLS_KEY_PATH")
+	cfg.CAPath = os.Getenv("PRODUCT_CATALOG_MTLS_CA_CERT_PATH")
 	
-	clientAuthStr := os.Getenv("PRODUCT_CATALOG_GRPC_TLS_CLIENT_AUTH_REQUIRED")
+	clientAuthStr := os.Getenv("PRODUCT_CATALOG_MTLS_ENABLED")
 	cfg.ClientAuthRequired = strings.ToLower(clientAuthStr) == "true"
 	
 	// Validate config
 	if cfg.Enabled {
-		if cfg.CertPath == "" {
-			return cfg, ErrTLSConfigMissingCert
-		}
-		if cfg.KeyPath == "" {
-			return cfg, ErrTLSConfigMissingKey
+		if cfg.CertPath == "" || cfg.KeyPath == "" {
+			return cfg, errors.New("TLS enabled but certificate or private key path not provided")
 		}
 	}
 	
-	if cfg.ClientAuthRequired && cfg.CAPath == "" {
-		return cfg, ErrTLSConfigMissingCA
+	if cfg.ClientAuthRequired {
+		if !cfg.Enabled {
+			return cfg, errors.New("mTLS enabled but TLS is not enabled")
+		}
+		if cfg.CAPath == "" {
+			return cfg, errors.New("mTLS enabled but CA certificate path not provided")
+		}
 	}
 	
 	return cfg, nil
@@ -120,43 +121,104 @@ func NewGRPCServerWithTLS(cfg TLSConfig) (*grpc.Server, error) {
 	opts := []grpc.ServerOption{
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 	}
-	
+
 	if !cfg.Enabled {
 		// Return plaintext server
 		return grpc.NewServer(opts...), nil
 	}
-	
+
 	// Load server cert and key
 	cert, err := tls.LoadX509KeyPair(cfg.CertPath, cfg.KeyPath)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrTLSInvalidCert, err)
 	}
-	
+
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		MinVersion:   tls.VersionTLS12,
 	}
-	
+
 	if cfg.ClientAuthRequired {
 		// Load CA certs for client authentication
 		caCert, err := os.ReadFile(cfg.CAPath)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrTLSInvalidCA, err)
 		}
-		
+
 		certPool := x509.NewCertPool()
 		if !certPool.AppendCertsFromPEM(caCert) {
 			return nil, ErrTLSInvalidCA
 		}
-		
+
 		tlsConfig.ClientCAs = certPool
 		tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
 	}
-	
+
 	// Add TLS credentials to server options
 	opts = append(opts, grpc.Creds(credentials.NewTLS(tlsConfig)))
-	
+
 	return grpc.NewServer(opts...), nil
+}
+
+// runServer starts the gRPC server on the specified port.
+// Returns when the context is cancelled or an error occurs during startup.
+func runServer(ctx context.Context, port int) error {
+	// Load TLS configuration
+	tlsCfg, err := LoadTLSConfigFromEnv()
+	if err != nil {
+		return fmt.Errorf("invalid TLS configuration: %w", err)
+	}
+
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return fmt.Errorf("TCP listen failed: %w", err)
+	}
+
+	srv, err := NewGRPCServerWithTLS(tlsCfg)
+	if err != nil {
+		return fmt.Errorf("failed to create gRPC server: %w", err)
+	}
+
+	svc := &productCatalog{}
+	reflection.Register(srv)
+	pb.RegisterProductCatalogServiceServer(srv, svc)
+	healthpb.RegisterHealthServer(srv, svc)
+
+	// Create a custom handler to route gRPC and HTTP requests
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ProtoMajor == 2 && strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc") {
+			srv.ServeHTTP(w, r)
+		} else {
+			http.DefaultServeMux.ServeHTTP(w, r)
+		}
+	})
+
+	httpSrv := &http.Server{
+		Handler: handler,
+	}
+
+	errChan := make(chan error, 1)
+	go func() {
+		if err := httpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errChan <- fmt.Errorf("server serve failed: %w", err)
+		}
+		close(errChan)
+	}()
+
+	select {
+	case <-ctx.Done():
+		// Gracefully stop gRPC server first
+		srv.GracefulStop()
+		// Then shutdown HTTP server
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+			return fmt.Errorf("HTTP server shutdown failed: %w", err)
+		}
+		return nil
+	case err := <-errChan:
+		return err
+	}
 }
 
 func validateGetProductRequest(req *pb.GetProductRequest) error {
@@ -319,6 +381,7 @@ func main() {
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%s", port))
 	if err != nil {
 		logger.Error(fmt.Sprintf("TCP Listen: %v", err))
+		os.Exit(1)
 	}
 
 	srv, err := NewGRPCServerWithTLS(tlsCfg)
@@ -613,6 +676,18 @@ func (p *productCatalog) Check(ctx context.Context, req *healthpb.HealthCheckReq
 
 func (p *productCatalog) Watch(req *healthpb.HealthCheckRequest, ws healthpb.Health_WatchServer) error {
 	return status.Errorf(codes.Unimplemented, "health check via Watch not implemented")
+}
+
+func (p *productCatalog) List(ctx context.Context, req *healthpb.HealthListRequest) (*healthpb.HealthListResponse, error) {
+	status := healthpb.HealthCheckResponse_SERVING
+	if err := db.PingContext(ctx); err != nil {
+		status = healthpb.HealthCheckResponse_NOT_SERVING
+	}
+	return &healthpb.HealthListResponse{
+		Statuses: map[string]*healthpb.HealthCheckResponse{
+			"": {Status: status},
+		},
+	}, nil
 }
 
 func (p *productCatalog) ListProducts(ctx context.Context, req *pb.ListProductsRequest) (*pb.ListProductsResponse, error) {
