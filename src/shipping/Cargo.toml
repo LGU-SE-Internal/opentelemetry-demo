@@ -40,6 +40,9 @@ opentelemetry-instrumentation-actix-web = { version = "0.24.0", features = ["syn
 opentelemetry-appender-tracing = "0.32.0"
 opentelemetry-resource-detectors = "0.11.0"
 rand = "0.8.5"
+prometheus = "0.14.0"
+metrics-exporter-prometheus = "0.18.3"
+tower = "0.5.3"
 
 [dependencies.uuid]
 version = "1.23.1"
