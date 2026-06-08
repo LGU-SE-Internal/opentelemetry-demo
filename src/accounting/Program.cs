@@ -43,7 +43,9 @@ builder.Services.AddHealthChecks()
         timeout: TimeSpan.FromSeconds(5));
 
 // Add our Kafka consumer service
-builder.Services.AddSingleton<Consumer>(sp => new Consumer(sp.GetRequiredService<ILogger<Consumer>>(), sp.GetRequiredService<IConfiguration>()));
+builder.Services.Configure<PostgresRetryPolicyOptions>(builder.Configuration.GetSection("Postgres"));
+builder.Services.AddSingleton<PostgresRetryPolicy>();
+builder.Services.AddSingleton<Consumer>(sp => new Consumer(sp.GetRequiredService<ILogger<Consumer>>(), sp.GetRequiredService<IConfiguration>(), sp.GetRequiredService<PostgresRetryPolicy>()));
 
 var app = builder.Build();
 

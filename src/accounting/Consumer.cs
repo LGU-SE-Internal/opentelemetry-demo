@@ -53,6 +53,7 @@ internal class Consumer : IAsyncDisposable, IDisposable
     private IProducer<string, byte[]> _dlqProducer;
     private bool _isListening;
     private readonly string? _dbConnectionString;
+    private readonly PostgresRetryPolicy _postgresRetryPolicy;
     private static readonly ActivitySource MyActivitySource = new("Accounting.Consumer");
     private int _inFlightMessages = 0;
     private readonly object _lockObj = new();
@@ -74,12 +75,13 @@ internal class Consumer : IAsyncDisposable, IDisposable
     public Func<ConsumeResult<string, byte[]>, CancellationToken, Task>? ProcessMessage { get; set; }
     public Func<TimeSpan, CancellationToken, Task> DelayFunction { get; set; } = Task.Delay;
 
-    public Consumer(ILogger<Consumer> logger, IConfiguration configuration)
-    {
-        _logger = logger;
+public Consumer(ILogger<Consumer> logger, IConfiguration configuration, PostgresRetryPolicy postgresRetryPolicy)
+{
+    _logger = logger;
+    _postgresRetryPolicy = postgresRetryPolicy;
 
-        var servers = Environment.GetEnvironmentVariable("KAFKA_ADDR")
-            ?? throw new InvalidOperationException("The KAFKA_ADDR environment variable is not set.");
+    var servers = Environment.GetEnvironmentVariable("KAFKA_ADDR")
+        ?? throw new InvalidOperationException("The KAFKA_ADDR environment variable is not set.");
 
         // Load configuration from environment variables
         MaxRetryAttempts = int.TryParse(Environment.GetEnvironmentVariable("KAFKA_CONSUMER_MAX_RETRY_ATTEMPTS"), out int maxRetries) ? maxRetries : 3;
@@ -353,61 +355,64 @@ internal class Consumer : IAsyncDisposable, IDisposable
             }
 
             using var dbContext = new DBContext();
-            using var transaction = dbContext.Database.BeginTransaction();
-            try
+            
+            await _postgresRetryPolicy.ExecuteAsync("insert_order_accounting", async ct =>
             {
-                var orderEntity = new OrderEntity
+                using var transaction = await dbContext.Database.BeginTransactionAsync(ct);
+                try
                 {
-                    Id = order.OrderId
-                };
-                dbContext.Add(orderEntity);
-                foreach (var item in order.Items)
-                {
-                    var orderItem = new OrderItemEntity
+                    var orderEntity = new OrderEntity
                     {
-                        ItemCostCurrencyCode = item.Cost.CurrencyCode,
-                        ItemCostUnits = item.Cost.Units,
-                        ItemCostNanos = item.Cost.Nanos,
-                        ProductId = item.Item.ProductId,
-                        Quantity = item.Item.Quantity,
+                        Id = order.OrderId
+                    };
+                    await dbContext.AddAsync(orderEntity, ct);
+                    foreach (var item in order.Items)
+                    {
+                        var orderItem = new OrderItemEntity
+                        {
+                            ItemCostCurrencyCode = item.Cost.CurrencyCode,
+                            ItemCostUnits = item.Cost.Units,
+                            ItemCostNanos = item.Cost.Nanos,
+                            ProductId = item.Item.ProductId,
+                            Quantity = item.Item.Quantity,
+                            OrderId = order.OrderId
+                        };
+
+                        await dbContext.AddAsync(orderItem, ct);
+                    }
+
+                    var shipping = new ShippingEntity
+                    {
+                        ShippingTrackingId = order.ShippingTrackingId,
+                        ShippingCostCurrencyCode = order.ShippingCost.CurrencyCode,
+                        ShippingCostUnits = order.ShippingCost.Units,
+                        ShippingCostNanos = order.ShippingCost.Nanos,
+                        StreetAddress = order.ShippingAddress.StreetAddress,
+                        City = order.ShippingAddress.City,
+                        State = order.ShippingAddress.State,
+                        Country = order.ShippingAddress.Country,
+                        ZipCode = order.ShippingAddress.ZipCode,
                         OrderId = order.OrderId
                     };
-
-                    dbContext.Add(orderItem);
+                    await dbContext.AddAsync(shipping, ct);
+                    await dbContext.SaveChangesAsync(ct);
+                    await transaction.CommitAsync(ct);
+                    _logger.LogInformation("Successfully processed order {OrderId}", order.OrderId);
                 }
-
-                var shipping = new ShippingEntity
+                catch (DbUpdateException ex) when (ex.InnerException is Npgsql.PostgresException pgEx && pgEx.SqlState == "23505")
                 {
-                    ShippingTrackingId = order.ShippingTrackingId,
-                    ShippingCostCurrencyCode = order.ShippingCost.CurrencyCode,
-                    ShippingCostUnits = order.ShippingCost.Units,
-                    ShippingCostNanos = order.ShippingCost.Nanos,
-                    StreetAddress = order.ShippingAddress.StreetAddress,
-                    City = order.ShippingAddress.City,
-                    State = order.ShippingAddress.State,
-                    Country = order.ShippingAddress.Country,
-                    ZipCode = order.ShippingAddress.ZipCode,
-                    OrderId = order.OrderId
-                };
-                dbContext.Add(shipping);
-                dbContext.SaveChanges();
-                transaction.Commit();
-                _logger.LogInformation("Successfully processed order {OrderId}", order.OrderId);
-                return true;
-            }
-            catch (DbUpdateException ex) when (ex.InnerException is Npgsql.PostgresException pgEx && pgEx.SqlState == "23505")
-            {
-                // Unique constraint violation, duplicate order id
-                transaction.Rollback();
-                _logger.LogInformation("Duplicate order {OrderId} received, skipping processing", order.OrderId);
-                return true;
-            }
-            catch (Exception ex)
-            {
-                transaction.Rollback();
-                _logger.LogError(ex, "Failed to process order {OrderId}", order.OrderId);
-                return false;
-            }
+                    await transaction.RollbackAsync(ct);
+                    _logger.LogInformation("Duplicate order {OrderId} received, skipping processing", order.OrderId);
+                }
+                catch (Exception ex)
+                {
+                    await transaction.RollbackAsync(ct);
+                    _logger.LogError(ex, "Failed to process order {OrderId}", order.OrderId);
+                    throw;
+                }
+            }, cancellationToken);
+            
+            return true;
         }
         catch (Exception ex)
         {
