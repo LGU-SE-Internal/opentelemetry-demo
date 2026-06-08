@@ -36,6 +36,12 @@ from grpc_health.v1 import health_pb2_grpc
 from grpc_health.v1.health import HealthServicer
 from database import fetch_product_reviews, fetch_product_reviews_from_db, fetch_avg_product_review_score_from_db, db_connection_str
 
+# Circuit breaker imports
+from pybreaker import CircuitBreaker, CircuitBreakerListener
+from cachetools import TTLCache
+import time
+from typing import List
+
 from openfeature import api
 from openfeature.contrib.provider.flagd import FlagdProvider
 
@@ -54,6 +60,120 @@ service_initialized = False
 logger = logging.getLogger('main')
 import psycopg2
 import time
+
+# --- Circuit Breaker Metrics ---
+meter = metrics.get_meter("product-reviews.service")
+circuit_breaker_trips_counter = meter.create_counter(
+    name="product_catalog_circuit_breaker_trips_total",
+    description="Total number of times circuit breaker has tripped to open state"
+)
+circuit_breaker_state_gauge = meter.create_up_down_counter(
+    name="product_catalog_circuit_breaker_state",
+    description="Current state of circuit breaker: 0=closed, 1=open, 2=half-open"
+)
+circuit_breaker_calls_counter = meter.create_counter(
+    name="product_catalog_circuit_breaker_calls_total",
+    description="Total calls to wrapped gRPC method, labeled by result: success, failure, fallback"
+)
+
+# --- Circuit Breaker Listener for Logging and Metrics ---
+class CircuitBreakerMetricsListener(CircuitBreakerListener):
+    def state_change(self, cb, old_state, new_state):
+        state_map = {"closed": 0, "open": 1, "half-open": 2}
+        # Update state gauge
+        circuit_breaker_state_gauge.add(state_map[new_state.name.lower()] - state_map[old_state.name.lower()])
+        
+        # Log state change
+        logger.info(
+            "Circuit breaker state changed",
+            extra={
+                "event_type": "circuit_state_change",
+                "previous_state": old_state.name.lower(),
+                "new_state": new_state.name.lower(),
+                "failure_count": cb.fail_counter,
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            }
+        )
+        
+        # If new state is open, increment trip counter
+        if new_state.name.lower() == "open":
+            circuit_breaker_trips_counter.add(1)
+            logger.info(
+                "Circuit breaker tripped",
+                extra={
+                    "event_type": "circuit_trip",
+                    "previous_state": old_state.name.lower(),
+                    "new_state": new_state.name.lower(),
+                    "failure_count": cb.fail_counter,
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                }
+            )
+
+# --- Fallback Cache ---
+# TTL 1 hour, max 1000 entries
+fallback_cache = TTLCache(maxsize=1000, ttl=3600)
+
+def get_product_review_fallback(product_id: str, timeout: float = 1.0) -> List[demo_pb2.ProductReview]:
+    """Fallback function when circuit is open"""
+    # Increment fallback call counter
+    circuit_breaker_calls_counter.add(1, {"result": "fallback"})
+    
+    # Log fallback event
+    logger.info(
+        "Circuit breaker fallback triggered",
+        extra={
+            "event_type": "fallback_triggered",
+            "product_id": product_id,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        }
+    )
+    
+    # Return cached value if exists, else empty list
+    return fallback_cache.get(product_id, [])
+
+# --- Circuit Breaker Instance ---
+product_catalog_circuit_breaker: CircuitBreaker = CircuitBreaker(
+    fail_max=5,
+    reset_timeout=30,
+    expected_exception=(grpc.RpcError,),
+    listeners=[CircuitBreakerMetricsListener()]
+)
+
+# Wrapped gRPC call method
+@product_catalog_circuit_breaker(fallback=get_product_review_fallback)
+def get_product_reviews_from_catalog(product_id: str, timeout: float = 1.0) -> List[demo_pb2.ProductReview]:
+    """
+    Wrapped synchronous gRPC call to ProductCatalogService.GetProductReviews
+    Args:
+        product_id: ID of product to fetch reviews for
+        timeout: gRPC call timeout in seconds
+    Returns:
+        List of ProductReview objects, either from catalog or fallback
+    Raises:
+        No exceptions propagated to caller: all errors handled by circuit breaker fallback
+    """
+    # Get product catalog service stub (assuming existing stub is available here, adjust as needed)
+    # TODO: Replace with actual product catalog stub initialization if needed
+    from grpc import insecure_channel
+    product_catalog_host = os.getenv("PRODUCT_CATALOG_SERVICE_ADDR", "productcatalogservice:3550")
+    channel = insecure_channel(product_catalog_host)
+    stub = demo_pb2_grpc.ProductCatalogServiceStub(channel)
+    
+    try:
+        response = stub.GetProductReviews(
+            demo_pb2.GetProductReviewsRequest(product_id=product_id),
+            timeout=timeout
+        )
+        # Increment success call counter
+        circuit_breaker_calls_counter.add(1, {"result": "success"})
+        # Cache successful response
+        fallback_cache[product_id] = list(response.reviews)
+        return list(response.reviews)
+    except grpc.RpcError as e:
+        # Increment failure call counter
+        circuit_breaker_calls_counter.add(1, {"result": "failure"})
+        # Re-raise to be handled by circuit breaker
+        raise e
 
 # Rate limiting configuration
 RATE_LIMIT_ENABLED = os.getenv("PRODUCT_REVIEWS_RATE_LIMIT_ENABLED", "true").lower() == "true"

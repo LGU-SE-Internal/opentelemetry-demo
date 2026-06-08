@@ -9,3 +9,6 @@ python-json-logger==4.1.0
 psycopg2-binary==2.9.12
 openai==2.38.0
 simplejson==4.1.1
+
+pybreaker==2.1.0
+cachetools==5.5.0
