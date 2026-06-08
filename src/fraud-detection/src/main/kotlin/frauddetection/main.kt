@@ -40,6 +40,72 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
 import sun.misc.Signal
 import sun.misc.SignalHandler
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.*
+
+// Graceful Shutdown Components
+interface RequestCounter {
+    fun increment(): Unit
+    fun decrement(): Unit
+    fun getActiveCount(): Int
+}
+
+interface ConnectionCleaner {
+    fun closeAllConnections(): Unit
+}
+
+class ShutdownManager(
+    private val requestCounter: RequestCounter,
+    private val connectionCleaner: ConnectionCleaner,
+    private val shutdownTimeoutSeconds: Int = 30
+) {
+    private val logger: Logger = LogManager.getLogger(ShutdownManager::class.java)
+    private val shutdownInProgress = AtomicBoolean(false)
+    private val successfulRequests = AtomicLong(0)
+    private val failedRequests = AtomicLong(0)
+
+    fun registerSignalHandlers() {
+        val handler = SignalHandler { signal ->
+            logger.info("Graceful shutdown initiated, waiting for in-flight requests to complete")
+            initiateGracefulShutdown()
+        }
+        Signal.handle(Signal("INT"), handler)
+        Signal.handle(Signal("TERM"), handler)
+    }
+
+    fun initiateGracefulShutdown() {
+        if (shutdownInProgress.compareAndSet(false, true)) {
+            runBlocking {
+                val startTime = System.currentTimeMillis()
+                val timeoutMs = shutdownTimeoutSeconds * 1000L
+
+                while (requestCounter.getActiveCount() > 0 && System.currentTimeMillis() - startTime < timeoutMs) {
+                    logger.info("Active in-flight requests during shutdown: ${requestCounter.getActiveCount()}")
+                    delay(5000L)
+                }
+
+                val remaining = requestCounter.getActiveCount()
+                if (remaining == 0) {
+                    logger.info("Shutdown complete, all in-flight requests processed: ${successfulRequests.get()} succeeded, ${failedRequests.get()} failed")
+                    connectionCleaner.closeAllConnections()
+                    logger.info("All open connections cleaned up successfully")
+                    exitProcess(0)
+                } else {
+                    logger.warn("Shutdown timed out after $shutdownTimeoutSeconds seconds, $remaining in-flight requests were terminated")
+                    connectionCleaner.closeAllConnections()
+                    logger.info("All open connections cleaned up successfully")
+                    exitProcess(1)
+                }
+            }
+        }
+    }
+
+    fun isShutdownInProgress(): Boolean = shutdownInProgress.get()
+
+    fun recordSuccessfulRequest() = successfulRequests.incrementAndGet()
+    fun recordFailedRequest() = failedRequests.incrementAndGet()
+}
 
 // Validation types
 sealed class Result<out T> {
@@ -517,6 +583,26 @@ fun buildKafkaSslProperties(props: Properties, config: KafkaTlsConfig) {
     }
 }
 
+class DefaultRequestCounter : RequestCounter {
+    private val count = AtomicInteger(0)
+    override fun increment() = count.incrementAndGet()
+    override fun decrement() = count.decrementAndGet()
+    override fun getActiveCount() = count.get()
+}
+
+class DefaultConnectionCleaner(
+    private val servers: List<Server>,
+    private val kafkaConsumer: KafkaConsumer<*, *>
+) : ConnectionCleaner {
+    private val logger: Logger = LogManager.getLogger(DefaultConnectionCleaner::class.java)
+    override fun closeAllConnections() {
+        servers.forEach { it.shutdown() }
+        kafkaConsumer.wakeup()
+        kafkaConsumer.close()
+        logger.info("All gRPC servers and Kafka consumer closed")
+    }
+}
+
 fun main() {
     // Load and validate TLS configurations first
     val grpcTlsConfig = GrpcTlsConfig.load()
@@ -570,8 +656,13 @@ fun main() {
 
     val servers = mutableListOf<Server>()
 
+    // Initialize graceful shutdown components
+    val requestCounter = DefaultRequestCounter()
+    val connectionCleaner = DefaultConnectionCleaner(servers, consumer)
+    val shutdownManager = ShutdownManager(requestCounter, connectionCleaner)
+
     // Initialize fraud detection service
-    val fraudDetectionService = FraudDetectionServiceImpl()
+    val fraudDetectionService = FraudDetectionServiceImpl(shutdownManager, requestCounter)
 
     // Start plaintext gRPC server if enabled
     if (grpcTlsConfig.plaintextEnabled) {
@@ -602,39 +693,17 @@ fun main() {
         exitProcess(1)
     }
 
-    // Initialize graceful shutdown manager
-    val shutdownManager = GracefulShutdownManagerImpl()
-    shutdownManager.registerResources(servers.first(), consumer) // TODO: handle multiple servers if needed
+    // Register signal handlers
+    shutdownManager.registerSignalHandlers()
 
-    // Register signal handlers for SIGINT (2) and SIGTERM (15)
-    val signalHandler = SignalHandler { signal ->
-        val shutdownResult = shutdownManager.shutdown()
-        val exitCode = if (shutdownResult.shutdownSuccess) {
-            0
-        } else {
-            if (signal.number == 2) 130 else 143
-        }
-        exitProcess(exitCode)
-    }
+    healthStatusManager.setStatus(HealthStatusManager.SERVICE_NAME_ALL_SERVICES, ServingStatus.SERVING)
 
-    try {
-        Signal.handle(Signal("INT"), signalHandler)
-        Signal.handle(Signal("TERM"), signalHandler)
-    } catch (e: IllegalArgumentException) {
-        logger.warn("Signal handling not supported on this platform, falling back to JVM shutdown hook", e)
-    }
-
-    // Add backup shutdown hook
-    Runtime.getRuntime().addShutdownHook(thread(start = false) {
-        if (!shutdownInitiated.get()) {
-            logger.info("Received shutdown request via JVM shutdown hook, initiating graceful shutdown")
-            shutdownManager.shutdown()
-        }
-    })
+    // Keep main thread alive
+    servers.forEach { it.awaitTermination() }
 
     // Background thread to monitor Kafka health
     thread(start = true, isDaemon = true) {
-        while (true) {
+        while (!shutdownManager.isShutdownInProgress()) {
             val currentTime = System.currentTimeMillis()
             val timeSinceLastPoll = currentTime - lastSuccessfulPollTime.get()
 
@@ -651,7 +720,7 @@ fun main() {
 
     consumer.use {
         try {
-            while (!shutdownInitiated.get()) {
+            while (!shutdownManager.isShutdownInProgress()) {
                 val records = consumer.poll(ofMillis(POLL_TIMEOUT_MS))
                 if (!records.isEmpty) {
                     kafkaConsumerConnected = true
@@ -701,15 +770,34 @@ fun main() {
 /**
  * gRPC service implementation for fraud detection
  */
-class FraudDetectionServiceImpl : FraudDetectionServiceGrpcKt.FraudDetectionServiceCoroutineImplBase() {
+class FraudDetectionServiceImpl(
+    private val shutdownManager: ShutdownManager,
+    private val requestCounter: RequestCounter
+) : FraudDetectionServiceGrpcKt.FraudDetectionServiceCoroutineImplBase() {
     override suspend fun checkFraud(request: CheckFraudRequest): CheckFraudResponse {
-        validateRequest(request)
+        if (shutdownManager.isShutdownInProgress()) {
+            throw Status.UNAVAILABLE
+                .withDescription("Service is shutting down")
+                .withDescription("Retry-After: 30")
+                .asRuntimeException()
+        }
 
-        // Proceed with normal fraud scoring (existing logic would be here)
-        return CheckFraudResponse.newBuilder()
-            .setFraudScore(0.0f)
-            .setIsFraud(false)
-            .build()
+        requestCounter.increment()
+        return try {
+            validateRequest(request)
+            // Proceed with normal fraud scoring (existing logic would be here)
+            val response = CheckFraudResponse.newBuilder()
+                .setFraudScore(0.0f)
+                .setIsFraud(false)
+                .build()
+            shutdownManager.recordSuccessfulRequest()
+            response
+        } catch (e: Exception) {
+            shutdownManager.recordFailedRequest()
+            throw e
+        } finally {
+            requestCounter.decrement()
+        }
     }
 
     private fun validateRequest(request: CheckFraudRequest) {

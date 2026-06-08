@@ -14,7 +14,7 @@ plugins {
     id("java")
     id("idea")
     id("com.google.protobuf") version "0.10.0"
-    id("com.github.johnrengelman.shadow") version "8.1.1"
+    id("com.github.johnrengelman.shadow") version "8.3.0"
 }
 
 group = "io.opentelemetry"
@@ -33,6 +33,7 @@ repositories {
 
 
 dependencies {
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3")
     implementation("com.google.protobuf:protobuf-java:${protobufVersion}")
     testImplementation(kotlin("test"))
     implementation(kotlin("script-runtime"))
