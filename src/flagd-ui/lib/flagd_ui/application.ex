@@ -14,6 +14,7 @@ defmodule FlagdUi.Application do
     :ok = Application.ensure_started(:inets)
 
     children = [
+      FlagdUI.GracefulShutdown,
       FlagdUiWeb.Telemetry,
       {DNSCluster, query: Application.get_env(:flagd_ui, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: FlagdUi.PubSub},

@@ -13,6 +13,12 @@ import Config
 config :flagd_ui,
   generators: [timestamp_type: :utc_datetime]
 
+# Graceful shutdown configuration
+config :flagd_ui, :graceful_shutdown,
+  enabled: true,
+  grace_period_seconds: 30,
+  shutdown_log_level: :info
+
 # Configures the endpoint
 config :flagd_ui, FlagdUiWeb.Endpoint,
   url: [host: "localhost", path: "/feature"],
