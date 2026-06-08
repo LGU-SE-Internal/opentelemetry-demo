@@ -14,16 +14,16 @@ defmodule FlagdUiWeb.HealthController do
     |> put_status(:ok)
     |> json(%{
       status: "ok",
-      timestamp: DateTime.utc_now() |> DateTime.to_iso8601()
+      check: "liveness"
     })
   rescue
     _e ->
       conn
       |> put_status(:service_unavailable)
       |> json(%{
-        status: "unhealthy",
-        timestamp: DateTime.utc_now() |> DateTime.to_iso8601(),
-        error: "Runtime failure detected"
+        status: "error",
+        check: "liveness",
+        reason: "Runtime failure detected"
       })
   end
 
@@ -38,14 +38,14 @@ defmodule FlagdUiWeb.HealthController do
         |> put_status(:ok)
         |> json(%{
           status: "ok",
-          timestamp: DateTime.utc_now() |> DateTime.to_iso8601()
+          check: "readiness"
         })
       {:error, {app, reason}} ->
         conn
         |> put_status(:service_unavailable)
         |> json(%{
-          status: "not_ready",
-          timestamp: DateTime.utc_now() |> DateTime.to_iso8601(),
+          status: "error",
+          check: "readiness",
           reason: "Application #{app} failed to start: #{inspect(reason)}"
         })
     end
@@ -54,8 +54,8 @@ defmodule FlagdUiWeb.HealthController do
       conn
       |> put_status(:service_unavailable)
       |> json(%{
-        status: "not_ready",
-        timestamp: DateTime.utc_now() |> DateTime.to_iso8601(),
+        status: "error",
+        check: "readiness",
         reason: "Initialization failed: #{inspect(e)}"
       })
   end

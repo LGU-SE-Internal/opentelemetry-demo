@@ -82,6 +82,47 @@ to stay compatible with the old version of Flagd-ui:
 * `/read-file` (`GET`)
 * `/write-to-file` (`POST`)
 
+## Health Check Endpoints
+
+The service exposes two unauthenticated health check endpoints for Kubernetes monitoring:
+
+1. **GET /health/live**
+   - Purpose: Liveness probe to verify the service process is running
+   - Authentication: None (publicly accessible)
+   - Success Response (200 OK):
+     ```json
+     {"status": "ok", "check": "liveness"}
+     ```
+   - Failure: If the service is not running, Kubernetes will receive connection timeout/refused error
+
+2. **GET /health/ready**
+   - Purpose: Readiness probe to verify the service is fully initialized and ready to serve user traffic
+   - Authentication: None (publicly accessible)
+   - Success Response (200 OK):
+     ```json
+     {"status": "ok", "check": "readiness"}
+     ```
+   - Failure Response (503 Service Unavailable):
+     ```json
+     {"status": "error", "check": "readiness", "reason": "<error description>"}
+     ```
+
+### Kubernetes Probe Configuration Example
+```yaml
+livenessProbe:
+  httpGet:
+    path: /health/live
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 10
+readinessProbe:
+  httpGet:
+    path: /health/ready
+    port: 8080
+  initialDelaySeconds: 10
+  periodSeconds: 5
+```
+
 ## Production TLS Configuration
 
 For production deployments, you can enable encrypted HTTPS communication for the flagd-ui service using the following environment variables:
