@@ -5,6 +5,7 @@
 #include <iostream>
 #include <math.h>
 #include <csignal>
+#include <cctype>
 #include <demo.grpc.pb.h>
 #include <grpc/health/v1/health.grpc.pb.h>
 #include <thread>
@@ -172,6 +173,28 @@ class CurrencyService final : public oteldemo::CurrencyService::Service
     money.set_nanos(nano);
   }
 
+  // Validates currency code is 3 uppercase letters, and exists in supported currencies list
+  grpc::Status ValidateCurrencyCode(const std::string& code, const std::string& field_name) {
+    // Check length is exactly 3
+    if (code.length() != 3) {
+      return grpc::Status(grpc::INVALID_ARGUMENT, 
+        field_name + " currency code must be a valid 3-letter ISO 4217 format (uppercase)");
+    }
+    // Check all characters are uppercase letters
+    for (char c : code) {
+      if (!isupper(c) || !isalpha(c)) {
+        return grpc::Status(grpc::INVALID_ARGUMENT, 
+          field_name + " currency code must be a valid 3-letter ISO 4217 format (uppercase)");
+      }
+    }
+    // Check code exists in supported currencies
+    if (currency_conversion.find(code) == currency_conversion.end()) {
+      return grpc::Status(grpc::INVALID_ARGUMENT, 
+        field_name + " currency code " + code + " is not a supported/valid ISO 4217 currency code");
+    }
+    return grpc::Status::OK;
+  }
+
   Status Convert(ServerContext* context,
   	const CurrencyConversionRequest* request,
   	Money* response) override
@@ -202,27 +225,37 @@ class CurrencyService final : public oteldemo::CurrencyService::Service
       Money from = request->from();
       string from_code = from.currency_code();
       
-      // Validate from currency code is not empty
-      if (from_code.empty()) {
+      // Validate source currency code
+      grpc::Status source_status = ValidateCurrencyCode(from_code, "Source");
+      if (!source_status.ok()) {
         span->SetStatus(StatusCode::kError);
-        logger->Error(std::string(__func__) + " conversion failed: from currency code is empty");
+        logger->Error(std::string(__func__) + " conversion failed: " + source_status.error_message());
         span->End();
-        return Status(grpc::INVALID_ARGUMENT, "from currency code cannot be empty");
+        return source_status;
+      }
+      
+      // Validate target currency code
+      string to_code = request->to_code();
+      grpc::Status target_status = ValidateCurrencyCode(to_code, "Target");
+      if (!target_status.ok()) {
+        span->SetStatus(StatusCode::kError);
+        logger->Error(std::string(__func__) + " conversion failed: " + target_status.error_message());
+        span->End();
+        return target_status;
+      }
+      
+      // Validate conversion amount is positive non-zero
+      double amount = getDouble(from);
+      if (amount <= 0) {
+        span->SetStatus(StatusCode::kError);
+        logger->Error(std::string(__func__) + " conversion failed: conversion amount must be positive non-zero");
+        span->End();
+        return grpc::Status(grpc::INVALID_ARGUMENT, "Conversion amount must be a positive non-zero numeric value");
       }
       
       double rate = currency_conversion[from_code];
-      double one_euro = getDouble(from) / rate ;
+      double one_euro = amount / rate ;
 
-      string to_code = request->to_code();
-      
-      // Validate to currency code is not empty
-      if (to_code.empty()) {
-        span->SetStatus(StatusCode::kError);
-        logger->Error(std::string(__func__) + " conversion failed: to currency code is empty");
-        span->End();
-        return Status(grpc::INVALID_ARGUMENT, "to currency code cannot be empty");
-      }
-      
       double to_rate = currency_conversion[to_code];
 
       double final = one_euro * to_rate;
