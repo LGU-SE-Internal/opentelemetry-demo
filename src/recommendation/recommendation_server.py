@@ -75,6 +75,14 @@ CIRCUIT_BREAKER_STATE_HALF_OPEN = 2
 # Open circuit error message
 CIRCUIT_OPEN_ERROR_MSG = "Product Catalog Service is temporarily unavailable: circuit breaker is open"
 
+# TLS Configuration
+RECOMMENDATION_SERVICE_TLS_MODE = os.environ.get('RECOMMENDATION_SERVICE_TLS_MODE', 'disabled').lower()
+RECOMMENDATION_SERVICE_TLS_CERT_PATH = os.environ.get('RECOMMENDATION_SERVICE_TLS_CERT_PATH', '')
+RECOMMENDATION_SERVICE_TLS_KEY_PATH = os.environ.get('RECOMMENDATION_SERVICE_TLS_KEY_PATH', '')
+RECOMMENDATION_SERVICE_TLS_CA_CERT_PATH = os.environ.get('RECOMMENDATION_SERVICE_TLS_CA_CERT_PATH', '')
+PRODUCT_CATALOG_SERVICE_TLS_ENABLED = os.environ.get('PRODUCT_CATALOG_SERVICE_TLS_ENABLED', 'false').lower() == 'true'
+PRODUCT_CATALOG_SERVICE_TLS_CA_CERT_PATH = os.environ.get('PRODUCT_CATALOG_SERVICE_TLS_CA_CERT_PATH', '')
+
 # Global product catalog client stub
 product_catalog_client = None
 
@@ -373,7 +381,7 @@ def load_cert_file(path: str) -> bytes:
 
 
 def create_product_catalog_client(catalog_addr: str, logger=None):
-    """Create ProductCatalogService client with optional TLS/mTLS configuration."""
+    """Create ProductCatalogService client with optional TLS configuration."""
     # Configure gRPC channel settings for ProductCatalogService
     service_config = json.dumps({
         "methodConfig": [
@@ -391,53 +399,35 @@ def create_product_catalog_client(catalog_addr: str, logger=None):
         ("grpc.max_receive_message_length", -1),
     ]
     
-    # Configure Product Catalog client channel (plaintext or TLS/mTLS)
-    client_tls_enabled = str_to_bool(os.environ.get('TLS_CLIENT_ENABLE', 'false'))
-    if client_tls_enabled:
-        # Load required CA cert for server validation
-        client_ca_cert_path = os.environ.get('TLS_CLIENT_CA_CERT_PATH')
-        if not client_ca_cert_path:
-            raise ValueError("TLS_CLIENT_ENABLE is true but TLS_CLIENT_CA_CERT_PATH is not set")
-        root_certificates = load_cert_file(client_ca_cert_path)
-        certificate_chain = None
-        private_key = None
-        
-        # Check if mTLS is enabled
-        client_mtls_enabled = str_to_bool(os.environ.get('TLS_CLIENT_ENABLE_MTLS', 'false'))
-        if client_mtls_enabled:
-            client_cert_path = os.environ.get('TLS_CLIENT_CERT_PATH')
-            client_key_path = os.environ.get('TLS_CLIENT_KEY_PATH')
-            if not client_cert_path or not client_key_path:
-                raise ValueError("TLS_CLIENT_ENABLE_MTLS is true but TLS_CLIENT_CERT_PATH or TLS_CLIENT_KEY_PATH is not set")
-            certificate_chain = load_cert_file(client_cert_path)
-            private_key = load_cert_file(client_key_path)
+    # Configure Product Catalog client channel (plaintext or TLS)
+    if PRODUCT_CATALOG_SERVICE_TLS_ENABLED:
+        # Load CA cert if provided for server validation
+        root_certificates = None
+        if PRODUCT_CATALOG_SERVICE_TLS_CA_CERT_PATH:
+            root_certificates = load_cert_file(PRODUCT_CATALOG_SERVICE_TLS_CA_CERT_PATH)
         
         # Create TLS credentials
         client_credentials = grpc.ssl_channel_credentials(
-            root_certificates=root_certificates,
-            certificate_chain=certificate_chain,
-            private_key=private_key
+            root_certificates=root_certificates
         )
-        pc_channel = grpc.secure_channel(
+        channel = grpc.secure_channel(
             catalog_addr,
-            credentials=client_credentials,
+            client_credentials,
             options=channel_options
         )
+        if logger:
+            logger.info(f"Connected to Product Catalog Service at {catalog_addr} using TLS")
     else:
-        # Use plaintext channel (default behavior)
-        pc_channel = grpc.insecure_channel(
+        # Plaintext connection (existing behavior)
+        channel = grpc.insecure_channel(
             catalog_addr,
             options=channel_options
         )
+        if logger:
+            logger.info(f"Connected to Product Catalog Service at {catalog_addr} using plaintext")
     
-    # Add retry logging interceptor if logger is provided
-    if logger is not None:
-        retry_interceptor = RetryLoggingInterceptor(logger)
-        intercepted_channel = grpc.intercept_channel(pc_channel, retry_interceptor)
-        return demo_pb2_grpc.ProductCatalogServiceStub(intercepted_channel), pc_channel
-    else:
-        # For test cases without logger
-        return demo_pb2_grpc.ProductCatalogServiceStub(pc_channel), pc_channel
+    stub = demo_pb2_grpc.ProductCatalogServiceStub(channel)
+    return stub, channel
 
 
 def serve(listen_addr: str, product_catalog_channel=None, test_mode: bool = False, logger=None):
@@ -484,37 +474,48 @@ def serve(listen_addr: str, product_catalog_channel=None, test_mode: bool = Fals
     signal.signal(signal.SIGINT, handle_shutdown_signal)
 
     # Configure server listener (plaintext or TLS/mTLS)
-    server_tls_enabled = str_to_bool(os.environ.get('TLS_SERVER_ENABLE', 'false'))
+    tls_mode = RECOMMENDATION_SERVICE_TLS_MODE
+    valid_tls_modes = ['disabled', 'tls', 'mtls']
     
-    if server_tls_enabled:
-        # Load required server cert and key
-        server_cert_path = os.environ.get('TLS_SERVER_CERT_PATH')
-        server_key_path = os.environ.get('TLS_SERVER_KEY_PATH')
-        if not server_cert_path or not server_key_path:
-            raise ValueError("TLS_SERVER_ENABLE is true but TLS_SERVER_CERT_PATH or TLS_SERVER_KEY_PATH is not set")
-        server_cert_chain = load_cert_file(server_cert_path)
-        server_private_key = load_cert_file(server_key_path)
+    if tls_mode not in valid_tls_modes:
+        if logger:
+            logger.warning(f"Invalid TLS mode '{tls_mode}', defaulting to 'disabled'")
+        tls_mode = 'disabled'
+    
+    if tls_mode != 'disabled':
+        # Validate required TLS certificate and key paths
+        if not RECOMMENDATION_SERVICE_TLS_CERT_PATH or not RECOMMENDATION_SERVICE_TLS_KEY_PATH:
+            raise ValueError(f"TLS mode is '{tls_mode}' but RECOMMENDATION_SERVICE_TLS_CERT_PATH or RECOMMENDATION_SERVICE_TLS_KEY_PATH is not set")
+        
+        # Load server certificate and private key
+        server_cert = load_cert_file(RECOMMENDATION_SERVICE_TLS_CERT_PATH)
+        server_key = load_cert_file(RECOMMENDATION_SERVICE_TLS_KEY_PATH)
         root_certificates = None
         
-        # Check if server-side mTLS is required
-        client_ca_cert_path = os.environ.get('TLS_SERVER_CLIENT_CA_CERT_PATH')
-        if client_ca_cert_path:
-            root_certificates = load_cert_file(client_ca_cert_path)
+        # Configure mTLS if enabled
+        require_client_auth = False
+        if tls_mode == 'mtls':
+            if not RECOMMENDATION_SERVICE_TLS_CA_CERT_PATH:
+                raise ValueError("TLS mode is 'mtls' but RECOMMENDATION_SERVICE_TLS_CA_CERT_PATH is not set")
+            root_certificates = load_cert_file(RECOMMENDATION_SERVICE_TLS_CA_CERT_PATH)
+            require_client_auth = True
         
         # Create server TLS credentials
         server_credentials = grpc.ssl_server_credentials(
-            private_key_certificate_chain_pairs=[(server_private_key, server_cert_chain)],
+            [(server_key, server_cert)],
             root_certificates=root_certificates,
-            require_client_auth=client_ca_cert_path is not None
+            require_client_auth=require_client_auth
         )
+        
+        # Add secure port
         server.add_secure_port(listen_addr, server_credentials)
         if logger:
-            logger.info(f'Recommendation service started with TLS enabled, listening on {listen_addr}')
+            logger.info(f"gRPC server listening on {listen_addr} with TLS mode '{tls_mode}'")
     else:
-        # Use plaintext port (default behavior)
+        # Plaintext server (existing behavior)
         server.add_insecure_port(listen_addr)
         if logger:
-            logger.info(f'Recommendation service started, listening on {listen_addr}')
+            logger.info(f"gRPC server listening on {listen_addr} with plaintext (TLS disabled)")
     
     server.start()
     
