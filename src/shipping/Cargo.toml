@@ -27,17 +27,22 @@ open-feature-flagd = { version = "0.1", default-features = false, features = ["r
 serde = { version = "1.0.228", features = ["derive"] }
 validator = { version = "0.18", features = ["derive"] }
 tonic = "0.14.6"
+tower-governor = "0.6.0"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tokio = { version = "1.0", features = ["full"] }
 
 opentelemetry = "0.32.0"
+opentelemetry_proto = { git = "https://github.com/open-telemetry/opentelemetry-demo.git", branch = "main" }
 opentelemetry_sdk = "0.32.0"
 opentelemetry-otlp = { version = "0.32.0", features = ["grpc-tonic"] }
 opentelemetry-instrumentation-actix-web = { version = "0.24.0", features = ["sync-middleware", "awc", "metrics"] }
 opentelemetry-appender-tracing = "0.32.0"
 opentelemetry-resource-detectors = "0.11.0"
 rand = "0.8.5"
+prometheus = "0.14.0"
+metrics-exporter-prometheus = "0.18.3"
+tower = "0.5.3"
 
 [dependencies.uuid]
 version = "1.23.1"
