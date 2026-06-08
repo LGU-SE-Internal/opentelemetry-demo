@@ -554,6 +554,7 @@ services:
       - OTEL_PHP_INTERNAL_METRICS_ENABLED=true
       - OTEL_RESOURCE_ATTRIBUTES=${OTEL_RESOURCE_ATTRIBUTES},service.criticality=low
       - OTEL_SERVICE_NAME=quote
+      - OTEL_PHP_DISABLED_PATHS="/health,/readiness"
     depends_on:
       otel-collector:
         condition: service_healthy
