@@ -3,14 +3,86 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::env;
-use tonic::{transport::Server, Request, Status, Code};
+use std::time::Duration;
+use tonic::{transport::Server, Request, Response, Status, Code};
 use tower_governor::{Governor, GovernorConfig, GovernorConfigBuilder, key_extractor::KeyExtractor, error::GovernorError};
 use governor::Quota;
 use std::num::NonZeroU32;
 use opentelemetry::metrics::Counter;
 use opentelemetry_proto::oteldemo::shipping_service_server::{ShippingService, ShippingServiceServer};
 use opentelemetry_proto::oteldemo::{GetQuoteRequest, GetQuoteResponse, ShipOrderRequest, ShipOrderResponse, GetShippingRequest, GetShippingResponse};
+use tokio::signal::unix::{signal, SignalKind};
+use tokio::time::timeout;
+use tracing::{info, warn};
+
+// Active request counter for graceful shutdown observability
+#[derive(Debug, Clone)]
+struct ActiveRequestCounter {
+    count: Arc<AtomicU64>,
+}
+
+impl ActiveRequestCounter {
+    fn new() -> Self {
+        Self {
+            count: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    fn increment(&self) {
+        self.count.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn decrement(&self) {
+        self.count.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    fn get(&self) -> u64 {
+        self.count.load(Ordering::SeqCst)
+    }
+}
+
+// Drop guard to decrement active request count when request is finished
+struct RequestGuard {
+    counter: ActiveRequestCounter,
+}
+
+impl Drop for RequestGuard {
+    fn drop(&mut self) {
+        self.counter.decrement();
+    }
+}
+
+// Interceptor to track active requests
+fn build_active_request_counter_interceptor(
+    counter: ActiveRequestCounter,
+) -> impl Fn(Request<()>) -> Result<Request<()>, Status> + Clone {
+    move |mut req: Request<()>| {
+        counter.increment();
+        let guard = RequestGuard { counter: counter.clone() };
+        // Attach guard to request extensions so it's dropped when request completes
+        req.extensions_mut().insert(guard);
+        Ok(req)
+    }
+}
+
+// Shutdown signal handler: waits for SIGINT or SIGTERM and logs active request count
+async fn shutdown_signal(active_request_counter: ActiveRequestCounter) {
+    let mut sigint = signal(SignalKind::interrupt()).expect("Failed to install SIGINT handler");
+    let mut sigterm = signal(SignalKind::terminate()).expect("Failed to install SIGTERM handler");
+
+    tokio::select! {
+        _ = sigint.recv() => {
+            let count = active_request_counter.get();
+            info!("Shutdown signal received, draining {} active requests", count);
+        }
+        _ = sigterm.recv() => {
+            let count = active_request_counter.get();
+            info!("Shutdown signal received, draining {} active requests", count);
+        }
+    }
+}
 
 // gRPC Shipping Service implementation
 #[derive(Debug, Clone)]
@@ -420,6 +492,18 @@ async fn main() -> std::io::Result<()> {
 
     let addr = format!("{}:{}", ip, port).parse().unwrap();
     
+    // Load grace period configuration
+    let grace_period_secs = match env::var("SHIPPING_GRACE_PERIOD_SECONDS") {
+        Ok(val) => {
+            val.parse::<u64>().unwrap_or_else(|_| {
+                warn!("Invalid SHIPPING_GRACE_PERIOD_SECONDS value, using default 30s");
+                30
+            })
+        }
+        Err(_) => 30,
+    };
+    let grace_period = Duration::from_secs(grace_period_secs);
+
     // Initialize rate limit metric
     let meter = opentelemetry::global::meter("shipping");
     let rate_limit_counter = meter.u64_counter("shipping_service_rate_limited_requests_total")
@@ -429,20 +513,48 @@ async fn main() -> std::io::Result<()> {
     // Build rate limiting interceptor
     let rate_limit_interceptor = build_rate_limit_interceptor(rate_limit_counter);
 
+    // Build active request counter interceptor
+    let active_request_counter = ActiveRequestCounter::new();
+    let request_counter_interceptor = build_active_request_counter_interceptor(active_request_counter.clone());
+
+    // Combine interceptors: first count, then rate limit
+    let combined_interceptor = move |req: Request<()>| {
+        let req = request_counter_interceptor(req)?;
+        rate_limit_interceptor(req)
+    };
+
     // Create shipping service implementation
     let shipping_service = ShippingServiceImpl;
 
     info!(
         name = "ServerStartedSuccessfully",
         addr = addr.to_string(),
+        grace_period_seconds = grace_period_secs,
         message = "Shipping gRPC service is running"
     );
 
-    // Start gRPC server
-    Server::builder()
-        .add_service(ShippingServiceServer::with_interceptor(shipping_service, rate_limit_interceptor))
-        .serve(addr)
-        .await?;
+    // Start gRPC server with graceful shutdown
+    let server = Server::builder()
+        .add_service(ShippingServiceServer::with_interceptor(shipping_service, combined_interceptor))
+        .serve_with_graceful_shutdown(addr, shutdown_signal(active_request_counter.clone()));
 
-    Ok(())
+    // Wait for either server to finish or grace period to expire
+    match timeout(grace_period, server).await {
+        Ok(Ok(_)) => {
+            info!("All requests completed, shutting down successfully");
+            Ok(())
+        }
+        Ok(Err(e)) => {
+            error!("Server error during shutdown: {}", e);
+            Err(e)
+        }
+        Err(_) => {
+            let remaining = active_request_counter.get();
+            warn!(
+                "Grace period expired ({}s), terminating {} remaining requests",
+                grace_period_secs, remaining
+            );
+            Ok(())
+        }
+    }
 }
