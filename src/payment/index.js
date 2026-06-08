@@ -6,19 +6,63 @@ const health = require('grpc-js-health-check')
 const opentelemetry = require('@opentelemetry/api')
 const express = require('express')
 const fs = require('fs')
+const path = require('path')
 const { RateLimiterMemory } = require('rate-limiter-flexible')
 
 const charge = require('./charge')
 const logger = require('./logger')
 
 // Rate limit configuration
-const RATE_LIMIT_ENV_VAR = 'PAYMENT_SERVICE_CHARGE_RATE_LIMIT_RPS'
-const rateLimitRps = parseInt(process.env[RATE_LIMIT_ENV_VAR], 10)
-const configuredRateLimit = isNaN(rateLimitRps) ? 10 : rateLimitRps
-const rateLimiter = configuredRateLimit > 0 ? new RateLimiterMemory({
-  points: configuredRateLimit,
-  duration: 1, // per second
-}) : null
+const rateLimiters = new Map();
+const DEFAULT_RATE_LIMIT_RPS = 10;
+
+// Parse and validate rate limit configuration on startup
+function parseRateLimitConfig() {
+  // Parse default limit first
+  const defaultLimitVar = 'PAYMENT_SERVICE_DEFAULT_RATE_LIMIT_RPS';
+  const defaultLimitVal = process.env[defaultLimitVar];
+  let defaultLimit = DEFAULT_RATE_LIMIT_RPS;
+  
+  if (defaultLimitVal !== undefined) {
+    const parsed = parseInt(defaultLimitVal, 10);
+    if (isNaN(parsed) || parsed <= 0) {
+      logger.fatal(`Invalid RPS limit for ${defaultLimitVar}: ${defaultLimitVal} must be a positive integer`);
+      process.exit(1);
+    }
+    defaultLimit = parsed;
+  }
+
+  // Parse all per-endpoint limits
+  const endpointLimitRegex = /^PAYMENT_SERVICE_(\w+)_RATE_LIMIT_RPS$/;
+  for (const [envVar, envVal] of Object.entries(process.env)) {
+    const match = envVar.match(endpointLimitRegex);
+    if (!match) continue;
+
+    const endpointName = match[1].toLowerCase();
+    const parsed = parseInt(envVal, 10);
+    if (isNaN(parsed) || parsed <= 0) {
+      logger.fatal(`Invalid RPS limit for ${envVar}: ${envVal} must be a positive integer`);
+      process.exit(1);
+    }
+
+    // Create rate limiter for this endpoint
+    rateLimiters.set(endpointName, new RateLimiterMemory({
+      points: parsed,
+      duration: 1, // per second
+    }));
+  }
+
+  // Create default rate limiter if no custom default set
+  if (!rateLimiters.has('default')) {
+    rateLimiters.set('default', new RateLimiterMemory({
+      points: defaultLimit,
+      duration: 1,
+    }));
+  }
+}
+
+// Initialize rate limit config
+parseRateLimitConfig();
 
 function getClientIp(call) {
   const peer = call.getPeer()
@@ -31,12 +75,20 @@ function getClientIp(call) {
   return peer
 }
 
+function getRateLimiterForEndpoint(endpointPath) {
+  // Extract endpoint name from path (e.g., /oteldemo.PaymentService/Charge -> charge)
+  const endpointName = endpointPath.split('/').pop().toLowerCase();
+  return rateLimiters.get(endpointName) || rateLimiters.get('default');
+}
+
+function getLimitRpsForEndpoint(endpointPath) {
+  const limiter = getRateLimiterForEndpoint(endpointPath);
+  return limiter.points;
+}
+
 async function rateLimitInterceptor(call, callback, next) {
   const endpoint = call.getPath()
-  // Only apply rate limit to Charge endpoint
-  if (endpoint !== '/oteldemo.PaymentService/Charge' || !rateLimiter) {
-    return next(call, callback)
-  }
+  const rateLimiter = getRateLimiterForEndpoint(endpoint);
 
   const clientIp = getClientIp(call)
   try {
@@ -45,15 +97,19 @@ async function rateLimitInterceptor(call, callback, next) {
   } catch (rejRes) {
     // Rate limit exceeded
     logger.warn({
-      event: 'rate_limit_exceeded',
-      client_ip: clientIp,
+      level: 'warn',
+      message: 'Rate limit exceeded',
       endpoint: endpoint,
-      limit_rps: configuredRateLimit,
-      timestamp: new Date().toISOString()
+      client_ip: clientIp,
+      limit_rps: getLimitRpsForEndpoint(endpoint),
+      request_id: call.metadata.get('x-request-id')[0] || undefined
     })
-    const err = new Error("Rate limit exceeded. Try again later.")
+    const err = new Error(`Rate limit exceeded for endpoint ${endpoint}`)
     err.code = grpc.status.RESOURCE_EXHAUSTED
-    return callback(err)
+    // Add retry-info trailer
+    const metadata = new grpc.Metadata()
+    metadata.set('retry-info', 'retry-delay=1')
+    return callback(err, null, metadata)
   }
 }
 
@@ -246,12 +302,48 @@ async function chargeServiceHandler(call, callback) {
   }
 }
 
+async function getPaymentMethodsServiceHandler(call, callback) {
+  const span = opentelemetry.trace.getActiveSpan();
+  try {
+    logger.info("GetPaymentMethods request received.");
+    callback(null, {
+      payment_methods: [
+        { id: 'credit_card', name: 'Credit Card', supported_currencies: ['USD', 'EUR', 'GBP'] },
+        { id: 'debit_card', name: 'Debit Card', supported_currencies: ['USD', 'EUR', 'GBP'] },
+        { id: 'paypal', name: 'PayPal', supported_currencies: ['USD', 'EUR', 'GBP', 'JPY'] }
+      ]
+    });
+  } catch (err) {
+    logger.warn({ err });
+    span?.setStatus({ code: opentelemetry.SpanStatusCode.ERROR, message: err.message });
+    callback(err);
+  }
+}
+
+async function refundServiceHandler(call, callback) {
+  const span = opentelemetry.trace.getActiveSpan();
+  try {
+    const { amount, credit_card } = call.request;
+    logger.info("Refund request received.");
+    // Simple refund implementation for demo
+    callback(null, {
+      refund_id: `refund_${Date.now()}`,
+      success: true,
+      amount: amount
+    });
+  } catch (err) {
+    logger.warn({ err });
+    span?.setStatus({ code: opentelemetry.SpanStatusCode.ERROR, message: err.message });
+    callback(err);
+  }
+}
+
 async function closeGracefully(signal) {
   server.forceShutdown()
   process.kill(process.pid, signal)
 }
 
-const otelDemoPackage = grpc.loadPackageDefinition(protoLoader.loadSync('demo.proto'))
+const otelDemoPackage = grpc.loadPackageDefinition(protoLoader.loadSync(path.join(__dirname, '../../pb/demo.proto')))
 const server = new grpc.Server({
   interceptors: [rateLimitInterceptor]
 })
@@ -297,7 +389,11 @@ const interceptedHealthService = Object.fromEntries(
 
 server.addService(interceptedHealthService, healthImplementation);
 
-server.addService(otelDemoPackage.oteldemo.PaymentService.service, { charge: chargeServiceHandler });
+server.addService(otelDemoPackage.oteldemo.PaymentService.service, { 
+  charge: chargeServiceHandler,
+  refund: refundServiceHandler,
+  getPaymentMethods: getPaymentMethodsServiceHandler
+});
 
 // Set payment service status to SERVING once server is bound
 setTimeout(() => {
@@ -331,8 +427,10 @@ server.bindAsync(address, serverCredentials, (err, port) => {
 
   logger.info(`payment gRPC server started on ${address}`)
   
-  // Setup HTTP health endpoint on same port as gRPC server
-  const app = express();
+let app;
+
+// Setup HTTP health endpoint on same port as gRPC server
+app = express();
   module.exports.app = app;
 
   // Create gRPC health client to check local server
