@@ -7,12 +7,19 @@ import { AddItemRequest, Empty } from '../../protos/demo';
 import ProductCatalogService from '../../services/ProductCatalog.service';
 import { IProductCart, IProductCartItem } from '../../types/Cart';
 import InstrumentationMiddleware from '../../utils/telemetry/InstrumentationMiddleware';
+import { postCartSchema, getCartSchema, deleteCartItemSchema, formatValidationError } from '../../utils/validation';
+import { z } from 'zod';
 
-type TResponse = IProductCart | Empty;
+type TResponse = IProductCart | Empty | ReturnType<typeof formatValidationError>;
 
 const handler: NextApiHandler<TResponse> = async ({ method, body, query }, res) => {
   switch (method) {
     case 'GET': {
+      const validationResult = getCartSchema.safeParse(query);
+      if (!validationResult.success) {
+        return res.status(400).json(formatValidationError(validationResult.error));
+      }
+
       const { sessionId = '', currencyCode = '' } = query;
       const { userId, items } = await CartGateway.getCart(sessionId as string);
 
@@ -32,19 +39,33 @@ const handler: NextApiHandler<TResponse> = async ({ method, body, query }, res) 
     }
 
     case 'POST': {
-      const { userId, item } = body as AddItemRequest;
+      const validationResult = postCartSchema.safeParse(body);
+      if (!validationResult.success) {
+        return res.status(400).json(formatValidationError(validationResult.error));
+      }
 
-      await CartGateway.addItem(userId, item!);
+      const { userId } = body as AddItemRequest;
+      const item = validationResult.data;
+
+      await CartGateway.addItem(userId, item);
       const cart = await CartGateway.getCart(userId);
 
       return res.status(200).json(cart);
     }
 
     case 'DELETE': {
+      if (body && body.productId) {
+        const validationResult = deleteCartItemSchema.safeParse(body);
+        if (!validationResult.success) {
+          return res.status(400).json(formatValidationError(validationResult.error));
+        }
+        // Remove item from cart logic would go here if implemented
+      }
+
       const { userId } = body as AddItemRequest;
       await CartGateway.emptyCart(userId);
 
-      return res.status(204).send('');
+      return res.status(200).json({ userId, items: [] });
     }
 
     default: {
@@ -54,3 +75,4 @@ const handler: NextApiHandler<TResponse> = async ({ method, body, query }, res) 
 };
 
 export default InstrumentationMiddleware(handler);
+

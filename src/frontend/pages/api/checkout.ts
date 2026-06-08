@@ -7,14 +7,20 @@ import CheckoutGateway from '../../gateways/rpc/Checkout.gateway';
 import { Empty, PlaceOrderRequest } from '../../protos/demo';
 import { IProductCheckoutItem, IProductCheckout } from '../../types/Cart';
 import ProductCatalogService from '../../services/ProductCatalog.service';
+import { checkoutSchema, formatValidationError } from '../../utils/validation';
 
-type TResponse = IProductCheckout | Empty;
+type TResponse = IProductCheckout | Empty | ReturnType<typeof formatValidationError>;
 
 const handler = async ({ method, body, query }: NextApiRequest, res: NextApiResponse<TResponse>) => {
   switch (method) {
     case 'POST': {
+      const validationResult = checkoutSchema.safeParse(body);
+      if (!validationResult.success) {
+        return res.status(400).json(formatValidationError(validationResult.error));
+      }
+
       const { currencyCode = '' } = query;
-      const orderData = body as PlaceOrderRequest;
+      const orderData = validationResult.data as unknown as PlaceOrderRequest;
       const { order: { items = [], ...order } = {} } = await CheckoutGateway.placeOrder(orderData);
 
       const productList: IProductCheckoutItem[] = await Promise.all(
