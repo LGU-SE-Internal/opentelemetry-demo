@@ -1,4 +1,4 @@
-package kafka_collector
+package main
 
 import (
 	"os"
