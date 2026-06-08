@@ -24,8 +24,13 @@ COPY ./src/email/Gemfile Gemfile
 COPY ./src/email/Gemfile.lock Gemfile.lock
 COPY ./src/email/email_server.rb email_server.rb
 
+# Create non-root user and set permissions
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup -u 1000
+RUN chown -R appuser:appgroup /email_server
+USER appuser
+
 # Optional certificate mount points
 VOLUME ["/app/certs/server.crt", "/app/certs/server.key", "/app/certs/ca.crt"]
 
-EXPOSE ${EMAIL_PORT} 8443
+EXPOSE ${EMAIL_PORT:-8080} 8443
 ENTRYPOINT ["bundle", "exec", "ruby", "email_server.rb"]
