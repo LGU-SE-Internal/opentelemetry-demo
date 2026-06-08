@@ -329,27 +329,6 @@ public final class AdService {
     }
     healthMgr = new HealthStatusManager();
 
-    // Parse rate limit from environment variable
-    int rateLimitRps = 100;
-    String rateLimitEnv = System.getenv("AD_SERVICE_RATE_LIMIT_RPS");
-    // Fall back to system property for testing
-    if (rateLimitEnv == null || rateLimitEnv.isEmpty()) {
-      rateLimitEnv = System.getProperty("AD_SERVICE_RATE_LIMIT_RPS");
-    }
-    if (rateLimitEnv != null && !rateLimitEnv.isEmpty()) {
-      try {
-        rateLimitRps = Integer.parseInt(rateLimitEnv);
-        if (rateLimitRps <= 0) {
-          logger.warn("Invalid rate limit value {} (must be positive), falling back to default 100 RPS", rateLimitRps);
-          rateLimitRps = 100;
-        }
-      } catch (NumberFormatException e) {
-        logger.warn("Invalid rate limit value '{}' (not a number), falling back to default 100 RPS", rateLimitEnv);
-        rateLimitRps = 100;
-      }
-    }
-    logger.info("Rate limit configured to {} RPS per client IP", rateLimitRps);
-
     // Create a flagd instance with OpenTelemetry
     FlagdOptions options =
         FlagdOptions.builder()
