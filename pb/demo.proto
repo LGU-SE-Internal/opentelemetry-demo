@@ -295,6 +295,8 @@ service AdService {
 message AdRequest {
     // List of important key words from the current page describing the context.
     repeated string context_keys = 1;
+    // List of categories to target ads for.
+    repeated string context_categories = 2;
 }
 
 message AdResponse {

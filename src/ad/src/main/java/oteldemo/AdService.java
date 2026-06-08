@@ -425,12 +425,9 @@ public final class AdService {
       // get the current span in context
       Span span = Span.current();
       try {
-        // Context keys processing
-        List<String> contextKeys = req.getContextKeysList();
-
-        // Validate all category parameters first
-        for (String category : contextKeys) {
-          service.validateAdCategory(category);
+        // Validate all context category parameters first
+        for (int i = 0; i < req.getContextCategoriesCount(); i++) {
+          service.validateAdCategory(req.getContextCategories(i));
         }
 
         List<Ad> allAds = new ArrayList<>();
