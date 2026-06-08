@@ -36,6 +36,8 @@ using OpenTelemetry.Trace;
 using OpenFeature;
 using OpenFeature.Hooks;
 using OpenFeature.Providers.Flagd;
+using Polly;
+using StackExchange.Redis;
 public partial class Program
 {
     internal const int ShutdownGracePeriodSeconds = 10;
@@ -175,6 +177,24 @@ if (int.TryParse(builder.Configuration["CART_REDIS_MAX_BACKOFF_MS"], out int max
 }
 builder.Services.AddSingleton(redisRetrySettings);
 
+// Load circuit breaker settings from configuration
+var circuitBreakerSettings = new CircuitBreakerSettings();
+builder.Configuration.GetSection("CircuitBreaker").Bind(circuitBreakerSettings);
+// Also support environment variable overrides
+if (int.TryParse(builder.Configuration["CIRCUITBREAKER_FAILURETHRESHOLD"], out int failureThreshold))
+{
+    circuitBreakerSettings.FailureThreshold = failureThreshold;
+}
+if (TimeSpan.TryParse(builder.Configuration["CIRCUITBREAKER_RESETTIMEOUT"], out TimeSpan resetTimeout))
+{
+    circuitBreakerSettings.ResetTimeout = resetTimeout;
+}
+if (TimeSpan.TryParse(builder.Configuration["CIRCUITBREAKER_SAMPLINGDURATION"], out TimeSpan samplingDuration))
+{
+    circuitBreakerSettings.SamplingDuration = samplingDuration;
+}
+builder.Services.AddSingleton(circuitBreakerSettings);
+
 builder.Logging
     .AddOpenTelemetry(options => options.AddOtlpExporter())
     .AddConsole();
@@ -188,10 +208,25 @@ builder.Services.AddSingleton<ValkeyCartStore>(x =>
 
 builder.Services.AddSingleton<ICartStore>(x =>
 {
-    var innerStore = x.GetRequiredService<ValkeyCartStore>();
-    var logger = x.GetRequiredService<ILogger<RetryingCartStore>>();
-    var settings = x.GetRequiredService<RedisRetryPolicySettings>();
-    return new RetryingCartStore(innerStore, logger, settings);
+    var valkeyStore = x.GetRequiredService<ValkeyCartStore>();
+    var retryLogger = x.GetRequiredService<ILogger<RetryingCartStore>>();
+    var retrySettings = x.GetRequiredService<RedisRetryPolicySettings>();
+    var retryingStore = new RetryingCartStore(valkeyStore, retryLogger, retrySettings);
+    
+    // Wrap retry store in circuit breaker
+    var circuitBreakerLogger = x.GetRequiredService<ILogger<CircuitBreakerCartStore>>();
+    var circuitBreakerSettings = x.GetRequiredService<CircuitBreakerSettings>();
+    var meterFactory = x.GetRequiredService<IMeterFactory>();
+    var circuitBreakerStore = new CircuitBreakerCartStore(retryingStore, circuitBreakerLogger, circuitBreakerSettings, meterFactory);
+    
+    return circuitBreakerStore;
+});
+
+// Expose resilience pipeline for testing and external use
+builder.Services.AddSingleton<ResiliencePipeline<RedisResult>>(x =>
+{
+    var circuitBreakerStore = (CircuitBreakerCartStore)x.GetRequiredService<ICartStore>();
+    return circuitBreakerStore.GetRedisResiliencePipeline();
 });
 
 builder.Services.AddOpenFeature(openFeatureBuilder =>
