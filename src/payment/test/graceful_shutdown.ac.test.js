@@ -7,7 +7,7 @@ const execAsync = promisify(exec);
 
 const PROTO_PATH = path.join(__dirname, '../../../pb/demo.proto');
 const packageDefinition = protoLoader.loadSync(PROTO_PATH, { keepCase: true, defaults: true, oneofs: true });
-const otelDemoProto = grpc.loadPackageDefinition(packageDefinition).opentelemetry.proto.demo;
+const otelDemoProto = grpc.loadPackageDefinition(packageDefinition).oteldemo;
 
 const PAYMENT_SERVICE_PORT = 50052;
 const TEST_PAYMENT_SERVICE_ADDR = `localhost:${PAYMENT_SERVICE_PORT}`;

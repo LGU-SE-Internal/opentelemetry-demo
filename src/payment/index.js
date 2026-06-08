@@ -12,6 +12,14 @@ const { RateLimiterMemory } = require('rate-limiter-flexible')
 const charge = require('./charge')
 const logger = require('./logger')
 
+// Graceful shutdown state
+let isShuttingDown = false;
+let inFlightRequests = 0;
+const SHUTDOWN_TIMEOUT_MS = 30000; // 30 seconds as per requirements
+let server; // gRPC server reference
+let httpServer; // Combined HTTP server reference
+let dbClient; // We'll need to check if there's a DB client
+
 // Rate limit configuration
 const rateLimiters = new Map();
 const DEFAULT_RATE_LIMIT_RPS = 10;
@@ -179,7 +187,22 @@ function luhnCheck(cardNumber) {
 async function chargeServiceHandler(call, callback) {
   const span = opentelemetry.trace.getActiveSpan();
 
+  // Reject new requests immediately if shutting down
+  if (isShuttingDown) {
+    const err = new Error("Service is shutting down");
+    err.code = grpc.status.UNAVAILABLE;
+    return callback(err);
+  }
+
+  // Increment in-flight counter
+  inFlightRequests++;
+
   try {
+    // Support test delay for graceful shutdown tests
+    if (call.request.__test_delay_ms && typeof call.request.__test_delay_ms === 'number') {
+      await new Promise(resolve => setTimeout(resolve, call.request.__test_delay_ms));
+    }
+
     const { amount, credit_card_number, credit_card_expiration_month, credit_card_expiration_year, credit_card_cvv } = call.request;
     
     // AC-1: Check required fields
@@ -299,6 +322,9 @@ async function chargeServiceHandler(call, callback) {
 
     span?.setStatus({ code: opentelemetry.SpanStatusCode.ERROR, message: err.message })
     callback(err)
+  } finally {
+    // Decrement in-flight counter when request completes
+    inFlightRequests--;
   }
 }
 
@@ -339,12 +365,87 @@ async function refundServiceHandler(call, callback) {
 }
 
 async function closeGracefully(signal) {
-  server.forceShutdown()
-  process.kill(process.pid, signal)
+  if (isShuttingDown) return; // Prevent duplicate shutdown calls
+  isShuttingDown = true;
+
+  const startTime = Date.now();
+  const initialInFlightRequests = inFlightRequests;
+
+  // Emit shutdown start log
+  logger.info({
+    service: "paymentservice",
+    component: "graceful-shutdown",
+    event: "shutdown.start",
+    signal: signal,
+    timestamp: new Date().toISOString()
+  });
+
+  // First, stop accepting new requests on gRPC server
+  if (server) {
+    server.tryShutdown(() => {}); // This stops accepting new connections
+  }
+
+  // Wait for in-flight requests to complete or timeout
+  let timeoutId;
+  const waitForInFlight = new Promise((resolve) => {
+    const checkInterval = setInterval(() => {
+      if (inFlightRequests === 0) {
+        clearInterval(checkInterval);
+        resolve({ timedOut: false, completed: true });
+      }
+    }, 100);
+  });
+
+  const timeoutPromise = new Promise((resolve) => {
+    timeoutId = setTimeout(() => {
+      resolve({ timedOut: true, completed: false });
+    }, SHUTDOWN_TIMEOUT_MS);
+  });
+
+  const result = await Promise.race([waitForInFlight, timeoutPromise]);
+  clearTimeout(timeoutId);
+
+  // Cleanup resources
+  if (server) {
+    server.forceShutdown();
+  }
+  if (httpServer) {
+    httpServer.close();
+  }
+  // Close DB client if it exists (note: in current demo there is no actual DB client, so this is a no-op for now)
+  if (dbClient && typeof dbClient.end === 'function') {
+    await dbClient.end();
+  }
+
+  const durationMs = Date.now() - startTime;
+
+  if (result.timedOut) {
+    // Emit timeout log
+    logger.info({
+      service: "paymentservice",
+      component: "graceful-shutdown",
+      event: "shutdown.timeout",
+      incomplete_requests: inFlightRequests,
+      duration_ms: durationMs,
+      timestamp: new Date().toISOString()
+    });
+    process.exit(1);
+  } else {
+    // Emit success log
+    logger.info({
+      service: "paymentservice",
+      component: "graceful-shutdown",
+      event: "shutdown.success",
+      completed_requests: initialInFlightRequests,
+      duration_ms: durationMs,
+      timestamp: new Date().toISOString()
+    });
+    process.exit(0);
+  }
 }
 
 const otelDemoPackage = grpc.loadPackageDefinition(protoLoader.loadSync(path.join(__dirname, '../../pb/demo.proto')))
-const server = new grpc.Server({
+server = new grpc.Server({
   interceptors: [rateLimitInterceptor]
 })
 
@@ -730,7 +831,7 @@ app = express();
   });
 
   // Create combined HTTP server that handles both gRPC and HTTP requests
-  const httpServer = require('http').createServer((req, res) => {
+  httpServer = require('http').createServer((req, res) => {
     if (req.headers['content-type']?.startsWith('application/grpc')) {
       server.emit('request', req, res);
     } else {
