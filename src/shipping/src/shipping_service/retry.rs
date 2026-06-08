@@ -11,10 +11,17 @@ use tokio::time::sleep;
 pub struct RetryConfig {
     pub max_retries: u32,
     pub initial_delay_ms: u32,
+    pub jitter_factor: f64,
 }
 
 impl Default for RetryConfig {
     fn default() -> Self {
+        Self::from_env()
+    }
+}
+
+impl RetryConfig {
+    pub fn from_env() -> Self {
         // Read environment variables with defaults
         let max_retries = env::var("QUOTE_SERVICE_MAX_RETRIES")
             .ok()
@@ -29,6 +36,7 @@ impl Default for RetryConfig {
         Self {
             max_retries,
             initial_delay_ms,
+            jitter_factor: 0.0,
         }
     }
 }
