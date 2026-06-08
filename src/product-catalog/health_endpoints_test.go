@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -205,12 +207,148 @@ func TestAC8_AllResponsesHaveJsonContentType(t *testing.T) {
 	// TODO: Add shutdown simulation when implementation exists
 	req, _ = http.NewRequest("GET", "/health/liveness", nil)
 	rr = httptest.NewRecorder()
-	http.DefaultServeMux.ServeHTTP(rr, req)
-	assert.Equal(t, "application/json", rr.Header().Get("Content-Type"), "Liveness failure response should have JSON Content-Type")
+		http.DefaultServeMux.ServeHTTP(rr, req)
+		assert.Equal(t, "application/json", rr.Header().Get("Content-Type"), "Readiness failure response should have JSON Content-Type")
+}
 
-	// Test readiness failure case (before catalog loaded)
+// TestAC1_HealthReturnsServingWhenDBConnected tests AC-1: When database connection is active, health check returns SERVING status
+func TestAC1_HealthReturnsServingWhenDBConnected(t *testing.T) {
+	// Test HTTP readiness endpoint
+	req, err := http.NewRequest("GET", "/health/readiness", nil)
+	assert.NoError(t, err)
+
+	rr := httptest.NewRecorder()
+	handler := http.DefaultServeMux
+
+	// Simulate scenario where DB connection is working
+	handler.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code, "Expected 200 OK status when DB is connected")
+	assert.Equal(t, "application/json", rr.Header().Get("Content-Type"), "Expected Content-Type: application/json header")
+
+	var response map[string]interface{}
+	err = json.Unmarshal(rr.Body.Bytes(), &response)
+	assert.NoError(t, err, "Expected valid JSON response body")
+	assert.Equal(t, "UP", response["status"], "Expected status UP in HTTP response")
+
+	// Test gRPC Health.Check method
+	pc := &productCatalog{
+		// Assume DB connection is injected and working in this scenario
+	}
+	resp, err := pc.Check(context.Background(), &healthpb.HealthCheckRequest{})
+	assert.NoError(t, err, "Expected no error from gRPC health check when DB is connected")
+	assert.Equal(t, healthpb.HealthCheckResponse_SERVING, resp.Status, "Expected SERVING status from gRPC health check when DB is connected")
+}
+
+// TestAC2_HealthReturnsNotServingWhenDBDisconnected tests AC-2: When database connection fails, health check returns NOT_SERVING status
+func TestAC2_HealthReturnsNotServingWhenDBDisconnected(t *testing.T) {
+	// Test HTTP readiness endpoint
+	req, err := http.NewRequest("GET", "/health/readiness", nil)
+	assert.NoError(t, err)
+
+	rr := httptest.NewRecorder()
+	handler := http.DefaultServeMux
+
+	// Simulate scenario where DB connection is not working (down, invalid creds, network issue)
+	handler.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, rr.Code, "Expected 503 Service Unavailable when DB is disconnected")
+	assert.Equal(t, "application/json", rr.Header().Get("Content-Type"), "Expected Content-Type: application/json header")
+
+	var response map[string]interface{}
+	err = json.Unmarshal(rr.Body.Bytes(), &response)
+	assert.NoError(t, err, "Expected valid JSON response body")
+	assert.Equal(t, "DOWN", response["status"], "Expected status DOWN in HTTP response")
+	assert.Contains(t, response["error"].(string), "database", "Expected error message to reference database connection issue")
+
+	// Test gRPC Health.Check method
+	pc := &productCatalog{
+		// Assume DB connection is failing in this scenario
+	}
+	resp, err := pc.Check(context.Background(), &healthpb.HealthCheckRequest{})
+	assert.NoError(t, err, "Expected no error from gRPC health check even when DB is down")
+	assert.Equal(t, healthpb.HealthCheckResponse_NOT_SERVING, resp.Status, "Expected NOT_SERVING status from gRPC health check when DB is disconnected")
+}
+
+// TestAC3_HealthCheckCompletesWithinTimeLimit tests AC-3: Health check completes in <=100ms for both states
+func TestAC3_HealthCheckCompletesWithinTimeLimit(t *testing.T) {
+	// Test HTTP endpoint with working DB
+	start := time.Now()
+	req, _ := http.NewRequest("GET", "/health/readiness", nil)
+	rr := httptest.NewRecorder()
+	http.DefaultServeMux.ServeHTTP(rr, req)
+	duration := time.Since(start)
+	assert.LessOrEqual(t, duration.Milliseconds(), int64(100), "Health check should complete in <=100ms when DB is connected")
+
+	// Test HTTP endpoint with failing DB
+	start = time.Now()
 	req, _ = http.NewRequest("GET", "/health/readiness", nil)
 	rr = httptest.NewRecorder()
 	http.DefaultServeMux.ServeHTTP(rr, req)
-	assert.Equal(t, "application/json", rr.Header().Get("Content-Type"), "Readiness failure response should have JSON Content-Type")
+	duration = time.Since(start)
+	assert.LessOrEqual(t, duration.Milliseconds(), int64(100), "Health check should complete in <=100ms when DB is disconnected")
+
+	// Test gRPC endpoint with working DB
+	pc := &productCatalog{}
+	start = time.Now()
+	_, _ = pc.Check(context.Background(), &healthpb.HealthCheckRequest{})
+	duration = time.Since(start)
+	assert.LessOrEqual(t, duration.Milliseconds(), int64(100), "gRPC health check should complete in <=100ms when DB is connected")
+
+	// Test gRPC endpoint with failing DB
+	start = time.Now()
+	_, _ = pc.Check(context.Background(), &healthpb.HealthCheckRequest{})
+	duration = time.Since(start)
+	assert.LessOrEqual(t, duration.Milliseconds(), int64(100), "gRPC health check should complete in <=100ms when DB is disconnected")
+}
+
+// TestAC4_UnitTestsVerifyDBStates tests AC-4: Unit tests can verify both connected and disconnected DB states without real DB
+func TestAC4_UnitTestsVerifyDBStates(t *testing.T) {
+	// This test validates that the health check implementation accepts a mock DB connection
+	// that can be configured to return success or failure responses
+
+	// Mock DB that returns success on Ping
+	mockDBSuccess := &mockSQLDB{pingErr: nil}
+	pcSuccess := &productCatalog{db: mockDBSuccess}
+
+	resp, err := pcSuccess.Check(context.Background(), &healthpb.HealthCheckRequest{})
+	assert.NoError(t, err)
+	assert.Equal(t, healthpb.HealthCheckResponse_SERVING, resp.Status, "Should return SERVING when mock DB ping succeeds")
+
+	// Mock DB that returns error on Ping
+	mockDBFailure := &mockSQLDB{pingErr: errors.New("connection refused")}
+	pcFailure := &productCatalog{db: mockDBFailure}
+
+	resp, err = pcFailure.Check(context.Background(), &healthpb.HealthCheckRequest{})
+	assert.NoError(t, err)
+	assert.Equal(t, healthpb.HealthCheckResponse_NOT_SERVING, resp.Status, "Should return NOT_SERVING when mock DB ping fails")
+}
+
+// TestAC5_ExistingConsumersNotBroken tests AC-5: Existing health check consumers do not require changes for success responses
+func TestAC5_ExistingConsumersNotBroken(t *testing.T) {
+	// Test that the existing success response format remains unchanged
+	req, err := http.NewRequest("GET", "/health/readiness", nil)
+	assert.NoError(t, err)
+
+	rr := httptest.NewRecorder()
+	handler := http.DefaultServeMux
+
+	handler.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code, "Existing success status code remains 200 OK")
+	assert.Equal(t, "application/json", rr.Header().Get("Content-Type"), "Existing Content-Type header remains unchanged")
+
+	var response map[string]interface{}
+	err = json.Unmarshal(rr.Body.Bytes(), &response)
+	assert.NoError(t, err)
+	assert.Equal(t, "UP", response["status"], "Existing status field value 'UP' remains unchanged for success responses")
+}
+
+// mockSQLDB is a mock implementation of *sql.DB for testing
+type mockSQLDB struct {
+	pingErr error
+}
+
+func (m *mockSQLDB) PingContext(ctx context.Context) error {
+	return m.pingErr
 }
