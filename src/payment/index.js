@@ -848,6 +848,91 @@ app = express();
 process.once('SIGINT', closeGracefully)
 process.once('SIGTERM', closeGracefully)
 
+async function closeGracefully(signal) {
+  if (isShuttingDown) return; // Prevent duplicate shutdown triggers
+  isShuttingDown = true;
+  const startTime = Date.now();
+
+  // Emit shutdown start log
+  logger.info({
+    service: "paymentservice",
+    component: "graceful-shutdown",
+    event: "shutdown.start",
+    signal: signal,
+    timestamp: new Date().toISOString()
+  });
+
+  let shutdownTimeout;
+  let timedOut = false;
+  const completedRequestsAtSignal = inFlightRequests;
+
+  // Wait for in-flight requests to complete or timeout
+  const waitForRequests = async () => {
+    while (inFlightRequests > 0 && !timedOut) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  };
+
+  // Set up 30s timeout
+  const timeoutPromise = new Promise(resolve => {
+    shutdownTimeout = setTimeout(() => {
+      timedOut = true;
+      resolve();
+    }, SHUTDOWN_TIMEOUT_MS);
+  });
+
+  // Wait for either all requests to complete or timeout
+  await Promise.race([waitForRequests(), timeoutPromise]);
+  clearTimeout(shutdownTimeout);
+
+  const durationMs = Date.now() - startTime;
+
+  // Clean up resources
+  if (server) {
+    try {
+      await new Promise((resolve, reject) => {
+        server.tryShutdown(err => {
+          if (err) reject(err);
+          else resolve();
+        });
+      });
+    } catch (err) {
+      logger.error({ message: "Error shutting down gRPC server", error: err.message });
+    }
+  }
+
+  if (httpServer) {
+    try {
+      await new Promise(resolve => httpServer.close(resolve));
+    } catch (err) {
+      logger.error({ message: "Error shutting down HTTP server", error: err.message });
+    }
+  }
+
+  // Emit appropriate log event
+  if (!timedOut) {
+    logger.info({
+      service: "paymentservice",
+      component: "graceful-shutdown",
+      event: "shutdown.success",
+      completed_requests: completedRequestsAtSignal,
+      duration_ms: durationMs,
+      timestamp: new Date().toISOString()
+    });
+    process.exit(0);
+  } else {
+    logger.info({
+      service: "paymentservice",
+      component: "graceful-shutdown",
+      event: "shutdown.timeout",
+      incomplete_requests: inFlightRequests,
+      duration_ms: durationMs,
+      timestamp: new Date().toISOString()
+    });
+    process.exit(1);
+  }
+}
+
 module.exports = {
   getServerCredentials,
   app: app,
