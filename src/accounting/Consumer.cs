@@ -10,6 +10,9 @@ using Npgsql;
 using Microsoft.Extensions.Configuration;
 using System.Net.Sockets;
 using System.Text.Json;
+using Polly;
+using Polly.CircuitBreaker;
+using System.Diagnostics.Metrics;
 
 namespace Accounting;
 
@@ -56,6 +59,9 @@ internal class Consumer : IAsyncDisposable, IDisposable
     private static readonly ActivitySource MyActivitySource = new("Accounting.Consumer");
     private int _inFlightMessages = 0;
     private readonly object _lockObj = new();
+    private readonly AsyncCircuitBreakerPolicy _circuitBreakerPolicy;
+    private readonly Meter _meter;
+    private string _currentCircuitState = "closed";
 
     // Configuration properties
     public int MaxRetryAttempts { get; }
@@ -92,6 +98,41 @@ internal class Consumer : IAsyncDisposable, IDisposable
         _consumer.Subscribe(TopicName);
 
         _dlqProducer = BuildDlqProducer(servers);
+
+        // Initialize circuit breaker policy
+        _circuitBreakerPolicy = Policy
+            .Handle<Exception>()
+            .CircuitBreakerAsync(
+                exceptionsAllowedBeforeBreaking: 10,
+                durationOfBreak: TimeSpan.FromSeconds(30),
+                onBreak: (ex, breakDelay) =>
+                {
+                    _logger.LogWarning("Circuit breaker opened after {FailureCount} consecutive failures, will remain open for {BreakDuration}s", 
+                        10, breakDelay.TotalSeconds);
+                    _currentCircuitState = "open";
+                },
+                onReset: () =>
+                {
+                    _logger.LogInformation("Circuit breaker reset to closed state after successful operation");
+                    _currentCircuitState = "closed";
+                },
+                onHalfOpen: () =>
+                {
+                    _logger.LogInformation("Circuit breaker entering half-open state, testing next message");
+                    _currentCircuitState = "half_open";
+                });
+
+        // Initialize metrics
+        _meter = new Meter("Accounting.Service");
+        _meter.CreateObservableGauge(
+            "accounting_service_circuit_breaker_state",
+            () => new List<Measurement<int>>
+            {
+                new(1, new KeyValuePair<string, object?>("state", _currentCircuitState)),
+                new(0, new KeyValuePair<string, object?>("state", _currentCircuitState == "closed" ? "open" : "closed")),
+                new(0, new KeyValuePair<string, object?>("state", _currentCircuitState == "half_open" ? "closed" : "half_open"))
+            },
+            description: "Current state of the accounting service circuit breaker (closed/open/half_open)");
 
        if (_logger.IsEnabled(LogLevel.Information))
        {
@@ -210,47 +251,59 @@ internal class Consumer : IAsyncDisposable, IDisposable
         Exception? lastException = null;
         int retryCount = 0;
 
-        while (true)
+        try
         {
-            try
+            return await _circuitBreakerPolicy.ExecuteAsync(async () =>
             {
-                if (ProcessMessage != null)
+                while (true)
                 {
-                    await ProcessMessage(message, cancellationToken);
-                    return true;
-                }
-                else
-                {
-                    bool success = ProcessMessageInternal(message);
-                    if (success) return true;
-                    throw new InvalidOperationException("Message processing failed permanently");
-                }
-            }
-            catch (Exception ex)
-            {
-                lastException = ex;
-                
-                if (!IsTransientException(ex))
-                {
-                    _logger.LogError(ex, "Permanent exception processing message, routing to DLQ immediately");
-                    await SendToDlq(message, ex, 0, cancellationToken);
-                    return false;
-                }
+                    try
+                    {
+                        if (ProcessMessage != null)
+                        {
+                            await ProcessMessage(message, cancellationToken);
+                            return true;
+                        }
+                        else
+                        {
+                            bool success = ProcessMessageInternal(message);
+                            if (success) return true;
+                            throw new InvalidOperationException("Message processing failed permanently");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        lastException = ex;
+                        
+                        if (!IsTransientException(ex))
+                        {
+                            _logger.LogError(ex, "Permanent exception processing message, routing to DLQ immediately");
+                            await SendToDlq(message, ex, 0, cancellationToken);
+                            return false;
+                        }
 
-                if (retryCount >= MaxRetryAttempts)
-                {
-                    _logger.LogError(ex, "Max retry attempts {MaxRetries} exceeded for message, routing to DLQ", MaxRetryAttempts);
-                    await SendToDlq(message, ex, retryCount, cancellationToken);
-                    return false;
-                }
+                        if (retryCount >= MaxRetryAttempts)
+                        {
+                            _logger.LogError(ex, "Max retry attempts {MaxRetries} exceeded for message, routing to DLQ", MaxRetryAttempts);
+                            await SendToDlq(message, ex, retryCount, cancellationToken);
+                            return false;
+                        }
 
-                int delayMs = Math.Min(InitialRetryDelayMs * (int)Math.Pow(2, retryCount), MaxRetryDelayMs);
-                _logger.LogWarning(ex, "Transient exception processing message, attempt {Attempt}/{MaxAttempts}, retrying in {DelayMs}ms", 
-                    retryCount + 1, MaxRetryAttempts, delayMs);
-                
-                await DelayFunction(TimeSpan.FromMilliseconds(delayMs), cancellationToken);
-                retryCount++;
-            }
+                        int delayMs = Math.Min(InitialRetryDelayMs * (int)Math.Pow(2, retryCount), MaxRetryDelayMs);
+                        _logger.LogWarning(ex, "Transient exception processing message, attempt {Attempt}/{MaxAttempts}, retrying in {DelayMs}ms", 
+                            retryCount + 1, MaxRetryAttempts, delayMs);
+                        
+                        await DelayFunction(TimeSpan.FromMilliseconds(delayMs), cancellationToken);
+                        retryCount++;
+                    }
+                }
+            });
+        }
+        catch (BrokenCircuitException ex)
+        {
+            _logger.LogWarning(ex, "Circuit breaker is open, routing message directly to DLQ");
+            await SendToDlq(message, ex, 0, cancellationToken);
+            return false;
         }
     }
 

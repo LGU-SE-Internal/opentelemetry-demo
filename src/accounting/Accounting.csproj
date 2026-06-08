@@ -24,6 +24,7 @@
     <PackageReference Include="Microsoft.VisualStudio.Azure.Containers.Tools.Targets" />
     <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" />
     <PackageReference Include="OpenTelemetry.AutoInstrumentation" />
+    <PackageReference Include="Polly.CircuitBreaker" Version="8.4.1" />
   </ItemGroup>
 
 	<ItemGroup>
