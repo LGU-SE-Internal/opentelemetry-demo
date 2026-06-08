@@ -3,10 +3,12 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::env;
 use tonic::{transport::Server, Request, Status, Code};
 use tower_governor::{Governor, GovernorConfig, GovernorConfigBuilder, key_extractor::KeyExtractor, error::GovernorError};
 use governor::Quota;
 use std::num::NonZeroU32;
+use opentelemetry::metrics::Counter;
 use opentelemetry_proto::oteldemo::shipping_service_server::{ShippingService, ShippingServiceServer};
 use opentelemetry_proto::oteldemo::{GetQuoteRequest, GetQuoteResponse, ShipOrderRequest, ShipOrderResponse, GetShippingRequest, GetShippingResponse};
 
@@ -88,7 +90,7 @@ fn build_rate_limit_interceptor(
     rate_limit_counter: Counter<u64>,
 ) -> impl Fn(Request<()>) -> Result<Request<()>, Status> + Clone {
     let limits = load_endpoint_rate_limits();
-    let mut governors = HashMap::new();
+    let mut governors: HashMap<String, (NonZeroU32, NonZeroU32, Arc<Governor<GrpcEndpointKeyExtractor>>)> = HashMap::new();
 
     for (endpoint, (rps, burst)) in limits {
         let config = GovernorConfigBuilder::default()
@@ -97,23 +99,22 @@ fn build_rate_limit_interceptor(
             .key_extractor(GrpcEndpointKeyExtractor)
             .finish()
             .unwrap();
-        governors.insert(endpoint, Arc::new(Governor::new(&config)));
+        governors.insert(endpoint, (rps, burst, Arc::new(Governor::new(&config))));
     }
 
     move |mut req: Request<()>| {
         let path = req.path().to_string();
-        if let Some(governor) = governors.get(&path) {
+        if let Some((rps, burst, governor)) = governors.get(&path) {
             match governor.check(&req) {
                 Ok(_) => Ok(req),
-                Err(GovernorError::TooManyRequests { quota, .. }) => {
-                    let (rps, burst) = limits.get(&path).unwrap();
+                Err(GovernorError::TooManyRequests { .. }) => {
                     let msg = format!(
                         "Rate limit exceeded for endpoint {}: limit is {} requests per second, burst {} capacity",
                         path, rps, burst
                     );
                     // Increment metric
                     rate_limit_counter.add(1, &[
-                        opentelemetry::KeyValue::new("endpoint", path),
+                        opentelemetry::KeyValue::new("endpoint", path.clone()),
                         opentelemetry::KeyValue::new("limit_rps", rps.to_string()),
                     ]);
                     Err(Status::new(Code::ResourceExhausted, msg))
