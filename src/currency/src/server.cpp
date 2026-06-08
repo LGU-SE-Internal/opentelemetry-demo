@@ -392,12 +392,65 @@ class CurrencyService final : public oteldemo::CurrencyService::Service
 };
 
 // Global server pointer for signal handler access
-std::unique_ptr<Server> g_server;
+std::shared_ptr<Server> g_server;
 std::unique_ptr<httplib::Server> g_http_server;
 std::atomic<bool> g_is_healthy{true};
 std::atomic<bool> g_is_ready{false};
+std::atomic<bool> g_shutdown_initiated{false};
+std::atomic<bool> g_shutdown_timed_out{false};
 
-// Signal handler to trigger graceful shutdown
+// Initiates graceful shutdown sequence:
+// 1. Logs shutdown start event
+// 2. Stops accepting new gRPC connections
+// 3. Waits up to 10s for in-flight requests to complete
+// 4. Logs shutdown completion event and exits
+void PerformGracefulShutdown(std::shared_ptr<grpc::Server> server) {
+  if (g_shutdown_initiated.exchange(true)) {
+    // Shutdown already in progress
+    return;
+  }
+
+  logger->Info("Graceful shutdown initiated, waiting up to 10s for in-flight requests to complete");
+
+  // Stop health checks first
+  g_is_healthy = false;
+  g_is_ready = false;
+  if (g_http_server) {
+    g_http_server->stop();
+  }
+
+  if (!server) {
+    logger->Info("Graceful shutdown completed, all in-flight requests processed");
+    return;
+  }
+
+  // Initiate gRPC shutdown with 10s timeout
+  gpr_timespec timeout = {10, 0, GPR_TIMESPAN};
+  auto shutdown_start = std::chrono::steady_clock::now();
+  server->Shutdown(timeout);
+
+  // Check if shutdown completed before timeout
+  auto shutdown_duration = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - shutdown_start);
+  if (shutdown_duration.count() >= 10) {
+    g_shutdown_timed_out = true;
+    logger->Warning("Graceful shutdown timed out after 10s, terminating with pending requests");
+  } else {
+    logger->Info("Graceful shutdown completed, all in-flight requests processed");
+  }
+}
+
+// Registers signal handlers for SIGINT and SIGTERM to trigger graceful shutdown
+void RegisterShutdownSignalHandlers(std::shared_ptr<grpc::Server> server) {
+  g_server = server;
+  std::signal(SIGINT, [](int signal) {
+    PerformGracefulShutdown(g_server);
+  });
+  std::signal(SIGTERM, [](int signal) {
+    PerformGracefulShutdown(g_server);
+  });
+}
+
+// Old signal handler kept for reference, will be removed
 void SignalHandler(int signal) {
   g_is_healthy = false;
   g_is_ready = false;
@@ -557,22 +610,26 @@ void RunServer(uint16_t port)
   builder.RegisterService(&healthService);
   builder.AddListeningPort(address, server_creds);
 
-  g_server = std::unique_ptr<Server>(builder.BuildAndStart());
+  g_server = std::shared_ptr<Server>(builder.BuildAndStart());
   logger->Info("Currency Server listening on port: " + address);
   
   // Service is now ready
   g_is_ready = true;
 
   // Register signal handlers for SIGINT and SIGTERM
-  std::signal(SIGINT, SignalHandler);
-  std::signal(SIGTERM, SignalHandler);
+  RegisterShutdownSignalHandlers(g_server);
 
   g_server->Wait();
   g_is_ready = false;
   g_is_healthy = false;
-  g_http_server->stop();
-  http_thread.join();
-  g_server->Shutdown();
+  if (g_http_server) {
+    g_http_server->stop();
+    http_thread.join();
+  }
+  // Final shutdown if not already done
+  if (g_server && !g_shutdown_initiated) {
+    g_server->Shutdown();
+  }
 }
 }
 
