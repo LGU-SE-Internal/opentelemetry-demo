@@ -17,6 +17,11 @@ WORKDIR /usr/src/app/
 COPY --from=builder /reqs /usr/local
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
 RUN playwright install --with-deps chromium
+
+# Create non-root user
+RUN useradd -u 10001 -m locust
+USER 10001
+
 COPY ./src/load-generator/locustfile.py .
 COPY ./src/load-generator/people.json .
 ENTRYPOINT ["locust", "--skip-log-setup"]
