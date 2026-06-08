@@ -25,6 +25,8 @@ import dev.openfeature.sdk.Value
 import dev.openfeature.sdk.OpenFeatureAPI
 import io.grpc.Server
 import io.grpc.ServerBuilder
+import io.grpc.Status
+import io.grpc.StatusRuntimeException
 import io.grpc.protobuf.services.HealthStatusManager
 import io.grpc.health.v1.HealthCheckResponse.ServingStatus
 import io.grpc.netty.shaded.io.grpc.netty.GrpcSslContexts
@@ -693,6 +695,108 @@ fun main() {
         } catch (e: Exception) {
             logger.error("Unexpected error in consumer loop", e)
         }
+    }
+}
+
+/**
+ * gRPC service implementation for fraud detection
+ */
+class FraudDetectionServiceImpl : FraudDetectionServiceGrpcKt.FraudDetectionServiceCoroutineImplBase() {
+    override suspend fun checkFraud(request: CheckFraudRequest): CheckFraudResponse {
+        validateRequest(request)
+
+        // Proceed with normal fraud scoring (existing logic would be here)
+        return CheckFraudResponse.newBuilder()
+            .setFraudScore(0.0f)
+            .setIsFraud(false)
+            .build()
+    }
+
+    private fun validateRequest(request: CheckFraudRequest) {
+        // AC-1: Validate required fields are non-empty
+        if (request.userId.isBlank()) {
+            throw Status.INVALID_ARGUMENT
+                .withDescription("user_id is required and cannot be empty")
+                .asRuntimeException()
+        }
+        if (request.cardNumber.isBlank()) {
+            throw Status.INVALID_ARGUMENT
+                .withDescription("card_number is required and cannot be empty")
+                .asRuntimeException()
+        }
+        if (request.orderId.isBlank()) {
+            throw Status.INVALID_ARGUMENT
+                .withDescription("order_id is required and cannot be empty")
+                .asRuntimeException()
+        }
+
+        // AC-2: Validate amount is greater than 0
+        if (request.amount <= 0) {
+            throw Status.INVALID_ARGUMENT
+                .withDescription("Transaction amount must be greater than 0")
+                .asRuntimeException()
+        }
+
+        // AC-3: Validate user ID is valid UUID v4
+        if (!isValidUUIDv4(request.userId)) {
+            throw Status.INVALID_ARGUMENT
+                .withDescription("User ID must be a valid UUID v4")
+                .asRuntimeException()
+        }
+
+        // AC-4: Validate order ID is 12-character uppercase alphanumeric
+        if (!isValidOrderId(request.orderId)) {
+            throw Status.INVALID_ARGUMENT
+                .withDescription("Order ID must be 12-character uppercase alphanumeric")
+                .asRuntimeException()
+        }
+
+        // AC-5: Validate card number is 13-19 digits only
+        if (!request.cardNumber.all { it.isDigit() }) {
+            throw Status.INVALID_ARGUMENT
+                .withDescription("Card number must be 13-19 digits with no separators")
+                .asRuntimeException()
+        }
+        if (request.cardNumber.length < 13 || request.cardNumber.length > 19) {
+            throw Status.INVALID_ARGUMENT
+                .withDescription("Card number must be 13-19 digits with no separators")
+                .asRuntimeException()
+        }
+
+        // AC-6: Validate card number passes Luhn check
+        if (!luhnCheck(request.cardNumber)) {
+            throw Status.INVALID_ARGUMENT
+                .withDescription("Card number is invalid (failed Luhn check)")
+                .asRuntimeException()
+        }
+    }
+
+    private fun isValidUUIDv4(uuid: String): Boolean {
+        val uuidV4Regex = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$".toRegex()
+        return uuidV4Regex.matches(uuid)
+    }
+
+    private fun isValidOrderId(orderId: String): Boolean {
+        if (orderId.length != 12) return false
+        val orderIdRegex = "^[A-Z0-9]{12}$".toRegex()
+        return orderIdRegex.matches(orderId)
+    }
+
+    private fun luhnCheck(cardNumber: String): Boolean {
+        var sum = 0
+        var alternate = false
+        for (i in cardNumber.length - 1 downTo 0) {
+            var n = cardNumber[i].digitToInt()
+            if (alternate) {
+                n *= 2
+                if (n > 9) {
+                    n -= 9
+                }
+            }
+            sum += n
+            alternate = !alternate
+        }
+        return sum % 10 == 0
     }
 }
 
