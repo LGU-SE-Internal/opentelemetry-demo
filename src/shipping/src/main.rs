@@ -9,8 +9,12 @@ use open_feature::provider::{FeatureProvider, NoOpProvider};
 use open_feature_flagd::{FlagdOptions, FlagdProvider};
 use opentelemetry::{global, metrics::{Counter, Meter}};
 use opentelemetry_instrumentation_actix_web::{RequestMetrics, RequestTracing};
+use rustls::{Certificate, ClientCertVerifierBuilder, RootCertStore, ServerConfig, ServerConnection};
+use rustls_pemfile::{certs, pkcs8_private_keys, read_one};
 use serde::Serialize;
 use std::env;
+use std::fs::File;
+use std::io::BufReader;
 use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::signal::unix::{signal, SignalKind};
@@ -19,6 +23,22 @@ mod telemetry_conf;
 use telemetry_conf::init_otel;
 mod shipping_service;
 use shipping_service::{get_quote, health_check, ship_order};
+
+// TLS configuration errors
+#[derive(Debug, thiserror::Error)]
+enum TlsConfigError {
+    #[error("MissingTlsComponent: both SHIPPING_SERVICE_TLS_CERT_PATH and SHIPPING_SERVICE_TLS_KEY_PATH are required for TLS configuration")]
+    MissingTlsComponent,
+    
+    #[error("FileReadError: failed to read {path}: {message}")]
+    FileReadError { path: String, message: String },
+    
+    #[error("InvalidCertificate: server TLS certificate/key pair is invalid or mismatched: {0}")]
+    InvalidCertificate(String),
+    
+    #[error("InvalidCaCertificate: mTLS CA certificate is invalid: {0}")]
+    InvalidCaCertificate(String),
+}
 
 // Rate limit error response structure
 #[derive(Serialize, Debug)]
@@ -88,6 +108,85 @@ impl RateLimitingMiddleware<IpAddr> for RateLimitMetricsMiddleware {
             opentelemetry::KeyValue::new("endpoint", endpoint),
         ]);
     }
+}
+
+// Load and validate TLS configuration from environment variables
+fn load_tls_config() -> Result<Option<ServerConfig>, TlsConfigError> {
+    let cert_path = env::var("SHIPPING_SERVICE_TLS_CERT_PATH").ok();
+    let key_path = env::var("SHIPPING_SERVICE_TLS_KEY_PATH").ok();
+    let ca_cert_path = env::var("SHIPPING_SERVICE_MTLS_CA_CERT_PATH").ok();
+    
+    // If neither cert nor key are set, return None (no TLS)
+    if cert_path.is_none() && key_path.is_none() {
+        return Ok(None);
+    }
+    
+    // If only one is set, return error
+    let (cert_path, key_path) = match (cert_path, key_path) {
+        (Some(c), Some(k)) => (c, k),
+        _ => return Err(TlsConfigError::MissingTlsComponent),
+    };
+    
+    // Read and parse server certificate
+    let cert_file = File::open(&cert_path).map_err(|e| TlsConfigError::FileReadError {
+        path: cert_path.clone(),
+        message: e.to_string(),
+    })?;
+    let mut cert_reader = BufReader::new(cert_file);
+    let cert_chain = certs(&mut cert_reader)
+        .map_err(|e| TlsConfigError::InvalidCertificate(format!("Failed to parse certificate: {e}")))?
+        .into_iter()
+        .map(Certificate)
+        .collect();
+    
+    // Read and parse server private key
+    let key_file = File::open(&key_path).map_err(|e| TlsConfigError::FileReadError {
+        path: key_path.clone(),
+        message: e.to_string(),
+    })?;
+    let mut key_reader = BufReader::new(key_file);
+    let mut keys = pkcs8_private_keys(&mut key_reader)
+        .map_err(|e| TlsConfigError::InvalidCertificate(format!("Failed to parse private key: {e}")))?;
+    
+    if keys.is_empty() {
+        return Err(TlsConfigError::InvalidCertificate("No private keys found in key file".to_string()));
+    }
+    let private_key = keys.remove(0);
+    
+    // Create base TLS config
+    let config = ServerConfig::builder()
+        .with_safe_defaults();
+    
+    let config = if let Some(ca_path) = ca_cert_path {
+        // mTLS enabled: load CA cert and require client auth
+        let ca_file = File::open(&ca_path).map_err(|e| TlsConfigError::FileReadError {
+            path: ca_path.clone(),
+            message: e.to_string(),
+        })?;
+        let mut ca_reader = BufReader::new(ca_file);
+        let ca_certs = certs(&mut ca_reader)
+            .map_err(|e| TlsConfigError::InvalidCaCertificate(format!("Failed to parse CA certificate: {e}")))?;
+        
+        let mut root_store = RootCertStore::empty();
+        for ca in ca_certs {
+            root_store.add(&Certificate(ca))
+                .map_err(|e| TlsConfigError::InvalidCaCertificate(format!("Failed to add CA to root store: {e}")))?;
+        }
+        
+        let client_auth = rustls::server::AllowAnyAuthenticatedClient::new(root_store);
+        config.with_client_cert_verifier(client_auth)
+    } else {
+        // No mTLS: no client auth required
+        config.with_no_client_auth()
+    };
+    
+    let mut server_config = config
+        .with_single_cert(cert_chain, private_key.into())
+        .map_err(|e| TlsConfigError::InvalidCertificate(format!("Certificate/key mismatch: {e}")))?;
+    
+    server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    
+    Ok(Some(server_config))
 }
 
 // Load and validate rate limit configuration from environment
@@ -283,16 +382,29 @@ async fn main() -> std::io::Result<()> {
     }
 
     let addr = format!("{}:{}", ip, port);
+    
+    // Load TLS configuration
+    let tls_config = load_tls_config().unwrap_or_else(|e| {
+        error!("TLS configuration error: {}", e);
+        std::process::exit(1);
+    });
+    
     info!(
         name = "ServerStartedSuccessfully",
         addr = addr.as_str(),
+        tls_enabled = tls_config.is_some(),
         message = "Shipping service is running"
     );
 
-    let server = HttpServer::new(move || app())
-        .shutdown_timeout(30)
-        .bind(&addr)?
-        .run();
+    let mut server = HttpServer::new(move || app())
+        .shutdown_timeout(30);
+    
+    server = match tls_config {
+        Some(config) => server.bind_rustls(&addr, config)?,
+        None => server.bind(&addr)?,
+    };
+    
+    let server = server.run();
 
     // Get server handle for shutdown
     let handle = server.handle();
