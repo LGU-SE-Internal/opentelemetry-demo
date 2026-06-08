@@ -63,6 +63,11 @@ dependencies {
 
         runtimeOnly "com.fasterxml.jackson.core:jackson-core:${jacksonVersion}",
                 "com.fasterxml.jackson.core:jackson-databind:${jacksonVersion}"
+
+        testImplementation "org.junit.jupiter:junit-jupiter-api:5.10.0",
+                "org.junit.jupiter:junit-jupiter-engine:5.10.0",
+                "io.grpc:grpc-testing:${grpcVersion}",
+                "io.grpc:grpc-netty:${grpcVersion}"
     }
 }
 
@@ -163,4 +168,11 @@ tasks.named('distZip') {
 }
 tasks.named('distTar') {
     mustRunAfter('compileTestJava')
+}
+
+test {
+    useJUnitPlatform()
+    testLogging {
+        events "PASSED", "FAILED", "SKIPPED"
+    }
 }
