@@ -84,6 +84,16 @@ spec:
           value: {{ .Values.prometheus.retentionTime | default "15d" | quote }}
         - name: PROMETHEUS_RETENTION_SIZE
           value: {{ .Values.prometheus.retentionSize | default "0" | quote }}
+        - name: PROMETHEUS_TLS_ENABLED
+          value: {{ .Values.prometheus.tls.enabled | default "false" | quote }}
+        - name: PROMETHEUS_TLS_CERT_PATH
+          value: {{ .Values.prometheus.tls.certPath | default "/etc/prometheus/tls/tls.crt" | quote }}
+        - name: PROMETHEUS_TLS_KEY_PATH
+          value: {{ .Values.prometheus.tls.keyPath | default "/etc/prometheus/tls/tls.key" | quote }}
+        - name: PROMETHEUS_MTLS_ENABLED
+          value: {{ .Values.prometheus.tls.mtls.enabled | default "false" | quote }}
+        - name: PROMETHEUS_CA_CERT_PATH
+          value: {{ .Values.prometheus.tls.caCertPath | default "/etc/prometheus/tls/ca.crt" | quote }}
         ports:
         - containerPort: 9090
           name: prometheus
@@ -113,6 +123,11 @@ spec:
           mountPath: /etc/prometheus
         - name: prometheus-storage
           mountPath: /prometheus
+        {{- if .Values.prometheus.tls.enabled }}
+        - name: prometheus-tls
+          mountPath: /etc/prometheus/tls
+          readOnly: true
+        {{- end }}
       volumes:
       - name: prometheus-config
         configMap:
@@ -120,3 +135,8 @@ spec:
       - name: prometheus-storage
         persistentVolumeClaim:
           claimName: prometheus-storage
+      {{- if and .Values.prometheus.tls.enabled .Values.prometheus.tls.existingSecret }}
+      - name: prometheus-tls
+        secret:
+          secretName: {{ .Values.prometheus.tls.existingSecret | quote }}
+      {{- end }}
