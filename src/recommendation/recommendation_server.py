@@ -30,6 +30,10 @@ from openfeature.contrib.provider.flagd import FlagdProvider
 
 from openfeature.contrib.hook.opentelemetry import TracingHook
 
+from limits import Limiter, RateLimitItemPerSecond
+from limits.storage import MemoryStorage
+from limits.strategies import FixedWindowRateLimiter
+
 # Local
 import logging
 import demo_pb2
@@ -94,6 +98,21 @@ class RecommendationService(demo_pb2_grpc.RecommendationServiceServicer):
     def ListRecommendations(self, request, context):
         span = trace.get_current_span()
         trace_id = format(span.get_span_context().trace_id, '016x') if span.is_recording() else "unknown"
+        
+        # Rate limiting check
+        if limiter is not None and rate_limit is not None:
+            if not limiter.check(rate_limit, "list_recommendations_endpoint"):
+                # Increment rate limit metric
+                rec_svc_metrics["rate_limited_requests"].add(1, {'endpoint': 'ListRecommendations', 'status': 'rate_limited'})
+                error_msg = "Rate limit exceeded. Try again later."
+                logger.warning(
+                    f"Rate limit exceeded for recommendation request (trace_id={trace_id})",
+                    extra={
+                        "event": "rate_limit_exceeded",
+                        "trace_id": trace_id
+                    }
+                )
+                context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, error_msg)
         
         # Helper function to strip control characters (AC-6)
         def sanitize_string(s):
@@ -453,9 +472,20 @@ if __name__ == "__main__":
     logger = logging.getLogger('main')
     logger.addHandler(handler)
 
-    catalog_addr = must_map_env('PRODUCT_CATALOG_ADDR')
-    product_catalog_stub, product_catalog_channel = create_product_catalog_client(catalog_addr, logger=logger)
+catalog_addr = must_map_env('PRODUCT_CATALOG_ADDR')
+product_catalog_stub, product_catalog_channel = create_product_catalog_client(catalog_addr, logger=logger)
 
-    # Start server
-    port = must_map_env('RECOMMENDATION_PORT')
-    serve(f'[::]:{port}', product_catalog_channel=product_catalog_channel, logger=logger)
+# Initialize rate limiter
+rate_limit_rps = int(os.environ.get('RECOMMENDATION_SERVICE_RATE_LIMIT_RPS', '0'))
+limiter = None
+rate_limit = None
+if rate_limit_rps > 0:
+    limiter = Limiter(
+        storage=MemoryStorage(),
+        strategy=FixedWindowRateLimiter()
+    )
+    rate_limit = RateLimitItemPerSecond(rate_limit_rps)
+
+# Start server
+port = must_map_env('RECOMMENDATION_PORT')
+serve(f'[::]:{port}', product_catalog_channel=product_catalog_channel, logger=logger)
