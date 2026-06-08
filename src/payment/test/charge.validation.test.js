@@ -9,7 +9,7 @@ jest.mock('../charge', () => jest.fn((amount, card) => ({ transaction_id: 'test-
 // Load the payment service proto
 const PROTO_PATH = path.join(__dirname, '../../../pb/demo.proto');
 const packageDefinition = protoLoader.loadSync(PROTO_PATH, { keepCase: true, longs: String, enums: String, defaults: true, oneofs: true });
-const otelDemoProto = grpc.loadPackageDefinition(packageDefinition).opentelemetry.proto.demo;
+const otelDemoProto = grpc.loadPackageDefinition(packageDefinition).oteldemo;
 
 let server;
 let client;

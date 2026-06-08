@@ -132,6 +132,11 @@ async function chargeServiceHandler(call, callback) {
       err.code = grpc.status.INVALID_ARGUMENT;
       throw err;
     }
+    if (!amount.currency_code) {
+      const err = new Error("Missing required field: amount.currency_code");
+      err.code = grpc.status.INVALID_ARGUMENT;
+      throw err;
+    }
     if (!credit_card_number) {
       const err = new Error("Missing required field: credit_card_number");
       err.code = grpc.status.INVALID_ARGUMENT;
@@ -167,8 +172,22 @@ async function chargeServiceHandler(call, callback) {
       throw err;
     }
 
+    // AC-3: Validate currency code format
+    const currencyCodeRegex = /^[A-Z]{3}$/;
+    if (!currencyCodeRegex.test(amount.currency_code)) {
+      const err = new Error("Invalid amount.currency_code: must be 3-letter uppercase ISO 4217 code");
+      err.code = grpc.status.INVALID_ARGUMENT;
+      throw err;
+    }
+
     // AC-4: Validate credit card number format and Luhn check
-    const cardNumberDigits = credit_card_number.replace(/\D/g, '');
+    const nonDigitChars = credit_card_number.replace(/\d/g, '');
+    if (nonDigitChars.length > 0) {
+      const err = new Error("Invalid credit_card_number: must be numeric string");
+      err.code = grpc.status.INVALID_ARGUMENT;
+      throw err;
+    }
+    const cardNumberDigits = credit_card_number;
     if (cardNumberDigits.length < 13 || cardNumberDigits.length > 19) {
       const err = new Error("Invalid credit_card_number: must be between 13 and 19 digits long");
       err.code = grpc.status.INVALID_ARGUMENT;
@@ -198,9 +217,14 @@ async function chargeServiceHandler(call, callback) {
       throw err;
     }
 
-    // AC-7: Validate CVV length
-    const cvvDigits = credit_card_cvv.replace(/\D/g, '');
-    if (cvvDigits.length < 3 || cvvDigits.length > 4) {
+    // AC-7: Validate CVV format
+    const cvvNonDigits = credit_card_cvv.replace(/\d/g, '');
+    if (cvvNonDigits.length > 0) {
+      const err = new Error("Invalid credit_card_cvv: must be numeric string");
+      err.code = grpc.status.INVALID_ARGUMENT;
+      throw err;
+    }
+    if (credit_card_cvv.length < 3 || credit_card_cvv.length > 4) {
       const err = new Error("Invalid credit_card_cvv: must be between 3 and 4 digits long");
       err.code = grpc.status.INVALID_ARGUMENT;
       throw err;
