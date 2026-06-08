@@ -45,5 +45,5 @@ CMD ["/bin/sh" , "-c" , "\
     fi\n\
   fi\n\
   # Generate nginx.conf from template with conditional TLS support\n\
-  envsubst '$OTEL_COLLECTOR_HOST $IMAGE_PROVIDER_PORT $OTEL_COLLECTOR_PORT_GRPC $OTEL_SERVICE_NAME $NGINX_RATE_LIMIT_RPS $IMAGE_PROVIDER_TLS_CERT_PATH $IMAGE_PROVIDER_TLS_KEY_PATH $IMAGE_PROVIDER_TLS_CA_CERT_PATH' < /nginx.conf.template > /etc/nginx/nginx.conf && \n\
+  envsubst '$OTEL_COLLECTOR_HOST $IMAGE_PROVIDER_PORT $OTEL_COLLECTOR_PORT_GRPC $OTEL_SERVICE_NAME $NGINX_RATE_LIMIT_RPS $IMAGE_PROVIDER_TLS_CERT_PATH $IMAGE_PROVIDER_TLS_KEY_PATH $IMAGE_PROVIDER_TLS_CA_CERT_PATH $NGINX_GRACEFUL_SHUTDOWN_TIMEOUT' < /nginx.conf.template > /etc/nginx/nginx.conf && \n\
   exec nginx -g 'daemon off;'\n"]
