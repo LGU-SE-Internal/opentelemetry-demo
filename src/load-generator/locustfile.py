@@ -49,6 +49,41 @@ TraceExporter = OTLPSpanExporter
 MetricExporter = OTLPMetricExporter
 LogExporter = OTLPLogExporter
 
+logger = logging.getLogger(__name__)
+
+# Load configurable parameters from environment variables with validation and defaults
+def get_env_int(var_name: str, default: int, min_value: int = 0) -> int:
+    """Helper to get integer environment variable with fallback and validation"""
+    value_str = os.environ.get(var_name)
+    if value_str is None:
+        return default
+    try:
+        value = int(value_str)
+        if value < min_value:
+            logger.warning(f"Invalid {var_name} value {value}: must be >= {min_value}, falling back to default {default}")
+            return default
+        return value
+    except (ValueError, TypeError):
+        logger.warning(f"Invalid {var_name} value '{value_str}': must be integer, falling back to default {default}")
+        return default
+
+# Graceful shutdown timeout
+GRACEFUL_SHUTDOWN_TIMEOUT = get_env_int("LOCUST_GRACEFUL_SHUTDOWN_TIMEOUT", 10)
+
+# User wait time between tasks
+USER_WAIT_TIME_MIN = get_env_int("LOCUST_USER_WAIT_TIME_MIN", 1)
+USER_WAIT_TIME_MAX = get_env_int("LOCUST_USER_WAIT_TIME_MAX", 10)
+if USER_WAIT_TIME_MAX < USER_WAIT_TIME_MIN:
+    logger.warning(f"Invalid user wait time range: max {USER_WAIT_TIME_MAX} < min {USER_WAIT_TIME_MIN}, falling back to defaults 1s-10s")
+    USER_WAIT_TIME_MIN = 1
+    USER_WAIT_TIME_MAX = 10
+
+# UI interaction delay
+UI_INTERACTION_DELAY = get_env_int("LOCUST_UI_INTERACTION_DELAY", 2000)
+
+# Page load request timeout
+PAGE_LOAD_TIMEOUT = get_env_int("LOCUST_PAGE_LOAD_TIMEOUT", 15000)
+
 def initialize_otel_exporters():
     # Read environment variables with defaults
     traces_endpoint = os.environ.get(
@@ -145,15 +180,15 @@ logging.info("Instrumentation complete - logs will now include trace context")
 
 def graceful_shutdown(signum: int, frame: Optional[FrameType], environment) -> NoReturn:
     """Signal handler for graceful shutdown sequence"""
-    logging.info("Starting graceful shutdown (10s timeout)...")
+    logging.info(f"Starting graceful shutdown ({GRACEFUL_SHUTDOWN_TIMEOUT}s timeout)...")
     
     # Stop Locust runner to prevent new requests/users
     if environment.runner:
         environment.runner.stop()
     
-    # Wait for in-flight requests to complete, up to 10s
+    # Wait for in-flight requests to complete, up to configured timeout
     start_time = time.time()
-    timeout = 10
+    timeout = GRACEFUL_SHUTDOWN_TIMEOUT
     
     while time.time() - start_time < timeout:
         # Check if there are any running users
@@ -185,7 +220,7 @@ def graceful_shutdown(signum: int, frame: Optional[FrameType], environment) -> N
     
     # Check if we timed out
     if time.time() - start_time >= timeout:
-        logging.warning("Graceful shutdown timed out after 10s, forcing exit")
+        logging.warning(f"Graceful shutdown timed out after {GRACEFUL_SHUTDOWN_TIMEOUT}s, forcing exit")
         sys.exit(1)
     
     logging.info("Graceful shutdown completed successfully")
@@ -228,7 +263,7 @@ people_file = open('people.json')
 people = json.load(people_file)
 
 class WebsiteUser(HttpUser):
-    wait_time = between(1, 10)
+    wait_time = between(USER_WAIT_TIME_MIN, USER_WAIT_TIME_MAX)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -367,7 +402,7 @@ if browser_traffic_enabled:
                     await page.route('**/*', add_baggage_header)
                     await page.goto("/cart", wait_until="domcontentloaded")
                     await page.select_option('[name="currency_code"]', 'CHF')
-                    await page.wait_for_timeout(2000)  # giving the browser time to export the traces
+                    await page.wait_for_timeout(UI_INTERACTION_DELAY)  # giving the browser time to export the traces
                     logging.info("Currency changed to CHF")
                 except Exception as e:
                     logging.error(f"Error in change currency task: {str(e)}")
@@ -381,17 +416,17 @@ if browser_traffic_enabled:
                     page.on("console", lambda msg: print(msg.text))
                     await page.route('**/*', add_baggage_header)
                     await page.goto("/", wait_until="domcontentloaded")
-                    # Wait for Roof Binoculars image to load (awaiting successful XHR response in less than 15 seconds)
+                    # Wait for Roof Binoculars image to load (awaiting successful XHR response in less than configured timeout)
                     await page.wait_for_event(
                         "response",
                         predicate=lambda r: '/images/products/RoofBinoculars.jpg' in r.url and r.status == 200,
-                        timeout=15000
+                        timeout=PAGE_LOAD_TIMEOUT
                     )
                     await page.click('p:has-text("Roof Binoculars")')
                     await page.wait_for_load_state("domcontentloaded")
                     await page.click('button:has-text("Add To Cart")')
                     await page.wait_for_load_state("domcontentloaded")
-                    await page.wait_for_timeout(2000)  # giving the browser time to export the traces
+                    await page.wait_for_timeout(UI_INTERACTION_DELAY)  # giving the browser time to export the traces
                     logging.info("Product added to cart successfully")
                 except Exception as e:
                     logging.error(f"Error in add to cart task: {str(e)}")
@@ -403,6 +438,10 @@ async def add_baggage_header(route: Route, request: Request):
         'baggage': ', '.join(filter(None, (existing_baggage, 'synthetic_request=true')))
     }
     await route.continue_(headers=headers)
+
+# Aliases for test compatibility
+graceful_shutdown_timeout = GRACEFUL_SHUTDOWN_TIMEOUT
+wait_time = WebsiteUser.wait_time
 
 # Add health and readiness probe endpoints
 from locust import events
