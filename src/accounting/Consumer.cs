@@ -69,13 +69,74 @@ internal class Consumer : IAsyncDisposable, IDisposable
     public int MaxRetryDelayMs { get; }
     public string DlqTopicName { get; }
     public int ShutdownTimeoutSeconds { get; }
-    public int InFlightMessagesCount { 
-        get 
-        { 
-            lock (_lockObj) return _inFlightMessages; 
-        } 
-    }
+        public async Task StopAsync(CancellationToken cancellationToken)
+        {
+            _logger.LogInformation("Stopping Kafka consumer...");
+            
+            // Stop consuming new messages immediately
+            _consumer.Pause(_consumer.Assignment);
+            _isListening = false;
 
+            // Wait for all in-flight messages to complete or until cancellation
+            while (InFlightMessagesCount > 0 && !cancellationToken.IsCancellationRequested)
+            {
+                _logger.LogInformation("Waiting for {InFlightCount} in-flight messages to complete...", InFlightMessagesCount);
+                await Task.Delay(100, cancellationToken);
+            }
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                _logger.LogWarning("Stop operation canceled, {InFlightCount} messages may not have completed processing", InFlightMessagesCount);
+            }
+            else
+            {
+                _logger.LogInformation("All in-flight messages completed");
+            }
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            _logger.LogInformation("Disposing Kafka consumer...");
+            
+            // Commit any pending offsets
+            try
+            {
+                _consumer.Commit();
+                _logger.LogInformation("Offsets committed successfully");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to commit offsets during disposal");
+            }
+
+            // Clean up consumer and producer resources
+            _consumer.Dispose();
+            _dlqProducer.Dispose();
+
+            await DisposeDbContextAsync();
+            
+            GC.SuppressFinalize(this);
+        }
+
+        private async Task DisposeDbContextAsync()
+        {
+            // Clean up database context and pending transactions
+            using var dbContext = new DBContext();
+            if (dbContext.Database.CurrentTransaction != null)
+            {
+                try
+                {
+                    await dbContext.Database.CommitTransactionAsync();
+                    _logger.LogInformation("Pending database transaction committed");
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to commit database transaction, rolling back");
+                    await dbContext.Database.RollbackTransactionAsync();
+                }
+            }
+            await dbContext.DisposeAsync();
+        }
     // Test hooks
     public Func<ConsumeResult<string, byte[]>, CancellationToken, Task>? ProcessMessage { get; set; }
     public Func<TimeSpan, CancellationToken, Task> DelayFunction { get; set; } = Task.Delay;
@@ -159,38 +220,6 @@ internal class Consumer : IAsyncDisposable, IDisposable
         _logger = new LoggerFactory().CreateLogger<Consumer>();
     }
 
-    public async Task StopAsync(CancellationToken shutdownToken)
-    {
-        _logger.LogInformation("Initiating graceful shutdown of Kafka consumer");
-        _isListening = false;
-        
-        // Wait for in-flight messages to complete or timeout
-        var shutdownDeadline = DateTimeOffset.UtcNow.AddSeconds(ShutdownTimeoutSeconds);
-        while (DateTimeOffset.UtcNow < shutdownDeadline && !shutdownToken.IsCancellationRequested)
-        {
-            if (InFlightMessagesCount == 0)
-            {
-                break;
-            }
-            await Task.Delay(100, shutdownToken);
-        }
-
-        if (InFlightMessagesCount == 0)
-        {
-            _logger.LogInformation("Accounting service shutdown completed successfully, all in-flight messages processed and resources cleaned up");
-        }
-        else
-        {
-            _logger.LogWarning("Accounting service shutdown timed out after {TimeoutSeconds} seconds, {PendingMessageCount} in-flight messages were not completed, resources force closed",
-                ShutdownTimeoutSeconds, InFlightMessagesCount);
-        }
-    }
-
-    public async ValueTask DisposeAsync()
-    {
-        Dispose();
-        await ValueTask.CompletedTask;
-    }
 
     public async Task StartListening(CancellationToken cancellationToken = default)
     {

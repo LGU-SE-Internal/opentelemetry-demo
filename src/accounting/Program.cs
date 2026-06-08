@@ -44,13 +44,26 @@ builder.Services.AddHealthChecks()
 
 // Add our Kafka consumer service
 builder.Services.AddSingleton<Consumer>(sp => new Consumer(sp.GetRequiredService<ILogger<Consumer>>(), sp.GetRequiredService<IConfiguration>()));
+// Add graceful shutdown service
+builder.Services.AddSingleton<IGracefulShutdownService, GracefulShutdownService>();
 
 var app = builder.Build();
+
+// Get graceful shutdown service and register handlers
+var shutdownService = app.Services.GetRequiredService<IGracefulShutdownService>();
+shutdownService.RegisterSignalHandlers();
 
 // Map /health endpoint
 app.MapGet("/health", async context =>
 {
     context.Response.ContentType = "application/json";
+    // Return 503 if shutdown has been initiated
+    if (shutdownService.ShutdownInitiatedToken.IsCancellationRequested)
+    {
+        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+        await context.Response.WriteAsync(JsonSerializer.Serialize(new { status = "ShuttingDown" }));
+        return;
+    }
     context.Response.StatusCode = StatusCodes.Status200OK;
     await context.Response.WriteAsync(JsonSerializer.Serialize(new { status = "Healthy" }));
 });
@@ -105,12 +118,12 @@ app.MapGet("/ready", async context =>
 
 // Start Kafka consumer in background
 var consumer = app.Services.GetRequiredService<Consumer>();
-var listeningTask = Task.Run(() => consumer.StartListening(app.Lifetime.ApplicationStopping), app.Lifetime.ApplicationStopping);
+var listeningTask = Task.Run(() => consumer.StartListening(shutdownService.ShutdownInitiatedToken), shutdownService.ShutdownInitiatedToken);
 
-// Register shutdown handler
-app.Lifetime.ApplicationStopping.Register(async () =>
+// Register consumer shutdown operations with graceful shutdown service
+shutdownService.RegisterShutdownOperation(async ct =>
 {
-    await consumer.StopAsync(app.Lifetime.ApplicationStopping);
+    await consumer.StopAsync(ct);
     await consumer.DisposeAsync();
 });
 
