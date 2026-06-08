@@ -14,10 +14,16 @@ def init_metrics(meter):
     rate_limited_requests = meter.create_counter(
         'recommendation_service_rate_limited_requests_total', unit='1', description="Total number of requests rejected due to rate limiting on the ListRecommendations endpoint."
     )
+    
+    # Product catalog retry attempts counter
+    product_catalog_retry_attempts = meter.create_counter(
+        'recommendation_service.product_catalog.retry_attempts', unit='1', description="Counts the number of retry attempts for ProductCatalogService ListProducts calls."
+    )
 
     rec_svc_metrics = {
         "demo.recommendation.requests": recommendation_requests,
         "rate_limited_requests": rate_limited_requests,
+        "product_catalog_retry_attempts": product_catalog_retry_attempts,
     }
 
     return rec_svc_metrics

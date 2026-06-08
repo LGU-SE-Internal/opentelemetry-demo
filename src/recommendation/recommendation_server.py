@@ -47,52 +47,88 @@ from metrics import (
 cached_ids = []
 first_run = True
 
-# gRPC interceptor to log retry attempts for ProductCatalogService ListProducts calls
-class RetryLoggingInterceptor(grpc.UnaryUnaryClientInterceptor):
-    def __init__(self, logger):
-        self.logger = logger
+# Retry configuration from environment variables
+RETRY_MAX_ATTEMPTS = int(os.environ.get('RECOMMENDATION_SERVICE_PRODUCT_CATALOG_RETRY_MAX_ATTEMPTS', '3'))
+RETRY_INITIAL_BACKOFF_MS = int(os.environ.get('RECOMMENDATION_SERVICE_PRODUCT_CATALOG_RETRY_INITIAL_BACKOFF_MS', '100'))
+RETRY_BACKOFF_MULTIPLIER = float(os.environ.get('RECOMMENDATION_SERVICE_PRODUCT_CATALOG_RETRY_BACKOFF_MULTIPLIER', '2'))
+RETRY_MAX_BACKOFF_MS = int(os.environ.get('RECOMMENDATION_SERVICE_PRODUCT_CATALOG_RETRY_MAX_BACKOFF_MS', '2000'))
 
-    def intercept_unary_unary(self, continuation, client_call_details, request):
-        # Only intercept ListProducts calls
-        if client_call_details.method.endswith("oteldemo.ProductCatalogService/ListProducts"):
-            span = trace.get_current_span()
-            attempt = 1
-            def on_retry(call_details, response, error):
-                nonlocal attempt
-                if error is not None:
-                    status_code = error.code().name
-                    status_details = error.details()
-                    # Calculate backoff delay (exponential with jitter: 100ms * 2^(attempt-1) ± 20%)
-                    base_delay = 100 * (2 ** (attempt - 1))
-                    jitter = random.uniform(-0.2, 0.2)
-                    backoff_ms = int(base_delay * (1 + jitter))
-                    
-                    # Get request ID from trace span if available
-                    request_id = span.get_span_context().trace_id if span.is_recording() else None
-                    
-                    self.logger.warning(
-                        f"Product catalog ListProducts retry attempt {attempt} after {status_code} error",
-                        extra={
-                            "event": "product_catalog_retry_attempt",
-                            "attempt_number": attempt,
-                            "error_code": status_code,
-                            "error_message": status_details,
-                            "backoff_delay_ms": backoff_ms,
-                            "request_id": request_id
-                        }
-                    )
-                    attempt += 1
-            # Add retry callback to call options
-            if client_call_details.options is None:
-                client_call_details.options = []
-            client_call_details.options.append(("grpc.on_retry", on_retry))
-        
-        # Add per-call 5s timeout for ListProducts
-        if client_call_details.method.endswith("oteldemo.ProductCatalogService/ListProducts"):
-            if client_call_details.timeout is None:
-                client_call_details.timeout = 5  # 5 seconds per attempt
-        
-        return continuation(client_call_details, request)
+# Eligible retry status codes
+RETRYABLE_STATUS_CODES = {
+    grpc.StatusCode.UNAVAILABLE,
+    grpc.StatusCode.RESOURCE_EXHAUSTED,
+    grpc.StatusCode.INTERNAL
+}
+
+def list_products_with_retry(client: demo_pb2_grpc.ProductCatalogServiceStub, request: demo_pb2.Empty, metadata = None) -> demo_pb2.ListProductsResponse:
+    """
+    Wraps ProductCatalogService.ListProducts gRPC call with exponential backoff retry logic.
+    
+    Args:
+        client: gRPC stub for ProductCatalogService
+        request: ListProductsRequest object
+        metadata: Optional gRPC call metadata
+    
+    Returns:
+        ListProductsResponse object from successful call
+    
+    Raises:
+        gRPC error: Original error from final failed attempt, with additional context that max retries were exhausted
+    """
+    import time
+    
+    attempt = 0
+    last_error = None
+    
+    while attempt <= RETRY_MAX_ATTEMPTS:
+        try:
+            return client.ListProducts(request, metadata=metadata)
+        except grpc.RpcError as e:
+            last_error = e
+            status_code = e.code()
+            
+            # Check if we should retry
+            if status_code not in RETRYABLE_STATUS_CODES or attempt >= RETRY_MAX_ATTEMPTS:
+                break
+            
+            attempt += 1
+            
+            # Calculate backoff duration
+            backoff_ms = min(
+                RETRY_INITIAL_BACKOFF_MS * (RETRY_BACKOFF_MULTIPLIER ** (attempt - 1)),
+                RETRY_MAX_BACKOFF_MS
+            )
+            backoff_sec = backoff_ms / 1000.0
+            
+            # Log the retry attempt
+            logger.info(
+                f"ProductCatalog ListProducts retry attempt {attempt}/{RETRY_MAX_ATTEMPTS} after {status_code.name} error, backing off for {backoff_ms}ms",
+                extra={
+                    "attempt_number": attempt,
+                    "status_code": status_code.name,
+                    "backoff_ms": backoff_ms,
+                    "max_attempts": RETRY_MAX_ATTEMPTS
+                }
+            )
+            
+            # Increment retry metric
+            rec_svc_metrics["product_catalog_retry_attempts"].add(
+                1,
+                {
+                    "status_code": status_code.name,
+                    "attempt_number": str(attempt)
+                }
+            )
+            
+            # Wait before retrying
+            time.sleep(backoff_sec)
+    
+    # If we exhausted all retries, raise the last error with context
+    if last_error is not None:
+        context_message = f"Max retry attempts ({RETRY_MAX_ATTEMPTS}) exhausted for ProductCatalog ListProducts call: {last_error.details()}"
+        # Augment the error details
+        setattr(last_error, "_details", context_message)
+        raise last_error
 
 class RecommendationService(demo_pb2_grpc.RecommendationServiceServicer):
     def ListRecommendations(self, request, context):
@@ -216,7 +252,7 @@ def get_product_list(request_product_ids, result_size=5):
                 first_run = False
                 span.set_attribute("demo.recommendation.cache_hit", False)
                 logger.info("get_product_list: cache miss")
-                cat_response = product_catalog_stub.ListProducts(demo_pb2.Empty())
+                cat_response = list_products_with_retry(product_catalog_stub, demo_pb2.Empty())
                 response_ids = [x.id for x in cat_response.products]
                 cached_ids = cached_ids + response_ids
                 cached_ids = cached_ids + cached_ids[:len(cached_ids) // 4]
@@ -227,7 +263,7 @@ def get_product_list(request_product_ids, result_size=5):
                 product_ids = cached_ids
         else:
             span.set_attribute("demo.feature_flag.recommendation_cache", False)
-            cat_response = product_catalog_stub.ListProducts(demo_pb2.Empty())
+            cat_response = list_products_with_retry(product_catalog_stub, demo_pb2.Empty())
             product_ids = [x.id for x in cat_response.products]
 
         span.set_attribute("demo.product.count", len(product_ids))
@@ -283,26 +319,19 @@ def load_cert_file(path: str) -> bytes:
 
 def create_product_catalog_client(catalog_addr: str, logger=None):
     """Create ProductCatalogService client with optional TLS/mTLS configuration."""
-    # Configure gRPC channel with resilience settings for ProductCatalogService
+    # Configure gRPC channel settings for ProductCatalogService
     service_config = json.dumps({
         "methodConfig": [
             {
                 "name": [
                     { "service": "oteldemo.ProductCatalogService", "method": "ListProducts" }
                 ],
-                "timeout": "10s",
-                "retryPolicy": {
-                    "maxAttempts": 3,
-                    "initialBackoff": "0.1s",
-                    "maxBackoff": "1s",
-                    "backoffMultiplier": 2,
-                    "retryableStatusCodes": ["UNAVAILABLE", "RESOURCE_EXHAUSTED", "ABORTED", "INTERNAL", "DEADLINE_EXCEEDED"]
-                }
+                "timeout": "10s"
             }
         ]
     })
     channel_options = [
-        ("grpc.enable_retries", 1),
+        ("grpc.enable_retries", 0),  # Disable built-in retries since we implement our own
         ("grpc.service_config", service_config),
         ("grpc.max_receive_message_length", -1),
     ]
