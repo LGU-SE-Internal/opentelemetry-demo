@@ -121,43 +121,104 @@ func NewGRPCServerWithTLS(cfg TLSConfig) (*grpc.Server, error) {
 	opts := []grpc.ServerOption{
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 	}
-	
+
 	if !cfg.Enabled {
 		// Return plaintext server
 		return grpc.NewServer(opts...), nil
 	}
-	
+
 	// Load server cert and key
 	cert, err := tls.LoadX509KeyPair(cfg.CertPath, cfg.KeyPath)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrTLSInvalidCert, err)
 	}
-	
+
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		MinVersion:   tls.VersionTLS12,
 	}
-	
+
 	if cfg.ClientAuthRequired {
 		// Load CA certs for client authentication
 		caCert, err := os.ReadFile(cfg.CAPath)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrTLSInvalidCA, err)
 		}
-		
+
 		certPool := x509.NewCertPool()
 		if !certPool.AppendCertsFromPEM(caCert) {
 			return nil, ErrTLSInvalidCA
 		}
-		
+
 		tlsConfig.ClientCAs = certPool
 		tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
 	}
-	
+
 	// Add TLS credentials to server options
 	opts = append(opts, grpc.Creds(credentials.NewTLS(tlsConfig)))
-	
+
 	return grpc.NewServer(opts...), nil
+}
+
+// runServer starts the gRPC server on the specified port.
+// Returns when the context is cancelled or an error occurs during startup.
+func runServer(ctx context.Context, port int) error {
+	// Load TLS configuration
+	tlsCfg, err := LoadTLSConfigFromEnv()
+	if err != nil {
+		return fmt.Errorf("invalid TLS configuration: %w", err)
+	}
+
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return fmt.Errorf("TCP listen failed: %w", err)
+	}
+
+	srv, err := NewGRPCServerWithTLS(tlsCfg)
+	if err != nil {
+		return fmt.Errorf("failed to create gRPC server: %w", err)
+	}
+
+	svc := &productCatalog{}
+	reflection.Register(srv)
+	pb.RegisterProductCatalogServiceServer(srv, svc)
+	healthpb.RegisterHealthServer(srv, svc)
+
+	// Create a custom handler to route gRPC and HTTP requests
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ProtoMajor == 2 && strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc") {
+			srv.ServeHTTP(w, r)
+		} else {
+			http.DefaultServeMux.ServeHTTP(w, r)
+		}
+	})
+
+	httpSrv := &http.Server{
+		Handler: handler,
+	}
+
+	errChan := make(chan error, 1)
+	go func() {
+		if err := httpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errChan <- fmt.Errorf("server serve failed: %w", err)
+		}
+		close(errChan)
+	}()
+
+	select {
+	case <-ctx.Done():
+		// Gracefully stop gRPC server first
+		srv.GracefulStop()
+		// Then shutdown HTTP server
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+			return fmt.Errorf("HTTP server shutdown failed: %w", err)
+		}
+		return nil
+	case err := <-errChan:
+		return err
+	}
 }
 
 func validateGetProductRequest(req *pb.GetProductRequest) error {
