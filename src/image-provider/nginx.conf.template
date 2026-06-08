@@ -48,6 +48,13 @@ http {
             allow all;
         }
 
+        location /healthz {
+            access_log off;
+            allow all;
+            default_type text/plain;
+            return 200 '';
+        }
+
         location /health {
             access_log off;
             allow all;
@@ -116,6 +123,13 @@ http {
             stub_status on;
             access_log  on;           
             allow all;
+        }
+
+        location /healthz {
+            access_log off;
+            allow all;
+            default_type text/plain;
+            return 200 '';
         }
 
         location /health {
