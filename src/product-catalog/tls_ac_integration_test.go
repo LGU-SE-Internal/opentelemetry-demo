@@ -14,7 +14,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
-	pb "github.com/open-telemetry/opentelemetry-demo/src/product-catalog/genproto/oteldemo"
+	pb "github.com/opentelemetry/opentelemetry-demo/src/product-catalog/genproto/oteldemo"
 )
 
 const testPort = 3551

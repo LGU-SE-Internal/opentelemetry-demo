@@ -85,28 +85,30 @@ type TLSConfig struct {
 func LoadTLSConfigFromEnv() (TLSConfig, error) {
 	var cfg TLSConfig
 	
-	enabledStr := os.Getenv("PRODUCT_CATALOG_GRPC_TLS_ENABLED")
+	enabledStr := os.Getenv("PRODUCT_CATALOG_TLS_ENABLED")
 	cfg.Enabled = strings.ToLower(enabledStr) == "true"
 	
-	cfg.CertPath = os.Getenv("PRODUCT_CATALOG_GRPC_TLS_CERT_PATH")
-	cfg.KeyPath = os.Getenv("PRODUCT_CATALOG_GRPC_TLS_KEY_PATH")
-	cfg.CAPath = os.Getenv("PRODUCT_CATALOG_GRPC_TLS_CA_PATH")
+	cfg.CertPath = os.Getenv("PRODUCT_CATALOG_TLS_CERT_PATH")
+	cfg.KeyPath = os.Getenv("PRODUCT_CATALOG_TLS_KEY_PATH")
+	cfg.CAPath = os.Getenv("PRODUCT_CATALOG_MTLS_CA_CERT_PATH")
 	
-	clientAuthStr := os.Getenv("PRODUCT_CATALOG_GRPC_TLS_CLIENT_AUTH_REQUIRED")
+	clientAuthStr := os.Getenv("PRODUCT_CATALOG_MTLS_ENABLED")
 	cfg.ClientAuthRequired = strings.ToLower(clientAuthStr) == "true"
 	
 	// Validate config
 	if cfg.Enabled {
-		if cfg.CertPath == "" {
-			return cfg, ErrTLSConfigMissingCert
-		}
-		if cfg.KeyPath == "" {
-			return cfg, ErrTLSConfigMissingKey
+		if cfg.CertPath == "" || cfg.KeyPath == "" {
+			return cfg, errors.New("TLS enabled but certificate or private key path not provided")
 		}
 	}
 	
-	if cfg.ClientAuthRequired && cfg.CAPath == "" {
-		return cfg, ErrTLSConfigMissingCA
+	if cfg.ClientAuthRequired {
+		if !cfg.Enabled {
+			return cfg, errors.New("mTLS enabled but TLS is not enabled")
+		}
+		if cfg.CAPath == "" {
+			return cfg, errors.New("mTLS enabled but CA certificate path not provided")
+		}
 	}
 	
 	return cfg, nil
