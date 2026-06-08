@@ -67,6 +67,7 @@ dependencies {
         testImplementation "org.junit.jupiter:junit-jupiter-api:5.10.0",
                 "org.junit.jupiter:junit-jupiter-engine:5.10.0",
                 "io.grpc:grpc-testing:${grpcVersion}",
+                "io.grpc:grpc-inprocess:${grpcVersion}",
                 "io.grpc:grpc-netty:${grpcVersion}"
     }
 }

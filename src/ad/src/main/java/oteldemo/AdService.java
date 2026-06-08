@@ -322,7 +322,7 @@ public final class AdService {
     }
 
     NettyServerBuilder serverBuilder = NettyServerBuilder.forPort(port)
-        .intercept(new RateLimitInterceptor(rateLimitRps))
+        .intercept(new RateLimitInterceptor())
         .addService(new AdServiceImpl())
         .addService(healthMgr.getHealthService());
 

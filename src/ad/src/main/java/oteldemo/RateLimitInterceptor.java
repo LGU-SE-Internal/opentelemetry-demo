@@ -18,11 +18,29 @@ import java.util.concurrent.ConcurrentHashMap;
 public class RateLimitInterceptor implements ServerInterceptor {
     private static final Logger logger = LogManager.getLogger(RateLimitInterceptor.class);
     private static final String X_FORWARDED_FOR_HEADER = "x-forwarded-for";
-    private final Map<String, Bucket> clientBuckets = new ConcurrentHashMap<>();
+    private static final int DEFAULT_RATE_LIMIT_RPS = 100;
     private final int rateLimitRps;
+    private final Map<String, Bucket> clientBuckets = new ConcurrentHashMap<>();
 
-    public RateLimitInterceptor(int rateLimitRps) {
-        this.rateLimitRps = rateLimitRps;
+    public RateLimitInterceptor() {
+        int configuredRate = DEFAULT_RATE_LIMIT_RPS;
+        String envVar = System.getenv("AD_SERVICE_RATE_LIMIT_RPS");
+        if (envVar != null && !envVar.isBlank()) {
+            try {
+                configuredRate = Integer.parseInt(envVar.trim());
+                if (configuredRate <= 0) {
+                    logger.warn("Invalid AD_SERVICE_RATE_LIMIT_RPS value: {} (must be positive integer), falling back to default: {}",
+                            envVar, DEFAULT_RATE_LIMIT_RPS);
+                    configuredRate = DEFAULT_RATE_LIMIT_RPS;
+                }
+            } catch (NumberFormatException e) {
+                logger.warn("Failed to parse AD_SERVICE_RATE_LIMIT_RPS value: {}, falling back to default: {}",
+                        envVar, DEFAULT_RATE_LIMIT_RPS);
+                configuredRate = DEFAULT_RATE_LIMIT_RPS;
+            }
+        }
+        this.rateLimitRps = configuredRate;
+        logger.info("Rate limit interceptor initialized with {} RPS per client IP", rateLimitRps);
     }
 
     @Override
@@ -37,31 +55,37 @@ public class RateLimitInterceptor implements ServerInterceptor {
         if (bucket.tryConsume(1)) {
             return next.startCall(call, headers);
         } else {
-            // Rate limit exceeded
-            logger.warn("Rate limit exceeded for client IP: {}, method: {}, rate limit: {} RPS",
+            long currentCount = rateLimitRps - bucket.getAvailableTokens();
+            logger.warn("Rate limit exceeded for client IP: {}, method: {}, current count: {}, limit: {}",
                     clientIp,
                     call.getMethodDescriptor().getFullMethodName(),
+                    currentCount,
                     rateLimitRps);
 
             Status status = Status.RESOURCE_EXHAUSTED
-                    .withDescription("Rate limit exceeded: too many requests from client IP " + clientIp);
+                    .withDescription(String.format("Rate limit exceeded: too many requests from client IP %s", clientIp));
             call.close(status, new Metadata());
             return new ServerCall.Listener<>() {};
         }
     }
 
     private String extractClientIp(ServerCall<?, ?> call, Metadata headers) {
-        String forwardedFor = headers.get(Metadata.Key.of(X_FORWARDED_FOR_HEADER, Metadata.ASCII_STRING_MARSHALLER));
-        if (forwardedFor != null && !forwardedFor.isEmpty()) {
-            // Get first IP in X-Forwarded-For list (client IP)
-            return forwardedFor.split(",")[0].trim();
+        String xForwardedFor = headers.get(Metadata.Key.of(X_FORWARDED_FOR_HEADER, Metadata.ASCII_STRING_MARSHALLER));
+        if (xForwardedFor != null && !xForwardedFor.isBlank()) {
+            String[] ips = xForwardedFor.split(",");
+            if (ips.length > 0) {
+                return ips[0].trim();
+            }
         }
-        // Fall back to remote address
-        return call.getAttributes().get(Grpc.TRANSPORT_ATTR_REMOTE_ADDR).toString().split(":")[0];
+        return call.getAttributes().get(Grpc.TRANSPORT_ATTR_REMOTE_ADDR).toString();
     }
 
     private Bucket createNewBucket() {
         Bandwidth limit = Bandwidth.classic(rateLimitRps, Refill.greedy(rateLimitRps, Duration.ofSeconds(1)));
         return Bucket.builder().addLimit(limit).build();
+    }
+
+    public int getRateLimitRps() {
+        return rateLimitRps;
     }
 }
