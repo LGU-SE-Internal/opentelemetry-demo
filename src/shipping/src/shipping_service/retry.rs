@@ -1,117 +1,117 @@
-// Copyright The OpenTelemetry Authors
-// SPDX-License-Identifier: Apache-2.0
+use std::future::Future;
+use std::pin::Pin;
+use std::time::{Duration, Instant};
+use std::env;
 
-use std::{env, time::Duration};
-use anyhow::Error;
 use tracing::{info, error};
-use tokio::time::sleep;
 
-/// Retry configuration struct holding retry policy settings
-#[derive(Debug, Clone)]
+/// Trait for errors that can be retried
+pub trait RetryableError: std::fmt::Display + std::fmt::Debug {
+    /// Return true if this error is transient and should be retried
+    fn is_retryable(&self) -> bool;
+}
+
+/// Configuration for retry logic
+#[derive(Debug, Clone, Copy)]
 pub struct RetryConfig {
+    /// Maximum number of retry attempts
     pub max_retries: u32,
+    /// Initial delay before first retry in milliseconds
     pub initial_delay_ms: u32,
+    /// Jitter factor to add randomness to retry delays (0.0 to 1.0)
     pub jitter_factor: f64,
 }
 
 impl Default for RetryConfig {
     fn default() -> Self {
-        Self::from_env()
+        Self {
+            max_retries: 3,
+            initial_delay_ms: 100,
+            jitter_factor: 0.1,
+        }
     }
 }
 
 impl RetryConfig {
+    /// Create RetryConfig from environment variables
     pub fn from_env() -> Self {
-        // Read environment variables with defaults
         let max_retries = env::var("QUOTE_SERVICE_MAX_RETRIES")
             .ok()
-            .and_then(|s| s.parse::<u32>().ok())
+            .and_then(|v| v.parse().ok())
             .unwrap_or(3);
         
         let initial_delay_ms = env::var("QUOTE_SERVICE_RETRY_INITIAL_DELAY_MS")
             .ok()
-            .and_then(|s| s.parse::<u32>().ok())
+            .and_then(|v| v.parse().ok())
             .unwrap_or(100);
         
         Self {
             max_retries,
             initial_delay_ms,
-            jitter_factor: 0.0,
+            ..Default::default()
         }
     }
 }
 
-/// Trait to determine if an error is retryable
-pub trait RetryableError {
-    fn is_retryable(&self) -> bool;
-}
-
-impl RetryableError for Error {
-    fn is_retryable(&self) -> bool {
-        // Check if the error wraps a retryable error type
-        if let Some(send_err) = self.downcast_ref::<awc::error::SendRequestError>() {
-            return send_err.is_retryable();
-        }
-        // Other error types are not retryable by default
-        false
-    }
-}
-
-/// Executes an async function with exponential backoff retry logic
-pub async fn with_retry<F, Fut, T, E>(config: RetryConfig, mut f: F) -> Result<T, E>
+/// Execute an operation with exponential backoff retry logic
+pub async fn with_retry<T, E, F>(
+    config: RetryConfig,
+    mut operation: impl FnMut() -> F,
+) -> Result<T, E>
 where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<T, E>>,
-    E: std::fmt::Display + RetryableError,
+    E: RetryableError,
+    F: Future<Output = Result<T, E>>,
 {
     let mut attempt = 0;
-    let start_time = std::time::Instant::now();
-
+    let start_time = Instant::now();
+    
     loop {
-        match f().await {
-            Ok(result) => {
-                if attempt > 0 {
-                    info!(
-                        event = "quote_retry_succeeded",
-                        attempt_number = attempt,
-                        max_attempts = config.max_retries,
-                        total_elapsed_ms = start_time.elapsed().as_millis() as u64,
-                        "Quote request succeeded after retry attempt"
-                    );
-                }
-                return Ok(result);
-            }
-            Err(err) if attempt < config.max_retries && err.is_retryable() => {
+        match operation().await {
+            Ok(result) => return Ok(result),
+            Err(err) => {
                 attempt += 1;
-                let delay_ms = config.initial_delay_ms * (2u32).pow(attempt - 1);
                 
+                if !err.is_retryable() || attempt > config.max_retries {
+                    if attempt > config.max_retries {
+                        // Log retry exhaustion
+                        error!(
+                            event = "quote_service_retries_exhausted",
+                            total_attempts = attempt,
+                            total_elapsed_ms = start_time.elapsed().as_millis() as u64,
+                            error_type = std::any::type_name::<E>(),
+                            error_message = %err,
+                            "All quote service retry attempts exhausted"
+                        );
+                    }
+                    return Err(err);
+                }
+                
+                // Calculate exponential backoff delay
+                let delay_ms = config.initial_delay_ms * (2_u32).pow(attempt - 1);
+                
+                // Apply jitter if configured
+                let jitter = if config.jitter_factor > 0.0 {
+                    let jitter_range = (delay_ms as f64) * config.jitter_factor;
+                    (rand::random::<f64>() * jitter_range) as u32
+                } else {
+                    0
+                };
+                
+                let total_delay_ms = delay_ms + jitter;
+                
+                // Log retry attempt
                 info!(
-                    event = "quote_retry_attempt",
+                    event = "quote_service_retry_attempt",
                     attempt_number = attempt,
                     max_attempts = config.max_retries,
-                    delay_ms = delay_ms,
+                    delay_ms = total_delay_ms,
                     error_type = std::any::type_name::<E>(),
                     error_message = %err,
-                    quote_service_url = %env::var("QUOTE_ADDR").unwrap_or_else(|_| "http://quote:8090/getquote".to_string()),
-                    "Retrying quote service request after transient error"
+                    "Retrying quote service request"
                 );
                 
-                sleep(Duration::from_millis(delay_ms as u64)).await;
-            }
-            Err(err) => {
-                if attempt > 0 {
-                    error!(
-                        event = "quote_retry_exhausted",
-                        total_attempts = attempt,
-                        max_attempts = config.max_retries,
-                        total_elapsed_ms = start_time.elapsed().as_millis() as u64,
-                        error_type = std::any::type_name::<E>(),
-                        error_message = %err,
-                        quote_service_url = %env::var("QUOTE_ADDR").unwrap_or_else(|_| "http://quote:8090/getquote".to_string()),
-                        "All quote service retry attempts exhausted"
-                    );
-                }
-                return Err(err);
+                // Wait before next attempt
+                tokio::time::sleep(Duration::from_millis(total_delay_ms as u64)).await;
             }
         }
     }
