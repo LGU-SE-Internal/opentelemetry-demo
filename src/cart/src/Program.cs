@@ -5,17 +5,22 @@ using System.Diagnostics;
 using System.IO;
 using System.Security.Cryptography.X509Certificates;
 using System.Net.Security;
+using System.Net;
+using System.Threading.RateLimiting;
 
 using Grpc.Health.V1;
+using Grpc.Core;
+using Grpc.Core.Interceptors;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using System.Threading.Tasks;
 using System.Threading;
 
-using Grpc.Core;
+using AspNetCoreRateLimit;
 
 using cart.cartstore;
 using cart.services;
 using cart.healthcheck;
+using cart.Interceptors;
 
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -262,6 +267,75 @@ builder.Services.AddHealthChecks()
     }, tags: new[] { "health", "ready" });
 
 builder.Services.AddSingleton<HealthServiceImpl>();
+
+// Rate Limiting Configuration
+string redisAddress = builder.Configuration["CART_SERVICE_RATELIMIT_REDIS_ADDRESS"] ?? "redis-cart:6379";
+
+var rateLimitRules = new List<RateLimitRule>
+{
+    new()
+    {
+        Endpoint = "*/oteldemo.CartService/GetCart",
+        Limit = int.TryParse(builder.Configuration["CART_SERVICE_RATELIMIT_GETCART_MAX"], out int getCartMax) ? getCartMax : 100,
+        Period = int.TryParse(builder.Configuration["CART_SERVICE_RATELIMIT_GETCART_WINDOW_SECONDS"], out int getCartWindow) ? $"{getCartWindow}s" : "60s"
+    },
+    new()
+    {
+        Endpoint = "*/oteldemo.CartService/AddItem",
+        Limit = int.TryParse(builder.Configuration["CART_SERVICE_RATELIMIT_ADDITEM_MAX"], out int addItemMax) ? addItemMax : 50,
+        Period = int.TryParse(builder.Configuration["CART_SERVICE_RATELIMIT_ADDITEM_WINDOW_SECONDS"], out int addItemWindow) ? $"{addItemWindow}s" : "60s"
+    },
+    new()
+    {
+        Endpoint = "*/oteldemo.CartService/RemoveItem",
+        Limit = int.TryParse(builder.Configuration["CART_SERVICE_RATELIMIT_REMOVEITEM_MAX"], out int removeItemMax) ? removeItemMax : 50,
+        Period = int.TryParse(builder.Configuration["CART_SERVICE_RATELIMIT_REMOVEITEM_WINDOW_SECONDS"], out int removeItemWindow) ? $"{removeItemWindow}s" : "60s"
+    },
+    new()
+    {
+        Endpoint = "*/oteldemo.CartService/EmptyCart",
+        Limit = int.TryParse(builder.Configuration["CART_SERVICE_RATELIMIT_EMPTYCART_MAX"], out int emptyCartMax) ? emptyCartMax : 20,
+        Period = int.TryParse(builder.Configuration["CART_SERVICE_RATELIMIT_EMPTYCART_WINDOW_SECONDS"], out int emptyCartWindow) ? $"{emptyCartWindow}s" : "60s"
+    }
+};
+
+builder.Services.AddMemoryCache();
+builder.Services.Configure<IpRateLimitOptions>(options =>
+{
+    options.GeneralRules = rateLimitRules;
+    options.QuotaExceededResponse = new QuotaExceededResponse
+    {
+        StatusCode = StatusCodes.Status429TooManyRequests,
+        ContentType = "application/grpc",
+        Content = "Rate limit exceeded for endpoint {0}. Try again later."
+    };
+    options.ClientIdHeader = null;
+    options.RealIpHeader = "X-Forwarded-For";
+    options.IpPolicyPrefix = "cart-ratelimit";
+});
+
+builder.Services.Configure<IpRateLimitPolicies>(options => { });
+
+// Use Redis for distributed rate limiting
+builder.Services.AddSingleton<IIpPolicyStore, DistributedCacheIpPolicyStore>();
+builder.Services.AddSingleton<IRateLimitCounterStore, DistributedCacheRateLimitCounterStore>();
+builder.Services.AddSingleton<IRateLimitConfiguration, RateLimitConfiguration>();
+builder.Services.AddStackExchangeRedisCache(options =>
+{
+    options.Configuration = redisAddress;
+    options.InstanceName = "cart-service-ratelimit:";
+});
+
+// Add rate limiting gRPC interceptor
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddSingleton<IIpRateLimitProcessor, IpRateLimitProcessor>();
+builder.Services.AddSingleton<RateLimitInterceptor>();
+builder.Services.AddGrpc(options =>
+{
+    options.Interceptors.Add<RateLimitInterceptor>();
+    options.EnableDetailedErrors = true;
+})
+.AddFluentValidation();
 
 var app = builder.Build();
 
