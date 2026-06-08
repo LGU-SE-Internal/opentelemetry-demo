@@ -43,10 +43,11 @@ class CircuitBreakerImpl implements CircuitBreaker {
 
     const opossumOptions = {
       timeout: this.config.timeoutMs,
-      errorThresholdPercentage: (this.config.failureThreshold / 100) * 100,
+      errorThresholdPercentage: 100,
       resetTimeout: this.config.recoveryDelayMs,
       rollingCountTimeout: this.config.failureThresholdWindowMs,
       rollingCountBuckets: 10,
+      volumeThreshold: this.config.failureThreshold,
       name: this.config.serviceName
     };
 
@@ -101,9 +102,12 @@ class CircuitBreakerImpl implements CircuitBreaker {
   async execute<T>(request: () => Promise<T>): Promise<T> {
     try {
       return await this.breaker.fire(request);
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof CircuitOpenError) {
         throw error;
+      }
+      if (error?.type === 'TimeoutError') {
+        throw new Error(`Timed out after ${this.config.timeoutMs}ms`);
       }
       throw error;
     }
