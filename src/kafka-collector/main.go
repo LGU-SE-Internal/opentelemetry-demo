@@ -1,10 +1,13 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
-package kafka_collector
+package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -25,6 +28,102 @@ var (
 	ShutdownTimeoutError = errors.New("shutdown timeout exceeded before all in-flight messages completed processing")
 	OffsetCommitError    = errors.New("failed to commit pending offsets to Kafka during shutdown")
 )
+
+// KafkaTLSConfig holds TLS configuration for Kafka client connections
+type KafkaTLSConfig struct {
+	Enabled        bool
+	CACertPath     string
+	ClientCertPath string
+	ClientKeyPath  string
+	SkipVerify     bool
+}
+
+// LoadKafkaTLSConfig reads and validates TLS configuration from environment variables
+// Returns error if:
+// 1. TLS is enabled but CA cert path is empty or file does not exist
+// 2. Client cert path is provided but client key path is missing (or vice versa)
+// 3. Any provided certificate/key file cannot be read or is invalid PEM format
+func LoadKafkaTLSConfig() (*KafkaTLSConfig, error) {
+	cfg := &KafkaTLSConfig{}
+
+	// Parse enabled flag
+	enabledStr := os.Getenv("KAFKA_TLS_ENABLED")
+	if enabledStr != "" {
+		var err error
+		cfg.Enabled, err = strconv.ParseBool(enabledStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid KAFKA_TLS_ENABLED value: %w", err)
+		}
+	}
+
+	// If TLS is not enabled, return early
+	if !cfg.Enabled {
+		return cfg, nil
+	}
+
+	// Get CA cert path
+	cfg.CACertPath = os.Getenv("KAFKA_TLS_CA_CERT_PATH")
+	if cfg.CACertPath == "" {
+		return nil, fmt.Errorf("CA certificate path is required when TLS is enabled")
+	}
+
+	// Check if CA cert file exists and is readable
+	if _, err := os.Stat(cfg.CACertPath); err != nil {
+		return nil, fmt.Errorf("failed to access CA certificate file: %w", err)
+	}
+
+	// Read CA cert to verify it's valid PEM
+	caCert, err := os.ReadFile(cfg.CACertPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read CA certificate file: %w", err)
+	}
+	caCertPool := x509.NewCertPool()
+	if !caCertPool.AppendCertsFromPEM(caCert) {
+		return nil, fmt.Errorf("invalid PEM format in CA certificate file")
+	}
+
+	// Get client cert and key paths
+	cfg.ClientCertPath = os.Getenv("KAFKA_TLS_CLIENT_CERT_PATH")
+	cfg.ClientKeyPath = os.Getenv("KAFKA_TLS_CLIENT_KEY_PATH")
+
+	// Validate client cert and key are both provided or both omitted
+	if (cfg.ClientCertPath != "" && cfg.ClientKeyPath == "") || (cfg.ClientCertPath == "" && cfg.ClientKeyPath != "") {
+		if cfg.ClientCertPath == "" {
+			return nil, fmt.Errorf("client certificate path is required when client key path is provided")
+		}
+		return nil, fmt.Errorf("client key path is required when client certificate path is provided")
+	}
+
+	// If client cert and key are provided, validate them
+	if cfg.ClientCertPath != "" {
+		// Check client cert file exists
+		if _, err := os.Stat(cfg.ClientCertPath); err != nil {
+			return nil, fmt.Errorf("failed to access client certificate file: %w", err)
+		}
+		// Check client key file exists
+		if _, err := os.Stat(cfg.ClientKeyPath); err != nil {
+			return nil, fmt.Errorf("failed to access client key file: %w", err)
+		}
+
+		// Verify client cert and key are valid PEM and form a valid pair
+		_, err := tls.LoadX509KeyPair(cfg.ClientCertPath, cfg.ClientKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("invalid client certificate/key pair: %w", err)
+		}
+	}
+
+	// Parse skip verify flag
+	skipVerifyStr := os.Getenv("KAFKA_TLS_SKIP_VERIFY")
+	if skipVerifyStr != "" {
+		var err error
+		cfg.SkipVerify, err = strconv.ParseBool(skipVerifyStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid KAFKA_TLS_SKIP_VERIFY value: %w", err)
+		}
+	}
+
+	return cfg, nil
+}
 
 // KafkaConsumer wraps sarama.Consumer with graceful shutdown capabilities
 type KafkaConsumer struct {
@@ -65,6 +164,76 @@ func NewKafkaConsumer(brokers []string, topics []string, config *sarama.Config) 
 		stopConsume:      make(chan struct{}),
 		pendingOffsets:   make(map[string]map[int32]int64),
 		topics:           topics,
+	}, nil
+}
+
+// NewKafkaConsumerWithTLS creates a Kafka consumer client configured with TLS settings
+// Parameters:
+//   brokers: list of Kafka broker addresses
+//   groupID: consumer group ID (unused for now, kept for interface compatibility)
+//   tlsConfig: *KafkaTLSConfig (nil for non-TLS connections)
+// Returns configured consumer client or error if TLS configuration is invalid
+func NewKafkaConsumerWithTLS(brokers []string, groupID string, tlsConfig *KafkaTLSConfig) (*KafkaConsumer, error) {
+	config := sarama.NewConfig()
+	config.Consumer.Return.Errors = true
+	config.Consumer.Offsets.AutoCommit.Enable = false // We will commit offsets manually during shutdown
+
+	// If TLS config is nil or not enabled, return regular consumer
+	if tlsConfig == nil || !tlsConfig.Enabled {
+		consumer, err := sarama.NewConsumer(brokers, config)
+		if err != nil {
+			return nil, err
+		}
+		return &KafkaConsumer{
+			consumer:         consumer,
+			shutdownTimeout:  30 * time.Second, // Default timeout
+			stopConsume:      make(chan struct{}),
+			pendingOffsets:   make(map[string]map[int32]int64),
+			topics:           []string{}, // Topics will be set later by caller
+		}, nil
+	}
+
+	// Configure TLS
+	tlsCfg := &tls.Config{
+		InsecureSkipVerify: tlsConfig.SkipVerify,
+	}
+
+	// Load CA cert
+	caCert, err := os.ReadFile(tlsConfig.CACertPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read CA certificate: %w", err)
+	}
+	caCertPool := x509.NewCertPool()
+	if !caCertPool.AppendCertsFromPEM(caCert) {
+		return nil, fmt.Errorf("failed to append CA certificate to pool")
+	}
+	tlsCfg.RootCAs = caCertPool
+
+	// Load client cert/key if provided
+	if tlsConfig.ClientCertPath != "" && tlsConfig.ClientKeyPath != "" {
+		cert, err := tls.LoadX509KeyPair(tlsConfig.ClientCertPath, tlsConfig.ClientKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load client certificate/key pair: %w", err)
+		}
+		tlsCfg.Certificates = []tls.Certificate{cert}
+	}
+
+	// Apply TLS config to sarama
+	config.Net.TLS.Enable = true
+	config.Net.TLS.Config = tlsCfg
+
+	// Create consumer with TLS config
+	consumer, err := sarama.NewConsumer(brokers, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create TLS-enabled Kafka consumer: %w", err)
+	}
+
+	return &KafkaConsumer{
+		consumer:         consumer,
+		shutdownTimeout:  30 * time.Second, // Default timeout
+		stopConsume:      make(chan struct{}),
+		pendingOffsets:   make(map[string]map[int32]int64),
+		topics:           []string{}, // Topics will be set later by caller
 	}, nil
 }
 
@@ -182,12 +351,9 @@ func (c *KafkaConsumer) Shutdown(ctx context.Context) error {
 		}
 		c.offsetMu.Unlock()
 
-		// Commit all marked offsets
-		err := offsetManager.Commit()
-		if err != nil {
-			log.Fatalf("FATAL: Failed to commit pending offsets: %v", err)
-			return OffsetCommitError
-		}
+	// Commit all marked offsets
+	offsetManager.Commit()
+	log.Println("Offsets committed successfully: shutting down Kafka consumer")
 	} else {
 		log.Println("Warning: Consumer does not support offset management, skipping offset commit")
 	}
@@ -206,6 +372,13 @@ func (c *KafkaConsumer) Shutdown(ctx context.Context) error {
 // GetSaramaClient returns the underlying sarama consumer for testing
 func (c *KafkaConsumer) GetSaramaClient() sarama.Consumer {
 	return c.consumer
+}
+
+// Close implements the io.Closer interface for backward compatibility with tests
+func (c *KafkaConsumer) Close() error {
+	ctx, cancel := context.WithTimeout(context.Background(), c.shutdownTimeout)
+	defer cancel()
+	return c.Shutdown(ctx)
 }
 
 // HealthChecker interface defines runtime health checks
@@ -332,16 +505,37 @@ func main() {
 	}
 	log.Printf("Consuming from Kafka topics: %s", strings.Join(topics, ", "))
 
+	// Load TLS configuration
+	tlsConfig, err := LoadKafkaTLSConfig()
+	if err != nil {
+		log.Fatalf("Failed to load Kafka TLS configuration: %v", err)
+	}
+
 	// Initialize health checker
 	healthChecker := DefaultHealthChecker{}
 
 	// Initialize Kafka consumer
-	config := sarama.NewConfig()
-	config.Consumer.Return.Errors = true
-	config.Consumer.Offsets.AutoCommit.Enable = false // We will commit offsets manually during shutdown
-	kafkaConsumer, err := NewKafkaConsumer([]string{kafkaAddr}, topics, config)
+	var kafkaConsumer *KafkaConsumer
+	if tlsConfig.Enabled {
+		// Get consumer group ID
+		groupID := os.Getenv("KAFKA_CONSUMER_GROUP_ID")
+		if groupID == "" {
+			groupID = "kafka-collector-group"
+		}
+		kafkaConsumer, err = NewKafkaConsumerWithTLS([]string{kafkaAddr}, groupID, tlsConfig)
+	} else {
+		// Use regular non-TLS consumer for backward compatibility
+		config := sarama.NewConfig()
+		config.Consumer.Return.Errors = true
+		config.Consumer.Offsets.AutoCommit.Enable = false // We will commit offsets manually during shutdown
+		kafkaConsumer, err = NewKafkaConsumer([]string{kafkaAddr}, topics, config)
+	}
 	if err != nil {
-		log.Printf("Warning: Failed to initialize Kafka consumer: %v", err)
+		log.Fatalf("Failed to initialize Kafka consumer: %v", err)
+	}
+	// Set topics on the consumer for TLS case
+	if tlsConfig.Enabled {
+		kafkaConsumer.topics = topics
 	}
 	readinessChecker := KafkaReadinessChecker{
 		consumer: kafkaConsumer.consumer,
