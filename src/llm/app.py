@@ -9,13 +9,13 @@ import time
 import random
 import re
 import os
+import sys
 import logging
 import signal
 import types
 from typing import Optional
 import threading
 from uuid import uuid4
-
 from openfeature import api
 from openfeature.contrib.provider.flagd import FlagdProvider
 from flask_limiter import Limiter
@@ -404,6 +404,64 @@ def check_feature_flag(flag_name: str):
     return client.get_boolean_value(flag_name, False)
 
 if __name__ == '__main__':
+    import ssl
+
+    # TLS Configuration
+    tls_cert_path = os.environ.get('LLM_SERVICE_TLS_CERT_PATH')
+    tls_key_path = os.environ.get('LLM_SERVICE_TLS_KEY_PATH')
+    tls_ca_cert_path = os.environ.get('LLM_SERVICE_TLS_CA_CERT_PATH')
+
+    ssl_context = None
+
+    # Validate TLS configuration
+    if tls_ca_cert_path and not (tls_cert_path and tls_key_path):
+        app.logger.error("mTLS requires HTTPS mode: TLS certificate and key paths must also be provided")
+        sys.exit(1)
+    
+    if bool(tls_cert_path) != bool(tls_key_path):
+        app.logger.error("Both TLS certificate and key paths must be provided to enable HTTPS mode")
+        sys.exit(1)
+    
+    if tls_cert_path and tls_key_path:
+        # Check certificate file exists and is readable
+        for file_path, desc in [(tls_cert_path, "certificate"), (tls_key_path, "key"), (tls_ca_cert_path, "CA certificate")]:
+            if not file_path:
+                continue
+            if not os.path.exists(file_path):
+                app.logger.error(f"TLS file not found or unreadable: {file_path}")
+                sys.exit(1)
+            if not os.access(file_path, os.R_OK):
+                app.logger.error(f"TLS file not found or unreadable: {file_path}")
+                sys.exit(1)
+        
+        try:
+            # Create SSL context
+            ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+            ssl_context.load_cert_chain(certfile=tls_cert_path, keyfile=tls_key_path)
+            
+            if tls_ca_cert_path:
+                # Enable mTLS
+                ssl_context.load_verify_locations(cafile=tls_ca_cert_path)
+                ssl_context.verify_mode = ssl.CERT_REQUIRED
+                app.logger.info("mTLS client authentication enabled")
+            
+        except ssl.SSLError as e:
+            if "PEM" in str(e):
+                if "certificate" in str(e).lower():
+                    app.logger.error(f"Invalid TLS certificate format: {str(e)}")
+                elif "key" in str(e).lower():
+                    app.logger.error(f"Invalid TLS key format: {str(e)}")
+                else:
+                    app.logger.error(f"Invalid mTLS CA certificate: {str(e)}")
+            else:
+                app.logger.error(f"TLS configuration error: {str(e)}")
+            sys.exit(1)
+        except Exception as e:
+            if "ca" in str(e).lower() or "CA" in str(e):
+                app.logger.error(f"Invalid mTLS CA certificate: {str(e)}")
+            else:
+                app.logger.error(f"Invalid TLS file format: {str(e)}")
+            sys.exit(1)
 
     api.set_provider(FlagdProvider(host=os.environ.get('FLAGD_HOST', 'flagd'), port=os.environ.get('FLAGD_PORT', 8013)))
     product_review_summaries = load_product_review_summaries(product_review_summaries_file_path)
@@ -411,6 +469,10 @@ if __name__ == '__main__':
 
     app.logger.info(product_review_summaries)
 
-    print("OpenAI API server starting on http://localhost:8000")
-    print("Set your OpenAI base URL to: http://localhost:8000/v1")
-    app.run(host='0.0.0.0', port=8000, debug=True)
+    if ssl_context:
+        print("OpenAI API server starting on https://0.0.0.0:8000")
+        print("Set your OpenAI base URL to: https://localhost:8000/v1")
+    else:
+        print("OpenAI API server starting on http://0.0.0.0:8000")
+        print("Set your OpenAI base URL to: http://localhost:8000/v1")
+    app.run(host='0.0.0.0', port=8000, debug=True, ssl_context=ssl_context)
