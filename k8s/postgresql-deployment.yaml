@@ -43,29 +43,60 @@ spec:
                   key: postgres-db
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
+            - name: POSTGRES_LIVENESS_PROBE_INITIAL_DELAY_SECONDS
+              value: "30"
+            - name: POSTGRES_LIVENESS_PROBE_PERIOD_SECONDS
+              value: "10"
+            - name: POSTGRES_LIVENESS_PROBE_TIMEOUT_SECONDS
+              value: "5"
+            - name: POSTGRES_LIVENESS_PROBE_FAILURE_THRESHOLD
+              value: "3"
+            - name: POSTGRES_READINESS_PROBE_INITIAL_DELAY_SECONDS
+              value: "5"
+            - name: POSTGRES_READINESS_PROBE_PERIOD_SECONDS
+              value: "5"
+            - name: POSTGRES_READINESS_PROBE_TIMEOUT_SECONDS
+              value: "3"
+            - name: POSTGRES_READINESS_PROBE_FAILURE_THRESHOLD
+              value: "3"
+            - name: POSTGRES_RESOURCES_REQUESTS_CPU
+              value: "100m"
+            - name: POSTGRES_RESOURCES_REQUESTS_MEMORY
+              value: "256Mi"
+            - name: POSTGRES_RESOURCES_LIMITS_CPU
+              value: "500m"
+            - name: POSTGRES_RESOURCES_LIMITS_MEMORY
+              value: "1Gi"
+            - name: POSTGRES_RUN_AS_USER
+              value: "999"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: $(POSTGRES_RUN_AS_USER)
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
           livenessProbe:
             exec:
-              command: ["pg_isready", "-U", "$(POSTGRES_USER)", "-d", "postgres"]
-            initialDelaySeconds: 5
-            periodSeconds: 10
-            timeoutSeconds: 3
-            failureThreshold: 3
+              command: ["pg_isready", "-U", "postgres", "-h", "localhost"]
+            initialDelaySeconds: $(POSTGRES_LIVENESS_PROBE_INITIAL_DELAY_SECONDS)
+            periodSeconds: $(POSTGRES_LIVENESS_PROBE_PERIOD_SECONDS)
+            timeoutSeconds: $(POSTGRES_LIVENESS_PROBE_TIMEOUT_SECONDS)
+            failureThreshold: $(POSTGRES_LIVENESS_PROBE_FAILURE_THRESHOLD)
             successThreshold: 1
           readinessProbe:
             exec:
-              command: ["psql", "-U", "$(POSTGRES_USER)", "-d", "$(POSTGRES_DB)", "-c", "SELECT 1;"]
-            initialDelaySeconds: 5
-            periodSeconds: 10
-            timeoutSeconds: 3
-            failureThreshold: 3
+              command: ["pg_isready", "-U", "postgres", "-h", "localhost"]
+            initialDelaySeconds: $(POSTGRES_READINESS_PROBE_INITIAL_DELAY_SECONDS)
+            periodSeconds: $(POSTGRES_READINESS_PROBE_PERIOD_SECONDS)
+            timeoutSeconds: $(POSTGRES_READINESS_PROBE_TIMEOUT_SECONDS)
+            failureThreshold: $(POSTGRES_READINESS_PROBE_FAILURE_THRESHOLD)
             successThreshold: 1
           resources:
             requests:
-              cpu: "256m"
-              memory: "512Mi"
+              cpu: $(POSTGRES_RESOURCES_REQUESTS_CPU)
+              memory: $(POSTGRES_RESOURCES_REQUESTS_MEMORY)
             limits:
-              cpu: "500m"
-              memory: "1Gi"
+              cpu: $(POSTGRES_RESOURCES_LIMITS_CPU)
+              memory: $(POSTGRES_RESOURCES_LIMITS_MEMORY)
           volumeMounts:
             - name: postgresql-data
               mountPath: /var/lib/postgresql/data
