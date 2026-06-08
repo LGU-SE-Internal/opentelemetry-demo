@@ -10,6 +10,18 @@ require "rack/attack"
 require "open_feature/sdk"
 require "openfeature/flagd/provider"
 require "openssl"
+require "prometheus/client"
+
+# Initialize Prometheus registry
+Prometheus::Client.configure do |config|
+  config.initial_mmap_file_size = 4 * 1024 * 1024
+end
+PROMETHEUS_REGISTRY = Prometheus::Client.registry
+
+# SMTP retry metrics
+$email_delivery_success_total = PROMETHEUS_REGISTRY.counter(:email_delivery_success_total, docstring: "Increments on every successful email delivery")
+$email_delivery_failed_total = PROMETHEUS_REGISTRY.counter(:email_delivery_failed_total, docstring: "Increments when delivery fails permanently", labels: [:failure_type])
+$email_delivery_retry_total = PROMETHEUS_REGISTRY.counter(:email_delivery_retry_total, docstring: "Increments each time a retry attempt is initiated", labels: [:retry_attempt])
 
 require "opentelemetry/sdk"
 require "opentelemetry-logs-sdk"
@@ -303,7 +315,80 @@ post "/send" do
 
   $confirmation_counter.add(1)
   send_email(data)
+end
 
+def retry_smtp_delivery(&block)
+  max_retries = ENV.fetch('EMAIL_SMTP_MAX_RETRIES', 3).to_i
+  return yield if max_retries <= 0
+
+  retries = 0
+  recipient = nil
+  begin
+    return yield
+  rescue => e
+    # Extract recipient from the block context if available (for logging)
+    if block.binding.eval('defined? data')
+      recipient = block.binding.eval('data.email')
+    end
+
+    permanent_failure = false
+    smtp_code = nil
+
+    if e.is_a?(Net::SMTPError)
+      smtp_code = e.instance_variable_get(:@status) || e.message.match(/^(\d{3})/)&.captures&.first
+      if smtp_code && smtp_code.start_with?('5')
+        permanent_failure = true
+      end
+    end
+
+    # Network errors are always temporary
+    if [Errno::ETIMEDOUT, Errno::ECONNRESET, SocketError].any? { |c| e.is_a?(c) }
+      permanent_failure = false
+    end
+
+    if permanent_failure || retries >= max_retries
+      # Log permanent failure
+      failure_type = permanent_failure ? 'permanent' : 'temporary'
+      log_entry = {
+        level: "error",
+        timestamp: Time.now.utc.iso8601,
+        message: "Email delivery failed permanently",
+        recipient: recipient,
+        smtp_code: smtp_code,
+        total_retries: retries,
+        failure_type: failure_type
+      }
+      $stderr.puts log_entry.to_json
+
+      $email_delivery_failed_total.add(1, labels: { failure_type: failure_type })
+
+      raise e
+    end
+
+    # Calculate backoff with jitter
+    base_delay = 2 ** retries
+    jitter = rand * 0.4 - 0.2 # ±20% jitter
+    delay = [base_delay * (1 + jitter), 30].min # cap at 30s
+
+    # Log retry warning
+    log_entry = {
+      level: "warn",
+      timestamp: Time.now.utc.iso8601,
+      message: "Retrying email delivery",
+      recipient: recipient,
+      smtp_code: smtp_code,
+      retry_count: retries + 1,
+      max_retries: max_retries,
+      next_retry_delay: delay
+    }
+    $stderr.puts log_entry.to_json
+
+    $email_delivery_retry_total.add(1, labels: { retry_attempt: retries + 1 })
+
+    sleep delay
+    retries += 1
+    retry
+  end
 end
 
 error do
@@ -312,7 +397,6 @@ end
 
 def send_email(data)
   # create and start a manual span
-  tracer = OpenTelemetry.tracer_provider.tracer('email')
   tracer.in_span("send_email") do |span|
     # Check if memory leak flag is enabled
     client = OpenFeature::SDK.build_client
@@ -322,13 +406,17 @@ def send_email(data)
     confirmation_content = erb(:confirmation, locals: { order: data.order })
     whitespace_length = [0, confirmation_content.length * (memory_leak_multiplier-1)].max
 
-    Pony.mail(
-      to:       data.email,
-      from:     "noreply@example.com",
-      subject:  "Your confirmation email",
-      body:     confirmation_content + " " * whitespace_length,
-      via:      :test
-    )
+    retry_smtp_delivery do
+      Pony.mail(
+        to:       data.email,
+        from:     "noreply@example.com",
+        subject:  "Your confirmation email",
+        body:     confirmation_content + " " * whitespace_length,
+        via:      :test
+      )
+    end
+
+    $email_delivery_success_total.add(1)
 
     # If not clearing the deliveries, the emails will accumulate in the test mailer
     # We use this to create a memory leak.
