@@ -158,20 +158,31 @@ async fn request_quote(count: u32) -> Result<f64, anyhow::Error> {
     let mut reqbody = HashMap::new();
     reqbody.insert("numberOfItems", count);
 
-    let retry_config = RetryConfig::default();
+    let retry_config = RetryConfig::from_env();
     let mut response = with_retry(retry_config, || {
         let client = client.clone();
         let addr = quote_service_addr.clone();
         let body = reqbody.clone();
         Box::pin(async move {
             client
-                .post(addr)
+                .post(&addr)
                 .trace_request()
                 .send_json(&body)
                 .await
-                .map_err(|err| anyhow::anyhow!("Failed to call quote service: {err}"))
+                .map_err(|e| {
+                    // First log the error with the quote service URL
+                    if e.is_retryable() {
+                        info!(
+                            event = "quote_service_transient_error",
+                            quote_service_url = %addr,
+                            error = %e,
+                            "Transient error calling quote service"
+                        );
+                    }
+                    e
+                })
         })
-    }).await?;
+    }).await.map_err(|e| anyhow::anyhow!("Failed to call quote service after retries: {e}"))?;
 
     let bytes = response
         .body()
