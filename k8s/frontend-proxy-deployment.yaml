@@ -14,6 +14,12 @@ spec:
       labels:
         app: frontend-proxy
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        allowPrivilegeEscalation: false
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - name: frontend-proxy
         image: otel/demo:v1.9.0-frontend-proxy
@@ -25,6 +31,9 @@ spec:
         env:
         - name: ENVOY_ADMIN_PORT
           value: "9901"
+        securityContext:
+          capabilities:
+            drop: ["ALL"]
         livenessProbe:
           httpGet:
             path: /ready
