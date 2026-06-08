@@ -10,8 +10,7 @@ defmodule FlagdUiWeb.HealthController do
     |> put_status(:ok)
     |> json(%{
       status: "ok",
-      check: "liveness",
-      timestamp: DateTime.utc_now() |> DateTime.to_iso8601()
+      check: "liveness"
     })
   end
 
@@ -30,8 +29,7 @@ defmodule FlagdUiWeb.HealthController do
       |> put_status(:ok)
       |> json(%{
         status: "ok",
-        check: "readiness",
-        timestamp: DateTime.utc_now() |> DateTime.to_iso8601()
+        check: "readiness"
       })
     else
       reason = failed_checks |> Enum.map(fn {key, _} -> Atom.to_string(key) end) |> Enum.join(", ")
@@ -40,8 +38,7 @@ defmodule FlagdUiWeb.HealthController do
       |> json(%{
         status: "error",
         check: "readiness",
-        reason: reason,
-        timestamp: DateTime.utc_now() |> DateTime.to_iso8601()
+        reason: reason
       })
     end
   end

@@ -236,3 +236,54 @@ The service exposes two health check endpoints for Kubernetes monitoring:
     initialDelaySeconds: 10
     periodSeconds: 5
   ```
+
+## Health Check Endpoints
+
+The flagd-ui service provides two health check endpoints for Kubernetes monitoring:
+
+### 1. Liveness Probe (`GET /health/live`)
+- **Purpose**: Verify that the service process is running
+- **Authentication**: No required credentials (publicly accessible)
+- **Success Response**:
+  - Status Code: `200 OK`
+  - Content-Type: `application/json`
+  - Body:
+    ```json
+    {"status": "ok", "check": "liveness"}
+    ```
+- **Failure Condition**: If the service is not running, Kubernetes will receive a connection timeout or connection refused error.
+
+### 2. Readiness Probe (`GET /health/ready`)
+- **Purpose**: Verify that the service is fully initialized and ready to serve user traffic
+- **Authentication**: No required credentials (publicly accessible)
+- **Success Response**:
+  - Status Code: `200 OK`
+  - Content-Type: `application/json`
+  - Body:
+    ```json
+    {"status": "ok", "check": "readiness"}
+    ```
+- **Failure Response (when not ready)**:
+  - Status Code: `503 Service Unavailable`
+  - Content-Type: `application/json`
+  - Body:
+    ```json
+    {"status": "error", "check": "readiness", "reason": "<uninitialized components>"}
+    ```
+
+### Kubernetes Probe Configuration Example
+```yaml
+livenessProbe:
+  httpGet:
+    path: /health/live
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+readinessProbe:
+  httpGet:
+    path: /health/ready
+    port: 8080
+  initialDelaySeconds: 10
+  periodSeconds: 5
+```
