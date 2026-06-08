@@ -1,0 +1,107 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  labels:
+    app.kubernetes.io/name: otel-collector
+    app.kubernetes.io/component: otel-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: otel-collector
+      app.kubernetes.io/component: otel-collector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: otel-collector
+        app.kubernetes.io/component: otel-collector
+    spec:
+      containers:
+      - name: otel-collector
+        image: ${COLLECTOR_CONTRIB_IMAGE:-otel/opentelemetry-collector-contrib:latest}
+        args:
+        - --config=/etc/otelcol-config.yml
+        - --config=/etc/otelcol-config-extras.yml
+        - --feature-gates=service.profilesSupport
+        ports:
+        - name: otlp-grpc
+          containerPort: 4317
+          protocol: TCP
+        - name: otlp-http
+          containerPort: 4318
+          protocol: TCP
+        - name: health
+          containerPort: 13133
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            port: 13133
+            path: /
+          failureThreshold: 3
+          periodSeconds: 10
+          initialDelaySeconds: 5
+        readinessProbe:
+          httpGet:
+            port: 13133
+            path: /
+          failureThreshold: 3
+          periodSeconds: 10
+          initialDelaySeconds: 2
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "1Gi"
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 10001
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: otel-collector-config
+          mountPath: /etc/otelcol-config.yml
+          subPath: otelcol-config.yml
+        - name: otel-collector-config-extras
+          mountPath: /etc/otelcol-config-extras.yml
+          subPath: otelcol-config-extras.yml
+        env:
+        - name: GOMEMLIMIT
+          value: "160MiB"
+      volumes:
+      - name: otel-collector-config
+        configMap:
+          name: otel-collector-config
+      - name: otel-collector-config-extras
+        configMap:
+          name: otel-collector-config-extras
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  labels:
+    app.kubernetes.io/name: otel-collector
+    app.kubernetes.io/component: otel-collector
+spec:
+  type: ClusterIP
+  ports:
+  - name: otlp-grpc
+    port: 4317
+    targetPort: otlp-grpc
+    protocol: TCP
+  - name: otlp-http
+    port: 4318
+    targetPort: otlp-http
+    protocol: TCP
+  - name: health
+    port: 13133
+    targetPort: health
+    protocol: TCP
+  selector:
+    app.kubernetes.io/name: otel-collector
+    app.kubernetes.io/component: otel-collector
