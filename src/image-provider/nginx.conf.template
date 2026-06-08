@@ -96,8 +96,8 @@ http {
 
     ${IMAGE_PROVIDER_TLS_CERT_PATH:+
     server {
-        listen 8443 ssl;
-        listen [::]:8443 ssl;
+        listen 443 ssl;
+        listen [::]:443 ssl;
 
         resolver 127.0.0.11;
         autoindex off;
