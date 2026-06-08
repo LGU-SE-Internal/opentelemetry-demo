@@ -7,9 +7,13 @@ FROM apache/kafka:3.9.1@sha256:4ceccc577f03f51f6af8dbfda55194d0d892f4fa7913ffbde
 USER root
 ARG OTEL_JAVA_AGENT_VERSION
 
-USER appuser
+# Create non-root user with UID 1000 and set proper permissions
+RUN useradd -u 1000 kafka || true && \
+    chown -R 1000:1000 /var/lib/kafka /var/log/kafka /tmp
 
-ADD --chown=appuser:appuser https://github.com/open-telemetry/opentelemetry-java-instrumentation/releases/download/v$OTEL_JAVA_AGENT_VERSION/opentelemetry-javaagent.jar /tmp/opentelemetry-javaagent.jar
+USER 1000
+
+ADD --chown=1000:1000 https://github.com/open-telemetry/opentelemetry-java-instrumentation/releases/download/v$OTEL_JAVA_AGENT_VERSION/opentelemetry-javaagent.jar /tmp/opentelemetry-javaagent.jar
 
 ENV KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
 ENV KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
