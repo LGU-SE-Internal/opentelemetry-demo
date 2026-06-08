@@ -5,6 +5,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +17,7 @@ import (
 	"os/signal"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -50,6 +53,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
@@ -478,14 +482,72 @@ func main() {
 
 	logger.Info(fmt.Sprintf("service config: %+v", svc))
 
+	// TLS/mTLS configuration
+	var grpcOpts []grpc.ServerOption
+	grpcOpts = append(grpcOpts, grpc.StatsHandler(otelgrpc.NewServerHandler()))
+
+	tlsEnabled := strings.ToLower(os.Getenv("CHECKOUT_SERVICE_TLS_ENABLED")) == "true"
+	mtlsEnabled := strings.ToLower(os.Getenv("CHECKOUT_SERVICE_MTLS_ENABLED")) == "true"
+
+	if tlsEnabled {
+		certPath := os.Getenv("CHECKOUT_SERVICE_TLS_CERT_PATH")
+		keyPath := os.Getenv("CHECKOUT_SERVICE_TLS_KEY_PATH")
+
+		if certPath == "" || keyPath == "" {
+			logger.Error("TLS is enabled but certificate or key path is not provided")
+			os.Exit(1)
+		}
+
+		// Load server cert and key
+		cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+		if err != nil {
+			logger.Error(fmt.Sprintf("Failed to load TLS certificate/key pair: %v", err))
+			os.Exit(1)
+		}
+
+		tlsConfig := &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+		}
+
+		if mtlsEnabled {
+			caCertPath := os.Getenv("CHECKOUT_SERVICE_MTLS_CA_CERT_PATH")
+			if caCertPath == "" {
+				logger.Error("mTLS is enabled but CA certificate path is not provided")
+				os.Exit(1)
+			}
+
+			caCert, err := os.ReadFile(caCertPath)
+			if err != nil {
+				logger.Error(fmt.Sprintf("Failed to read mTLS CA certificate: %v", err))
+				os.Exit(1)
+			}
+
+			certPool := x509.NewCertPool()
+			if !certPool.AppendCertsFromPEM(caCert) {
+				logger.Error("Failed to add CA certificate to pool")
+				os.Exit(1)
+			}
+
+			tlsConfig.ClientCAs = certPool
+			tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+		}
+
+		grpcOpts = append(grpcOpts, grpc.Creds(credentials.NewTLS(tlsConfig)))
+	} else {
+		if mtlsEnabled {
+			logger.Error("mTLS is enabled but TLS is disabled. mTLS requires TLS to be enabled.")
+			os.Exit(1)
+		}
+	}
+
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%s", port))
 	if err != nil {
 		logger.Error(err.Error())
+		os.Exit(1)
 	}
 
-	srv := grpc.NewServer(
-		grpc.StatsHandler(otelgrpc.NewServerHandler()),
-	)
+	srv := grpc.NewServer(grpcOpts...)
 	pb.RegisterCheckoutServiceServer(srv, svc)
 
 	healthpb.RegisterHealthServer(srv, healthcheck)
