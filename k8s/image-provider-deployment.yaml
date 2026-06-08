@@ -26,27 +26,24 @@ spec:
           name: http
         livenessProbe:
           httpGet:
-            path: /healthz
+            path: /health
             port: 8080
-          initialDelaySeconds: 5
           periodSeconds: 10
-          timeoutSeconds: 2
           failureThreshold: 3
         readinessProbe:
           httpGet:
-            path: /healthz
+            path: /health
             port: 8080
           initialDelaySeconds: 2
-          periodSeconds: 5
-          timeoutSeconds: 2
+          periodSeconds: 10
           failureThreshold: 3
         resources:
           requests:
             cpu: 10m
             memory: 32Mi
           limits:
-            cpu: 50m
-            memory: 64Mi
+            cpu: 100m
+            memory: 128Mi
         securityContext:
           readOnlyRootFilesystem: true
           allowPrivilegeEscalation: false
