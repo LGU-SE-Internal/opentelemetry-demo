@@ -73,6 +73,11 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.security.cert.CertificateException;
+import io.github.bucket4j.Bandwidth;
+import io.github.bucket4j.Bucket;
+import io.github.bucket4j.Refill;
+import java.time.Duration;
+import java.util.concurrent.ConcurrentHashMap;
 
 
 public final class AdService {
@@ -87,6 +92,78 @@ public final class AdService {
   private HTTPServer prometheusServer;
   private volatile boolean isReady = false;
   private final AtomicInteger inFlightRequests = new AtomicInteger(0);
+
+  private static class RateLimitInterceptor implements ServerInterceptor {
+    private static final String RATE_LIMIT_ENV_VAR = "AD_SERVICE_RATE_LIMIT_RPS";
+    private static final int DEFAULT_RATE_LIMIT = 100;
+    private final int configuredRps;
+    private final ConcurrentHashMap<String, Bucket> clientBuckets = new ConcurrentHashMap<>();
+
+    public RateLimitInterceptor() {
+      int rps = DEFAULT_RATE_LIMIT;
+      String envValue = System.getenv(RATE_LIMIT_ENV_VAR);
+      if (envValue == null) {
+        envValue = System.getProperty(RATE_LIMIT_ENV_VAR);
+      }
+      if (envValue != null && !envValue.trim().isEmpty()) {
+        try {
+          rps = Integer.parseInt(envValue.trim());
+          if (rps <= 0) {
+            logger.warn("Invalid rate limit value {}: must be positive, falling back to default {}", rps, DEFAULT_RATE_LIMIT);
+            rps = DEFAULT_RATE_LIMIT;
+          }
+        } catch (NumberFormatException e) {
+          logger.warn("Invalid rate limit value '{}': not a number, falling back to default {}", envValue, DEFAULT_RATE_LIMIT);
+          rps = DEFAULT_RATE_LIMIT;
+        }
+      }
+      this.configuredRps = rps;
+      logger.info("Rate limit configured to {} requests per second per client IP", configuredRps);
+    }
+
+    private String extractClientIp(Metadata headers, ServerCall<?, ?> call) {
+      String xForwardedFor = headers.get(Metadata.Key.of("X-Forwarded-For", Metadata.ASCII_STRING_MARSHALLER));
+      if (xForwardedFor != null && !xForwardedFor.isEmpty()) {
+        String[] ips = xForwardedFor.split(",");
+        if (ips.length > 0) {
+          return ips[0].trim();
+        }
+      }
+      // Fallback to remote address
+      java.net.SocketAddress remoteAddr = call.getAttributes().get(Grpc.TRANSPORT_ATTR_REMOTE_ADDR);
+      if (remoteAddr instanceof java.net.InetSocketAddress inetAddr) {
+        return inetAddr.getAddress().getHostAddress();
+      }
+      return "unknown";
+    }
+
+    @Override
+    public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
+        ServerCall<ReqT, RespT> call,
+        Metadata headers,
+        ServerCallHandler<ReqT, RespT> next) {
+      String clientIp = extractClientIp(headers, call);
+      String methodName = call.getMethodDescriptor().getFullMethodName();
+
+      Bucket bucket = clientBuckets.computeIfAbsent(clientIp, ip -> {
+        Bandwidth limit = Bandwidth.classic(configuredRps, Refill.greedy(configuredRps, Duration.ofSeconds(1)));
+        return Bucket.builder().addLimit(limit).build();
+      });
+
+      if (bucket.tryConsume(1)) {
+        return next.startCall(call, headers);
+      } else {
+        // Rate limit exceeded
+        long availableTokens = bucket.getAvailableTokens();
+        logger.warn("Rate limit exceeded: client IP={}, method={}, current requests={}, configured limit={}",
+            clientIp, methodName, (configuredRps - availableTokens), configuredRps);
+        call.close(Status.RESOURCE_EXHAUSTED.withDescription(
+            String.format("Rate limit exceeded: too many requests from client IP %s", clientIp)),
+            new Metadata());
+        return new ServerCall.Listener<>() {};
+      }
+    }
+  }
 
   private static class HealthHttpHandler extends ChannelInboundHandlerAdapter {
     private final AdService service;
