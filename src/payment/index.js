@@ -11,6 +11,7 @@ const { RateLimiterMemory } = require('rate-limiter-flexible')
 
 const charge = require('./charge')
 const logger = require('./logger')
+const { isHealthy } = require('./charge')
 
 // Graceful shutdown state
 let isShuttingDown = false;
@@ -599,6 +600,33 @@ app = express();
     }
   });
   
+  // Liveness endpoint /health per AC1 - always returns UP when service is running
+  app.get('/health', (req, res) => {
+    const start = Date.now();
+    const tracer = opentelemetry.trace.getTracer('paymentservice');
+    const span = tracer.startSpan('GET /health');
+    
+    try {
+      res.setHeader('Content-Type', 'application/json');
+      res.status(200).json({ status: 'UP' });
+      
+      span.setAttributes({
+        'http.method': 'GET',
+        'http.route': '/health',
+        'http.status_code': 200
+      });
+      
+      logger.info({
+        method: 'GET',
+        path: '/health',
+        status: 200,
+        duration: Date.now() - start
+      });
+    } finally {
+      span.end();
+    }
+  });
+
   // New required /health/live endpoint per issue #1238
   app.get('/health/live', (req, res) => {
     const start = Date.now();
@@ -625,7 +653,7 @@ app = express();
     }
   });
 
-  // Readiness endpoint /ready per AC2 and AC3 - returns READY when service can process requests
+  // Readiness endpoint /ready per AC2 and AC3 - returns UP when all dependencies are healthy
   app.get('/ready', async (req, res) => {
     const start = Date.now();
     const tracer = opentelemetry.trace.getTracer('paymentservice');
@@ -640,10 +668,15 @@ app = express();
           resolve();
         });
       });
+
+      // Check payment processor connection health
+      if (!charge.isHealthy()) {
+        throw new Error('Payment processor connection unhealthy');
+      }
       
       // All checks passed
       res.setHeader('Content-Type', 'application/json');
-      res.status(200).json({ status: 'READY' });
+      res.status(200).json({ status: 'UP' });
       
       span.setAttributes({
         'http.method': 'GET',
@@ -658,9 +691,9 @@ app = express();
         duration: Date.now() - start
       });
     } catch (err) {
-      // Check failed
+      // Any check failed
       res.setHeader('Content-Type', 'application/json');
-      res.status(503).json({ status: 'NOT_READY', reason: err.message });
+      res.status(503).json({ status: 'DOWN' });
       
       span.setAttributes({
         'http.method': 'GET',
@@ -679,12 +712,6 @@ app = express();
     } finally {
       span.end();
     }
-  });
-  
-  // Non-GET methods for /ready return 405 Method Not Allowed
-  app.all('/ready', (req, res) => {
-    res.setHeader('Content-Type', 'application/json');
-    res.status(405).send();
   });
 
   // Readiness endpoint - returns 200 OK with READY status when service can process requests (AC-2, AC-3)
@@ -769,6 +796,91 @@ app = express();
     });
     
     span.end();
+  });
+  
+  // Standard health check endpoint (liveness) per issue #1495
+  app.get('/health', (req, res) => {
+    const tracer = opentelemetry.trace.getTracer('paymentservice');
+    const span = tracer.startSpan('GET /health');
+    try {
+      res.status(200).json({ status: 'UP' });
+      span.setAttributes({
+        'http.method': 'GET',
+        'http.route': '/health',
+        'http.status_code': 200
+      });
+    } finally {
+      span.end();
+    }
+  });
+  
+  // Standard readiness check endpoint per issue #1495
+  app.get('/ready', async (req, res) => {
+    const tracer = opentelemetry.trace.getTracer('paymentservice');
+    const span = tracer.startSpan('GET /ready');
+    const start = Date.now();
+    try {
+      // Check all dependencies
+      let errors = [];
+      
+      // Check gRPC health
+      try {
+        await new Promise((resolve, reject) => {
+          healthClient.check({ service: '' }, (err, response) => {
+            if (err) return reject(err);
+            if (response.status !== health.servingStatus.SERVING) return reject(new Error('gRPC server not serving'));
+            resolve();
+          });
+        });
+      } catch (err) {
+        errors.push(err.message);
+      }
+      
+      // Check payment processor health
+      if (!charge.isHealthy()) {
+        errors.push('Payment processor connection unhealthy');
+      }
+      
+      if (errors.length === 0) {
+        res.status(200).json({ status: 'UP' });
+        span.setAttributes({
+          'http.method': 'GET',
+          'http.route': '/ready',
+          'http.status_code': 200
+        });
+        logger.info({
+          method: 'GET',
+          path: '/ready',
+          status: 200,
+          duration: Date.now() - start
+        });
+      } else {
+        res.status(503).json({ status: 'DOWN' });
+        span.setAttributes({
+          'http.method': 'GET',
+          'http.route': '/ready',
+          'http.status_code': 503,
+          'error.message': errors.join(', ')
+        });
+        logger.info({
+          method: 'GET',
+          path: '/ready',
+          status: 503,
+          duration: Date.now() - start,
+          errors: errors.join(', ')
+        });
+      }
+    } catch (err) {
+      res.status(503).json({ status: 'DOWN' });
+      span.setAttributes({
+        'http.method': 'GET',
+        'http.route': '/ready',
+        'http.status_code': 503,
+        'error.message': err.message
+      });
+    } finally {
+      span.end();
+    }
   });
   
   // New required /health/ready endpoint per issue #1238
