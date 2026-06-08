@@ -42,184 +42,89 @@ class AdServiceGetAdsValidationIntegrationTest {
     }
 
     @Test
-    void test_ac1_too_many_context_entries_returns_invalid_argument() {
-        // AC-1: >10 context entries -> INVALID_ARGUMENT
-        AdRequest.Builder builder = AdRequest.newBuilder();
-        // Add 11 context entries
-        for (int i = 0; i < 11; i++) {
-            builder.putContext("key" + i, "value" + i);
+    void test_ac1_empty_context_category_returns_invalid_argument() {
+        // AC-1: Given an AdRequest containing an empty string in the context_categories list
+        AdRequest request = AdRequest.newBuilder()
+                .addContextCategories("")
+                .build();
+
+        StatusRuntimeException exception = assertThrows(StatusRuntimeException.class, () -> stub.getAds(request));
+        assertEquals(Status.INVALID_ARGUMENT.getCode(), exception.getStatus().getCode());
+        assertEquals("Category cannot be empty", exception.getStatus().getDescription());
+    }
+
+    @Test
+    void test_ac2_context_category_too_long_returns_invalid_argument() {
+        // AC-2: Given an AdRequest containing a context_categories entry longer than 255 characters
+        String longCategory = "a".repeat(256);
+        AdRequest request = AdRequest.newBuilder()
+                .addContextCategories(longCategory)
+                .build();
+
+        StatusRuntimeException exception = assertThrows(StatusRuntimeException.class, () -> stub.getAds(request));
+        assertEquals(Status.INVALID_ARGUMENT.getCode(), exception.getStatus().getCode());
+        String expectedMsgStart = "Category '" + longCategory.substring(0, 10) + "...' exceeds maximum allowed length of 255 characters";
+        assertTrue(exception.getStatus().getDescription().startsWith("Category '"));
+        assertTrue(exception.getStatus().getDescription().endsWith("' exceeds maximum allowed length of 255 characters"));
+    }
+
+    @Test
+    void test_ac3_context_category_invalid_characters_returns_invalid_argument() {
+        // AC-3: Given an AdRequest containing a context_categories entry with non-alphanumeric characters
+        String invalidCategory = "electronics!";
+        AdRequest request = AdRequest.newBuilder()
+                .addContextCategories(invalidCategory)
+                .build();
+
+        StatusRuntimeException exception = assertThrows(StatusRuntimeException.class, () -> stub.getAds(request));
+        assertEquals(Status.INVALID_ARGUMENT.getCode(), exception.getStatus().getCode());
+        assertEquals("Category 'electronics!' contains invalid characters: only alphanumeric characters [a-zA-Z0-9] are allowed", exception.getStatus().getDescription());
+    }
+
+    @Test
+    void test_ac3_context_category_with_special_chars_rejected() {
+        // AC-3 Additional test cases for various invalid characters
+        String[] invalidCategories = {"home&kitchen", "clothes@store", "books$discount", "sports gear", "food!", "toys#sale"};
+        
+        for (String invalidCat : invalidCategories) {
+            AdRequest request = AdRequest.newBuilder()
+                    .addContextCategories(invalidCat)
+                    .build();
+
+            StatusRuntimeException exception = assertThrows(StatusRuntimeException.class, () -> stub.getAds(request));
+            assertEquals(Status.INVALID_ARGUMENT.getCode(), exception.getStatus().getCode());
+            assertTrue(exception.getStatus().getDescription().contains("contains invalid characters: only alphanumeric characters [a-zA-Z0-9] are allowed"));
+            assertTrue(exception.getStatus().getDescription().contains(invalidCat));
         }
-        AdRequest request = builder.build();
-
-        StatusRuntimeException exception = assertThrows(StatusRuntimeException.class, () -> stub.getAds(request));
-        assertEquals(Status.INVALID_ARGUMENT.getCode(), exception.getStatus().getCode());
     }
 
     @Test
-    void test_ac2_null_context_key_returns_invalid_argument() {
-        // AC-2: null context key -> INVALID_ARGUMENT
+    void test_ac4_valid_context_categories_accepted() {
+        // AC-4: Given an AdRequest where all context_categories entries are valid
         AdRequest request = AdRequest.newBuilder()
-                .putContext(null, "value")
-                .build();
-
-        StatusRuntimeException exception = assertThrows(StatusRuntimeException.class, () -> stub.getAds(request));
-        assertEquals(Status.INVALID_ARGUMENT.getCode(), exception.getStatus().getCode());
-    }
-
-    @Test
-    void test_ac3_empty_context_key_returns_invalid_argument() {
-        // AC-3: empty context key -> INVALID_ARGUMENT
-        AdRequest request = AdRequest.newBuilder()
-                .putContext("", "value")
-                .build();
-
-        StatusRuntimeException exception = assertThrows(StatusRuntimeException.class, () -> stub.getAds(request));
-        assertEquals(Status.INVALID_ARGUMENT.getCode(), exception.getStatus().getCode());
-    }
-
-    @Test
-    void test_ac4_context_key_too_long_returns_invalid_argument() {
-        // AC-4: key longer than 100 chars -> INVALID_ARGUMENT
-        String longKey = "a".repeat(101);
-        AdRequest request = AdRequest.newBuilder()
-                .putContext(longKey, "value")
-                .build();
-
-        StatusRuntimeException exception = assertThrows(StatusRuntimeException.class, () -> stub.getAds(request));
-        assertEquals(Status.INVALID_ARGUMENT.getCode(), exception.getStatus().getCode());
-    }
-
-    @Test
-    void test_ac5_null_context_value_returns_invalid_argument() {
-        // AC-5: null context value -> INVALID_ARGUMENT
-        AdRequest request = AdRequest.newBuilder()
-                .putContext("key", null)
-                .build();
-
-        StatusRuntimeException exception = assertThrows(StatusRuntimeException.class, () -> stub.getAds(request));
-        assertEquals(Status.INVALID_ARGUMENT.getCode(), exception.getStatus().getCode());
-    }
-
-    @Test
-    void test_ac6_empty_context_value_returns_invalid_argument() {
-        // AC-6: empty context value -> INVALID_ARGUMENT
-        AdRequest request = AdRequest.newBuilder()
-                .putContext("key", "")
-                .build();
-
-        StatusRuntimeException exception = assertThrows(StatusRuntimeException.class, () -> stub.getAds(request));
-        assertEquals(Status.INVALID_ARGUMENT.getCode(), exception.getStatus().getCode());
-    }
-
-    @Test
-    void test_ac7_context_value_too_long_returns_invalid_argument() {
-        // AC-7: value longer than 100 chars -> INVALID_ARGUMENT
-        String longValue = "a".repeat(101);
-        AdRequest request = AdRequest.newBuilder()
-                .putContext("key", longValue)
-                .build();
-
-        StatusRuntimeException exception = assertThrows(StatusRuntimeException.class, () -> stub.getAds(request));
-        assertEquals(Status.INVALID_ARGUMENT.getCode(), exception.getStatus().getCode());
-    }
-
-    @Test
-    void test_ac8_context_value_with_forbidden_characters_returns_invalid_argument() {
-        // AC-8: value with newlines, null bytes or control characters -> INVALID_ARGUMENT
-        // Test newline
-        AdRequest request1 = AdRequest.newBuilder()
-                .putContext("key", "value\nwithnewline")
-                .build();
-        StatusRuntimeException exception1 = assertThrows(StatusRuntimeException.class, () -> stub.getAds(request1));
-        assertEquals(Status.INVALID_ARGUMENT.getCode(), exception1.getStatus().getCode());
-
-        // Test carriage return
-        AdRequest request2 = AdRequest.newBuilder()
-                .putContext("key", "value\rwithreturn")
-                .build();
-        StatusRuntimeException exception2 = assertThrows(StatusRuntimeException.class, () -> stub.getAds(request2));
-        assertEquals(Status.INVALID_ARGUMENT.getCode(), exception2.getStatus().getCode());
-
-        // Test null byte
-        AdRequest request3 = AdRequest.newBuilder()
-                .putContext("key", "value\0withnull")
-                .build();
-        StatusRuntimeException exception3 = assertThrows(StatusRuntimeException.class, () -> stub.getAds(request3));
-        assertEquals(Status.INVALID_ARGUMENT.getCode(), exception3.getStatus().getCode());
-
-        // Test control character (ASCII 0x1F = unit separator)
-        AdRequest request4 = AdRequest.newBuilder()
-                .putContext("key", "value\u001Fwithcontrol")
-                .build();
-        StatusRuntimeException exception4 = assertThrows(StatusRuntimeException.class, () -> stub.getAds(request4));
-        assertEquals(Status.INVALID_ARGUMENT.getCode(), exception4.getStatus().getCode());
-
-        // Test DEL character (0x7F)
-        AdRequest request5 = AdRequest.newBuilder()
-                .putContext("key", "value\u007Fwithdel")
-                .build();
-        StatusRuntimeException exception5 = assertThrows(StatusRuntimeException.class, () -> stub.getAds(request5));
-        assertEquals(Status.INVALID_ARGUMENT.getCode(), exception5.getStatus().getCode());
-    }
-
-    @Test
-    void test_ac9_valid_request_processed_normally() {
-        // AC-9: valid request returns success
-        AdRequest request = AdRequest.newBuilder()
-                .putContext("device_type", "mobile")
-                .putContext("user_segment", "premium")
+                .addContextCategories("electronics")
+                .addContextCategories("clothes")
+                .addContextCategories("books123")
+                .addContextCategories("HomeAppliances")
                 .build();
 
         AdResponse response = assertDoesNotThrow(() -> stub.getAds(request));
         assertNotNull(response);
-        // Valid request should return at least one ad as per existing service behavior
         assertFalse(response.getAdsList().isEmpty());
     }
 
     @Test
-    void test_ac1_valid_category_accepted_normally() {
-        // AC-1: Category with alphanumeric and underscore, length <=64 is accepted
+    void test_ac5_multiple_invalid_categories_reject_first() {
+        // AC-5: Verify validation fails immediately on first invalid category
         AdRequest request = AdRequest.newBuilder()
-                .setCategory("valid_category_123")
-                .build();
-
-        AdResponse response = assertDoesNotThrow(() -> stub.getAds(request));
-        assertNotNull(response);
-    }
-
-    @Test
-    void test_ac2_invalid_category_characters_rejected() {
-        // AC-2: Category with invalid characters returns INVALID_ARGUMENT with proper message
-        AdRequest request = AdRequest.newBuilder()
-                .setCategory("invalid category!@#")
+                .addContextCategories("validCategory1")
+                .addContextCategories("invalid category!") // This should fail first
+                .addContextCategories("validCategory2")
+                .addContextCategories("anotherInvalid@")
                 .build();
 
         StatusRuntimeException exception = assertThrows(StatusRuntimeException.class, () -> stub.getAds(request));
         assertEquals(Status.INVALID_ARGUMENT.getCode(), exception.getStatus().getCode());
-        assertEquals("Invalid category: must only contain alphanumeric characters and underscores", exception.getStatus().getDescription());
-    }
-
-    @Test
-    void test_ac3_category_length_exceeded_rejected() {
-        // AC-3: Category longer than 64 characters returns INVALID_ARGUMENT with proper message
-        String longCategory = "a".repeat(65);
-        AdRequest request = AdRequest.newBuilder()
-                .setCategory(longCategory)
-                .build();
-
-        StatusRuntimeException exception = assertThrows(StatusRuntimeException.class, () -> stub.getAds(request));
-        assertEquals(Status.INVALID_ARGUMENT.getCode(), exception.getStatus().getCode());
-        assertEquals("Invalid category: must not exceed 64 characters in length", exception.getStatus().getDescription());
-    }
-
-    @Test
-    void test_ac5_empty_category_allowed() {
-        // AC-5: Empty category string is allowed per existing behavior
-        AdRequest request = AdRequest.newBuilder()
-                .setCategory("")
-                .build();
-
-        AdResponse response = assertDoesNotThrow(() -> stub.getAds(request));
-        assertNotNull(response);
+        assertTrue(exception.getStatus().getDescription().contains("invalid category!"));
     }
 }
