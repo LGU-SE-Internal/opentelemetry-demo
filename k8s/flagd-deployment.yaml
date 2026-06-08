@@ -19,36 +19,37 @@ spec:
         image: ghcr.io/open-feature/flagd:v0.6.0
         ports:
         - containerPort: 8013
-          name: health
+          name: grpc-eval
         - containerPort: 8014
-          name: flag-eval
+          name: http-health
         livenessProbe:
           httpGet:
             path: /healthz
-            port: 8013
+            port: 8014
           initialDelaySeconds: 5
           periodSeconds: 10
-          timeoutSeconds: 3
+          timeoutSeconds: 2
           failureThreshold: 3
         readinessProbe:
           httpGet:
-            path: /healthz
-            port: 8013
+            path: /readyz
+            port: 8014
           initialDelaySeconds: 5
           periodSeconds: 10
-          timeoutSeconds: 3
+          timeoutSeconds: 2
           failureThreshold: 3
         resources:
           requests:
             cpu: 100m
             memory: 128Mi
           limits:
-            cpu: 500m
+            cpu: 200m
             memory: 256Mi
         securityContext:
           runAsNonRoot: true
           runAsUser: 1000
           allowPrivilegeEscalation: false
+          privileged: false
           readOnlyRootFilesystem: true
           seccompProfile:
             type: RuntimeDefault
@@ -77,8 +78,8 @@ metadata:
 spec:
   ports:
   - port: 8013
-    name: health
+    name: grpc-eval
   - port: 8014
-    name: flag-eval
+    name: http-health
   selector:
     app: flagd
