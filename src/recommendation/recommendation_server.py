@@ -11,6 +11,7 @@ import os
 import random
 import json
 import re
+import uuid
 import signal
 from concurrent import futures
 
@@ -216,22 +217,16 @@ class RecommendationService(demo_pb2_grpc.RecommendationServiceServicer):
         sanitized_user_id = sanitize_string(request.user_id)
         sanitized_product_ids = [sanitize_string(pid) for pid in request.product_ids]
         
-        # AC-1: Validate user_id is present
-        if not sanitized_user_id:
-            error_msg = "user_id parameter is required"
-            logger.error(
-                f"Validation failed for recommendation request (trace_id={trace_id}): parameter=user_id, error={error_msg}"
-            )
-            context.abort(grpc.StatusCode.INVALID_ARGUMENT, error_msg)
-        
-        # AC-2: Validate user_id format
-        user_id_pattern = re.compile(r'^[a-zA-Z0-9-]{3,36}$')
-        if not user_id_pattern.match(sanitized_user_id):
-            error_msg = "user_id has invalid format: must be alphanumeric (including '-') between 3-36 characters"
-            logger.error(
-                f"Validation failed for recommendation request (trace_id={trace_id}): parameter=user_id, error={error_msg}"
-            )
-            context.abort(grpc.StatusCode.INVALID_ARGUMENT, error_msg)
+        # AC-1: If user_id is present, validate it's UUID v4 format
+        if sanitized_user_id:
+            try:
+                user_uuid = uuid.UUID(sanitized_user_id, version=4)
+            except ValueError:
+                error_msg = "user_id has invalid format: must be UUID v4"
+                logger.error(
+                    f"Validation failed for recommendation request (trace_id={trace_id}): parameter=user_id, error={error_msg}, value={sanitized_user_id}"
+                )
+                context.abort(grpc.StatusCode.INVALID_ARGUMENT, error_msg)
         
         # AC-3: Validate product_ids list size <=100
         if len(sanitized_product_ids) > 100:
@@ -242,23 +237,23 @@ class RecommendationService(demo_pb2_grpc.RecommendationServiceServicer):
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, error_msg)
         
         # AC-4: Validate each product ID format
-        product_id_pattern = re.compile(r'^[a-zA-Z0-9]{3,12}$')
+        product_id_pattern = re.compile(r'^[a-zA-Z0-9]+$')
         for idx, product_id in enumerate(sanitized_product_ids):
             if not product_id_pattern.match(product_id):
-                error_msg = f"product ID at index {idx}: invalid format, must be alphanumeric 3-12 characters"
+                error_msg = f"product ID at index {idx}: invalid format, must be alphanumeric only"
                 logger.error(
                     f"Validation failed for recommendation request (trace_id={trace_id}): parameter=product_ids[{idx}], error={error_msg}, value={product_id}"
                 )
                 context.abort(grpc.StatusCode.INVALID_ARGUMENT, error_msg)
         
-        # AC-5: Validate result_size bounds
-        result_size = request.result_size
-        if result_size == 0:  # proto3 int32 default value, use default 5
-            result_size = 5
-        if result_size < 1 or result_size > 20:
-            error_msg = "result_size must be between 1 and 20 (inclusive)"
+        # AC-4: Validate max_results bounds
+        max_results = getattr(request, 'max_results', 5)
+        if max_results <= 0:  # use default 5 if not set or 0
+            max_results = 5
+        if max_results < 1 or max_results > 20:
+            error_msg = "max_results must be between 1 and 20 (inclusive)"
             logger.error(
-                f"Validation failed for recommendation request (trace_id={trace_id}): parameter=result_size, error={error_msg}, value={result_size}"
+                f"Validation failed for recommendation request (trace_id={trace_id}): parameter=max_results, error={error_msg}, value={max_results}"
             )
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, error_msg)
         
