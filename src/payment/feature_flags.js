@@ -20,12 +20,14 @@ const opensTotalCounter = new promClient.Counter({
   help: 'Total number of times circuit has transitioned to open state',
   labelNames: ['service'],
 });
+opensTotalCounter.inc({ service: 'paymentservice' }, 0); // Initialize to 0
 
 const fallbackCallsCounter = new promClient.Counter({
   name: 'feature_flag_circuit_breaker_fallback_calls_total',
   help: 'Total number of flag calls that returned defaultValue due to open circuit or evaluation failure',
   labelNames: ['service'],
 });
+fallbackCallsCounter.inc({ service: 'paymentservice' }, 0); // Initialize to 0
 
 // Circuit breaker configuration
 const CIRCUIT_BREAKER_OPTIONS = {

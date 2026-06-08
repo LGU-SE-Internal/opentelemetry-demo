@@ -10,6 +10,8 @@ describe('Feature Flag Circuit Breaker Acceptance Criteria', () => {
 
   beforeEach(() => {
     sandbox = sinon.createSandbox();
+    // Enable fake timers for time-based tests
+    sandbox.useFakeTimers();
     promClient.register.clear();
     
     // Clear require cache to reload feature_flags module fresh each test
@@ -34,9 +36,11 @@ describe('Feature Flag Circuit Breaker Acceptance Criteria', () => {
    * the provided defaultValue immediately for 30 seconds with no network calls to flagd.
    */
   it('test_ac1_circuit_opens_after_5_consecutive_failures', async () => {
-    // Arrange
-    flagEvalStub.rejects(new Error('flagd connection error'));
-    const defaultValue = false;
+      // Arrange
+      const error = new Error('flagd connection error');
+      error.code = 'ECONNREFUSED';
+      flagEvalStub.rejects(error);
+      const defaultValue = false;
 
     // Act: Call 5 times, all should fail but return default
     for (let i = 0; i < 5; i++) {
@@ -68,9 +72,11 @@ describe('Feature Flag Circuit Breaker Acceptance Criteria', () => {
    * to half-open state: the next flag call will attempt to connect to flagd, if the call
    * succeeds the circuit transitions to closed state; if the call fails the circuit re-opens for another 30 seconds.
    */
-  it('test_ac2_circuit_transitions_to_half_open_after_30s', async () => {
+    it('test_ac2_circuit_transitions_to_half_open_after_30s', async () => {
     // Arrange: Open the circuit first
-    flagEvalStub.rejects(new Error('flagd connection error'));
+    const error = new Error('flagd connection error');
+    error.code = 'ECONNREFUSED';
+    flagEvalStub.rejects(error);
     const defaultValue = false;
     for (let i = 0; i < 5; i++) {
       await getFlagValue('test-flag', defaultValue);
@@ -119,7 +125,9 @@ describe('Feature Flag Circuit Breaker Acceptance Criteria', () => {
    */
   it('test_ac3_retry_logic_runs_before_circuit_breaker_counts_failure', async () => {
     // Arrange: We have 3 retries configured per call
-    flagEvalStub.rejects(new Error('flagd timeout'));
+    const error = new Error('flagd timeout');
+    error.code = 'ETIMEDOUT';
+    flagEvalStub.rejects(error);
     const defaultValue = false;
 
     // Act: Single call should trigger retries first
@@ -135,7 +143,9 @@ describe('Feature Flag Circuit Breaker Acceptance Criteria', () => {
    */
   it('test_ac4_no_retries_when_circuit_open', async () => {
     // Arrange: Open the circuit
-    flagEvalStub.rejects(new Error('flagd connection error'));
+    const error = new Error('flagd connection error');
+    error.code = 'ECONNREFUSED';
+    flagEvalStub.rejects(error);
     const defaultValue = false;
     for (let i = 0; i < 5; i++) {
       await getFlagValue('test-flag', defaultValue);
@@ -175,7 +185,9 @@ describe('Feature Flag Circuit Breaker Acceptance Criteria', () => {
     expect(fallbackMetric.values[0].labels.service).to.equal('paymentservice');
 
     // Trigger a failure
-    flagEvalStub.rejects(new Error('error'));
+    const error = new Error('error');
+    error.code = 'ECONNREFUSED';
+    flagEvalStub.rejects(error);
     await getFlagValue('test-flag', false);
 
     // Fallback count should be 1
