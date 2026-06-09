@@ -11,6 +11,16 @@ const { RateLimiterMemory } = require('rate-limiter-flexible')
 
 const charge = require('./charge')
 const logger = require('./logger')
+const cardValidator = require('simple-card-validator')
+
+// Supported currencies (ISO 4217 3-letter codes)
+const SUPPORTED_CURRENCIES = ['USD', 'EUR', 'GBP', 'JPY', 'CAD', 'AUD', 'CHF', 'CNY', 'SEK', 'NZD']
+
+async function loadSupportedCurrencies() {
+  return SUPPORTED_CURRENCIES
+}
+
+module.exports.loadSupportedCurrencies = loadSupportedCurrencies
 
 // Graceful shutdown state
 let isShuttingDown = false;
@@ -382,9 +392,98 @@ async function getPaymentMethodsServiceHandler(call, callback) {
 async function refundServiceHandler(call, callback) {
   const span = opentelemetry.trace.getActiveSpan();
   try {
-    const { amount, credit_card } = call.request;
+    const { amount, credit_card, currency_code } = call.request;
     logger.info("Refund request received.");
-    // Simple refund implementation for demo
+    
+    // AC-1: Validate required fields
+    if (!amount) {
+      const err = new Error('Missing required field: amount');
+      err.code = grpc.status.INVALID_ARGUMENT;
+      throw err;
+    }
+    if (!credit_card) {
+      const err = new Error('Missing required field: credit_card');
+      err.code = grpc.status.INVALID_ARGUMENT;
+      throw err;
+    }
+    if (!currency_code) {
+      const err = new Error('Missing required field: currency_code');
+      err.code = grpc.status.INVALID_ARGUMENT;
+      throw err;
+    }
+    
+    // Validate nested required fields for amount
+    if (amount.units === undefined || amount.nanos === undefined) {
+      const err = new Error('Missing required field in amount: units and nanos are required');
+      err.code = grpc.status.INVALID_ARGUMENT;
+      throw err;
+    }
+    
+    // Validate nested required fields for credit card
+    if (!credit_card.number || credit_card.expiry_month === undefined || credit_card.expiry_year === undefined || !credit_card.cvv) {
+      const err = new Error('Missing required field in credit_card: number, expiry_month, expiry_year, and cvv are required');
+      err.code = grpc.status.INVALID_ARGUMENT;
+      throw err;
+    }
+    
+    // AC-2: Validate amount values
+    if (amount.units <= 0) {
+      const err = new Error('Invalid amount: units must be positive');
+      err.code = grpc.status.INVALID_ARGUMENT;
+      throw err;
+    }
+    if (amount.nanos < 0 || amount.nanos >= 1000000000) {
+      const err = new Error('Invalid amount: nanos must be between 0 and 999,999,999');
+      err.code = grpc.status.INVALID_ARGUMENT;
+      throw err;
+    }
+    
+    // AC-3: Validate credit card number
+    if (!/^\d{13,19}$/.test(credit_card.number)) {
+      const err = new Error('Invalid credit card number: must be 13-19 numeric digits');
+      err.code = grpc.status.INVALID_ARGUMENT;
+      throw err;
+    }
+    
+    const card = cardValidator(credit_card.number);
+    const { valid } = card.getCardDetails();
+    if (!valid) {
+      const err = new Error('Invalid credit card number: failed Luhn check');
+      err.code = grpc.status.INVALID_ARGUMENT;
+      throw err;
+    }
+    
+    // AC-4: Validate expiry date
+    if (credit_card.expiry_month < 1 || credit_card.expiry_month > 12) {
+      const err = new Error('Invalid expiry month: must be between 1 and 12');
+      err.code = grpc.status.INVALID_ARGUMENT;
+      throw err;
+    }
+    
+    const currentYear = new Date().getFullYear();
+    const currentMonth = new Date().getMonth() + 1; // JS months are 0-based
+    if (credit_card.expiry_year < currentYear || 
+        (credit_card.expiry_year === currentYear && credit_card.expiry_month < currentMonth)) {
+      const err = new Error('Invalid expiry date: credit card is expired');
+      err.code = grpc.status.INVALID_ARGUMENT;
+      throw err;
+    }
+    
+    // AC-5: Validate CVV
+    if (!/^\d{3,4}$/.test(credit_card.cvv)) {
+      const err = new Error('Invalid CVV: must be 3 or 4 numeric digits');
+      err.code = grpc.status.INVALID_ARGUMENT;
+      throw err;
+    }
+    
+    // AC-6: Validate currency code
+    if (!/^[A-Z]{3}$/.test(currency_code) || !SUPPORTED_CURRENCIES.includes(currency_code)) {
+      const err = new Error('Invalid currency code: must be 3-letter ISO 4217 code of a supported currency');
+      err.code = grpc.status.INVALID_ARGUMENT;
+      throw err;
+    }
+    
+    // AC-7: Process valid request normally
     callback(null, {
       refund_id: `refund_${Date.now()}`,
       success: true,
