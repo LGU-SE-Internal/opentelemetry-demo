@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::env;
 use std::time::Duration;
+use regex::Regex;
 use tonic::{transport::Server, Request, Status, Code, service::Interceptor};
 use tower_governor::{Governor, GovernorConfig, GovernorConfigBuilder, key_extractor::KeyExtractor, error::GovernorError};
 use governor::Quota;
@@ -49,11 +50,82 @@ impl Drop for ActiveRequestGuard {
 #[derive(Debug, Clone)]
 struct ShippingServiceImpl;
 
+lazy_static::lazy_static! {
+    static ref ZIP_CODE_REGEX: Regex = Regex::new(r"^\d{5}(-\d{4})?$").unwrap();
+    static ref TRACKING_ID_REGEX: Regex = Regex::new(r"^OTEL-DEMO-SHIP-[A-F0-9]{12}$").unwrap();
+}
+
+impl ShippingServiceImpl {
+    // Validate GetQuoteRequest
+    fn validate_get_quote_request(req: &GetQuoteRequest) -> Result<(), Status> {
+        if req.items.is_empty() {
+            return Err(Status::invalid_argument("items list cannot be empty"));
+        }
+        for (i, item) in req.items.iter().enumerate() {
+            if item.quantity <= 0 {
+                return Err(Status::invalid_argument(format!(
+                    "item at index {} has invalid non-positive quantity: {}",
+                    i, item.quantity
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    // Validate ShipOrderRequest
+    fn validate_ship_order_request(req: &ShipOrderRequest) -> Result<(), Status> {
+        if req.items.is_empty() {
+            return Err(Status::invalid_argument("items list cannot be empty"));
+        }
+        let address = req.address.as_ref().ok_or_else(|| Status::invalid_argument("address is required"))?;
+        // Check all address fields are non-empty
+        if address.street.is_empty() {
+            return Err(Status::invalid_argument("address field street cannot be empty"));
+        }
+        if address.city.is_empty() {
+            return Err(Status::invalid_argument("address field city cannot be empty"));
+        }
+        if address.state.is_empty() {
+            return Err(Status::invalid_argument("address field state cannot be empty"));
+        }
+        if address.zip_code.is_empty() {
+            return Err(Status::invalid_argument("address field zip_code cannot be empty"));
+        }
+        if address.country.is_empty() {
+            return Err(Status::invalid_argument("address field country cannot be empty"));
+        }
+        // Validate zip code format
+        if !ZIP_CODE_REGEX.is_match(&address.zip_code) {
+            return Err(Status::invalid_argument(format!(
+                "invalid zip_code format: {}, expected 5-digit or 5-4 digit US ZIP",
+                address.zip_code
+            )));
+        }
+        Ok(())
+    }
+
+    // Validate GetShippingRequest
+    fn validate_get_shipping_request(req: &GetShippingRequest) -> Result<(), Status> {
+        if req.tracking_id.is_empty() {
+            return Err(Status::invalid_argument("tracking_id cannot be empty"));
+        }
+        if !TRACKING_ID_REGEX.is_match(&req.tracking_id) {
+            return Err(Status::invalid_argument(format!(
+                "invalid tracking_id format: {}, expected format OTEL-DEMO-SHIP-<12 hex characters>",
+                req.tracking_id
+            )));
+        }
+        Ok(())
+    }
+}
+
 #[tonic::async_trait]
 impl ShippingService for ShippingServiceImpl {
     async fn get_quote(&self, request: Request<GetQuoteRequest>) -> Result<tonic::Response<GetQuoteResponse>, Status> {
         // Delegate to existing get_quote logic
         let req = request.into_inner();
+        // Validate request before processing
+        Self::validate_get_quote_request(&req)?;
         let itemct: u32 = req.items.iter().map(|item| item.quantity as u32).sum();
         let quote = match crate::quote::create_quote_from_count(itemct).await {
             Ok(q) => q,
@@ -71,12 +143,23 @@ impl ShippingService for ShippingServiceImpl {
     async fn ship_order(&self, request: Request<ShipOrderRequest>) -> Result<tonic::Response<ShipOrderResponse>, Status> {
         // Delegate to existing ship_order logic
         let req = request.into_inner();
+        // Validate request before processing
+        Self::validate_ship_order_request(&req)?;
         let tid = crate::tracking::create_tracking_id();
         Ok(tonic::Response::new(ShipOrderResponse { tracking_id: tid }))
     }
 
-    async fn get_shipping(&self, _request: Request<GetShippingRequest>) -> Result<tonic::Response<GetShippingResponse>, Status> {
-        Err(Status::unimplemented("GetShipping not implemented"))
+    async fn get_shipping(&self, request: Request<GetShippingRequest>) -> Result<tonic::Response<GetShippingResponse>, Status> {
+        let req = request.into_inner();
+        // Validate request before processing
+        Self::validate_get_shipping_request(&req)?;
+        // TODO: Implement actual tracking lookup logic (out of scope for this task)
+        // For now, return a dummy response for valid tracking IDs
+        Ok(tonic::Response::new(GetShippingResponse {
+            tracking_id: req.tracking_id,
+            status: "SHIPPED".to_string(),
+            estimated_delivery_date: Utc::now().naive_utc().date().to_string(),
+        }))
     }
 }
 
