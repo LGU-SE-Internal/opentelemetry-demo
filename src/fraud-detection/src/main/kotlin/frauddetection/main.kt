@@ -31,10 +31,15 @@ import io.grpc.StatusRuntimeException
 import io.grpc.Context
 import io.grpc.protobuf.services.HealthStatusManager
 import io.grpc.health.v1.HealthCheckResponse.ServingStatus
-import io.grpc.netty.shaded.io.grpc.netty.GrpcSslContexts
-import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder
-import io.grpc.netty.shaded.io.netty.handler.ssl.ClientAuth
 import io.grpc.netty.shaded.io.netty.handler.ssl.SslContext
+import io.grpc.netty.shaded.io.netty.channel.ChannelHandlerContext
+import io.grpc.netty.shaded.io.netty.channel.ChannelInboundHandlerAdapter
+import io.grpc.netty.shaded.io.netty.handler.codec.http.DefaultFullHttpResponse
+import io.grpc.netty.shaded.io.netty.handler.codec.http.HttpResponseStatus
+import io.grpc.netty.shaded.io.netty.handler.codec.http.HttpVersion
+import io.grpc.netty.shaded.io.netty.handler.codec.http.HttpHeaderNames
+import io.grpc.netty.shaded.io.netty.buffer.Unpooled
+import io.grpc.netty.shaded.io.netty.util.CharsetUtil
 import io.opentelemetry.demo.frauddetection.CheckTransactionRequest
 import io.opentelemetry.demo.frauddetection.CheckTransactionResponse
 import io.opentelemetry.demo.frauddetection.FraudDetectionServiceGrpc
@@ -45,6 +50,57 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
 import sun.misc.Signal
 import sun.misc.SignalHandler
+
+val isShuttingDown = AtomicBoolean(false)
+val kafkaConnected = AtomicBoolean(false)
+
+class HealthCheckHandler : ChannelInboundHandlerAdapter() {
+    override fun channelRead(ctx: ChannelHandlerContext, msg: Any) {
+        if (msg is io.grpc.netty.shaded.io.netty.handler.codec.http.HttpRequest) {
+            val uri = msg.uri()
+            if (msg.method() == io.grpc.netty.shaded.io.netty.handler.codec.http.HttpMethod.GET) {
+                when (uri) {
+                    "/health/liveness" -> handleLiveness(ctx)
+                    "/health/readiness" -> handleReadiness(ctx)
+                    else -> ctx.fireChannelRead(msg)
+                }
+                return
+            }
+        }
+        ctx.fireChannelRead(msg)
+    }
+
+    private fun handleLiveness(ctx: ChannelHandlerContext) {
+        val status = if (isShuttingDown.get()) HttpResponseStatus.SERVICE_UNAVAILABLE else HttpResponseStatus.OK
+        val responseBody = if (isShuttingDown.get()) """{"status":"DOWN","error":"Service is shutting down"}""" else """{"status":"UP"}"""
+        sendJsonResponse(ctx, status, responseBody)
+    }
+
+    private fun handleReadiness(ctx: ChannelHandlerContext) {
+        val allDependenciesUp = kafkaConnected.get() && !isShuttingDown.get()
+        val status = if (allDependenciesUp) HttpResponseStatus.OK else HttpResponseStatus.SERVICE_UNAVAILABLE
+        val responseBody = if (allDependenciesUp) {
+            """{"status":"UP","dependencies":{"kafka":"UP"}}"""
+        } else {
+            val errors = mutableListOf<String>()
+            if (isShuttingDown.get()) errors.add("Service is shutting down")
+            if (!kafkaConnected.get()) errors.add("Kafka connection unavailable")
+            """{"status":"DOWN","error":"${errors.joinToString("; ")}","dependencies":{"kafka":"${if (kafkaConnected.get()) "UP" else "DOWN: Connection failed"}"}}"""
+        }
+        sendJsonResponse(ctx, status, responseBody)
+    }
+
+    private fun sendJsonResponse(ctx: ChannelHandlerContext, status: HttpResponseStatus, body: String) {
+        val response = DefaultFullHttpResponse(
+            HttpVersion.HTTP_1_1,
+            status,
+            Unpooled.copiedBuffer(body, CharsetUtil.UTF_8)
+        )
+        response.headers().set(HttpHeaderNames.CONTENT_TYPE, "application/json")
+        response.headers().set(HttpHeaderNames.CONTENT_LENGTH, response.content().readableBytes())
+        ctx.writeAndFlush(response)
+    }
+}
 
 class FraudDetectionServiceImpl : FraudDetectionServiceGrpc.FraudDetectionServiceImplBase() {
     override fun checkTransaction(
@@ -628,12 +684,30 @@ fun main() {
         exitProcess(1)
     }
 
+    // Start HTTP health check server on same port as plaintext gRPC service (8080 for test)
+    val healthCheckPort = plaintextPort
+    val httpServer = io.grpc.netty.shaded.io.netty.bootstrap.ServerBootstrap()
+        .group(io.grpc.netty.shaded.io.netty.channel.nio.NioEventLoopGroup(), io.grpc.netty.shaded.io.netty.channel.nio.NioEventLoopGroup())
+        .channel(io.grpc.netty.shaded.io.netty.channel.socket.nio.NioServerSocketChannel::class.java)
+        .childHandler(object : io.grpc.netty.shaded.io.netty.channel.ChannelInitializer<io.grpc.netty.shaded.io.netty.channel.socket.SocketChannel>() {
+            override fun initChannel(ch: io.grpc.netty.shaded.io.netty.channel.socket.SocketChannel) {
+                val pipeline = ch.pipeline()
+                pipeline.addLast(io.grpc.netty.shaded.io.netty.handler.codec.http.HttpServerCodec())
+                pipeline.addLast(io.grpc.netty.shaded.io.netty.handler.codec.http.HttpObjectAggregator(1024 * 1024))
+                pipeline.addLast(HealthCheckHandler())
+            }
+        })
+        .bind(healthCheckPort)
+        .sync()
+        .channel()
+    logger.info("HTTP health check endpoints available on port $healthCheckPort")
+
     // Initialize graceful shutdown manager
     val shutdownManager = GracefulShutdownManagerImpl()
-    shutdownManager.registerResources(servers.first(), consumer) // TODO: handle multiple servers if needed
-
+    shutdownManager.registerResources(servers.first(), consumer, httpServer) // TODO: handle multiple servers if needed
     // Register signal handlers for SIGINT (2) and SIGTERM (15)
     val signalHandler = SignalHandler { signal ->
+        isShuttingDown.set(true)
         val shutdownResult = shutdownManager.shutdown()
         val exitCode = if (shutdownResult.shutdownSuccess) {
             0
@@ -647,6 +721,33 @@ fun main() {
         Signal.handle(Signal("INT"), signalHandler)
         Signal.handle(Signal("TERM"), signalHandler)
     } catch (e: IllegalArgumentException) {
+        logger.warn("Signal handling not supported on this platform, falling back to JVM shutdown hook", e)
+    }
+
+    // Add backup shutdown hook
+    Runtime.getRuntime().addShutdownHook(thread(start = false) {
+        if (!shutdownInitiated.get()) {
+            isShuttingDown.set(true)
+            logger.info("Received shutdown request via JVM shutdown hook, initiating graceful shutdown")
+            shutdownManager.shutdown()
+        }
+    })
+
+    // Background thread to monitor Kafka health
+    thread(start = true, isDaemon = true) {
+        while (true) {
+            val currentTime = System.currentTimeMillis()
+            val timeSinceLastPoll = currentTime - lastSuccessfulPollTime.get()
+
+            val isHealthy = kafkaConsumerConnected && timeSinceLastPoll < MAX_UNHEALTHY_POLL_INTERVAL_MS
+            kafkaConnected.set(isHealthy)
+            val newStatus = if (isHealthy) ServingStatus.SERVING else ServingStatus.NOT_SERVING
+
+            healthStatusManager.setStatus(HealthStatusManager.SERVICE_NAME_ALL_SERVICES, newStatus)
+
+            Thread.sleep(HEALTH_CHECK_INTERVAL_MS)
+        }
+    }
         logger.warn("Signal handling not supported on this platform, falling back to JVM shutdown hook", e)
     }
 
