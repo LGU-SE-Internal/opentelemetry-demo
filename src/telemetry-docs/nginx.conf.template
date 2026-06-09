@@ -67,5 +67,20 @@ http {
             access_log  on;
             allow all;
         }
+
+        location /health {
+            otel_trace off;
+            add_header Content-Type application/json always;
+            return 200 '{"status": "healthy", "service": "telemetry-docs"}';
+        }
+
+        location /ready {
+            otel_trace off;
+            add_header Content-Type application/json always;
+            if (-f $document_root/index.html) {
+                return 200 '{"status": "ready", "service": "telemetry-docs", "content_available": true}';
+            }
+            return 503 '{"status": "not_ready", "service": "telemetry-docs", "content_available": false}';
+        }
     }
 }
