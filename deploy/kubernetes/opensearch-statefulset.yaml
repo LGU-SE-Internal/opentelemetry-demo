@@ -17,6 +17,11 @@ spec:
         app.kubernetes.io/name: opensearch
         app.kubernetes.io/part-of: opentelemetry-demo
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
       containers:
       - name: opensearch
         image: opensearchproject/opensearch:3.5.0
@@ -42,22 +47,21 @@ spec:
           value: "true"
         livenessProbe:
           httpGet:
-            path: /_cluster/health
+            path: /
             port: 9200
-          initialDelaySeconds: 120
-          periodSeconds: 30
-          timeoutSeconds: 10
-          failureThreshold: 3
-          successThreshold: 1
-        readinessProbe:
-          httpGet:
-            path: /_cluster/health
-            port: 9200
+            scheme: HTTP
           initialDelaySeconds: 30
           periodSeconds: 10
-          timeoutSeconds: 5
           failureThreshold: 3
-          successThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /_cluster/health?local=true
+            port: 9200
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          successThreshold: 2
+          failureThreshold: 3
         securityContext:
           runAsUser: 1000
           runAsNonRoot: true
@@ -68,8 +72,8 @@ spec:
               - ALL
         resources:
           requests:
-            cpu: "500m"
-            memory: "1Gi"
+            cpu: "1"
+            memory: "2Gi"
           limits:
             cpu: "2"
             memory: "4Gi"
