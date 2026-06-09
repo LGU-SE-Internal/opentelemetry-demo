@@ -33,6 +33,7 @@ repositories {
 
 
 dependencies {
+    implementation("io.quarkus:quarkus-smallrye-health")
     implementation("com.google.protobuf:protobuf-java:${protobufVersion}")
     testImplementation(kotlin("test"))
     implementation(kotlin("script-runtime"))
@@ -42,6 +43,7 @@ dependencies {
     implementation("io.grpc:grpc-stub:${grpcVersion}")
     implementation("io.grpc:grpc-netty:${grpcVersion}")
     implementation("io.grpc:grpc-services:${grpcVersion}")
+    implementation("io.netty:netty-codec-http:4.1.112.Final")
     implementation("io.opentelemetry:opentelemetry-api:1.62.0")
     implementation("io.opentelemetry:opentelemetry-sdk:1.62.0")
     implementation("io.opentelemetry:opentelemetry-extension-annotations:1.18.0")
