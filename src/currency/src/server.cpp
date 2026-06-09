@@ -385,14 +385,30 @@ class CurrencyService final : public oteldemo::CurrencyService::Service
         span->End();
         return Status(grpc::INVALID_ARGUMENT, "from currency code cannot be empty");
       }
+
+      // Validate monetary amount units are non-negative
+      if (from.units() < 0) {
+        span->SetStatus(StatusCode::kError);
+        logger->Error(std::string(__func__) + " conversion failed: negative units value: " + std::to_string(from.units()));
+        span->End();
+        return Status(grpc::INVALID_ARGUMENT, "Monetary amount units cannot be negative: " + std::to_string(from.units()));
+      }
+
+      // Validate monetary amount nanos are within bounds
+      if (from.nanos() < 0 || from.nanos() > 999999999) {
+        span->SetStatus(StatusCode::kError);
+        logger->Error(std::string(__func__) + " conversion failed: nanos value out of bounds: " + std::to_string(from.nanos()));
+        span->End();
+        return Status(grpc::INVALID_ARGUMENT, "Monetary amount nanos must be between 0 and 999,999,999: " + std::to_string(from.nanos()));
+      }
       
       std::shared_lock<std::shared_mutex> lock(rates_mutex);
       // Validate from currency code is supported
       if (current_rates.find(from_code) == current_rates.end()) {
         span->SetStatus(StatusCode::kError);
-        logger->Error(std::string(__func__) + " conversion failed: unsupported from currency code: " + from_code);
+        logger->Error(std::string(__func__) + " conversion failed: unsupported source currency code: " + from_code);
         span->End();
-        return Status(grpc::INVALID_ARGUMENT, "unsupported currency code: " + from_code);
+        return Status(grpc::INVALID_ARGUMENT, "Invalid source currency code: " + from_code);
       }
       double rate = current_rates.at(from_code);
       double one_euro = getDouble(from) / rate ;
@@ -410,9 +426,9 @@ class CurrencyService final : public oteldemo::CurrencyService::Service
       // Validate to currency code is supported
       if (current_rates.find(to_code) == current_rates.end()) {
         span->SetStatus(StatusCode::kError);
-        logger->Error(std::string(__func__) + " conversion failed: unsupported to currency code: " + to_code);
+        logger->Error(std::string(__func__) + " conversion failed: unsupported target currency code: " + to_code);
         span->End();
-        return Status(grpc::INVALID_ARGUMENT, "unsupported currency code: " + to_code);
+        return Status(grpc::INVALID_ARGUMENT, "Invalid target currency code: " + to_code);
       }
       double to_rate = current_rates.at(to_code);
 
