@@ -1,0 +1,98 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jaeger
+  namespace: opentelemetry-demo
+  labels:
+    app.kubernetes.io/name: jaeger
+    app.kubernetes.io/instance: jaeger
+    app.kubernetes.io/version: "2.14.1"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: jaeger
+      app.kubernetes.io/instance: jaeger
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: jaeger
+        app.kubernetes.io/instance: jaeger
+        app.kubernetes.io/version: "2.14.1"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      volumes:
+        - name: jaeger-config
+          configMap:
+            name: jaeger-config
+        - name: jaeger-storage
+          persistentVolumeClaim:
+            claimName: jaeger-storage
+      containers:
+        - name: jaeger
+          image: quay.io/jaegertracing/jaeger:2.14.1
+          imagePullPolicy: IfNotPresent
+          command:
+            - /go/bin/all-in-one-linux
+            - --config
+            - /etc/jaeger/jaeger.yaml
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+          ports:
+            - name: ui
+              containerPort: 16686
+              protocol: TCP
+            - name: grpc-model
+              containerPort: 14250
+              protocol: TCP
+            - name: http-thrift
+              containerPort: 14268
+              protocol: TCP
+            - name: otlp-grpc
+              containerPort: 4317
+              protocol: TCP
+            - name: otlp-http
+              containerPort: 4318
+              protocol: TCP
+            - name: admin-health
+              containerPort: 14269
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /
+              port: admin-health
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /
+              port: admin-health
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 1
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+              ephemeral-storage: 1Gi
+            limits:
+              cpu: 1000m
+              memory: 2Gi
+              ephemeral-storage: 2Gi
+          volumeMounts:
+            - name: jaeger-config
+              mountPath: /etc/jaeger
+              readOnly: true
+            - name: jaeger-storage
+              mountPath: /badger/data

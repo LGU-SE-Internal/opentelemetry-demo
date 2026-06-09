@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jaeger-config
+  namespace: opentelemetry-demo
+  labels:
+    app.kubernetes.io/name: jaeger
+    app.kubernetes.io/instance: jaeger
+    app.kubernetes.io/version: "2.14.1"
+data:
+  jaeger.yaml: |
+    badger:
+      ephemeral: false
+      directory: /badger/data
+    service:
+      telemetry:
+        health-check-http:
+          host-port: 0.0.0.0:14269
