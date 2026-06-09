@@ -114,11 +114,11 @@ $app->add(function (Psr\Http\Message\ServerRequestInterface $request, Psr\Http\S
     $path = $request->getUri()->getPath();
     $method = $request->getMethod();
     
-    // Skip rate limiting for health and readiness endpoints
-    $excludedPaths = ['/health', '/healthz', '/ready', '/livez'];
-    if (in_array($path, $excludedPaths)) {
-        return $handler->handle($request);
-    }
+        // Skip rate limiting for health and readiness endpoints
+        $excludedPaths = ['/health', '/healthz', '/ready', '/livez', '/health/liveness', '/health/readiness'];
+        if (in_array($path, $excludedPaths)) {
+            return $handler->handle($request);
+        }
     
     // Only apply rate limiting to quote calculation endpoints
     $quoteEndpoints = ['/getquote', '/getQuote', '/api/calculate-quote'];

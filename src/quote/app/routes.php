@@ -26,6 +26,10 @@ return function (App $app) {
             ->withStatus(200);
     });
     
+    $app->get('/health/liveness', function (Request $request, Response $response) {
+        return $response->withStatus(200);
+    });
+    
     $app->get('/ready', function (Request $request, Response $response) {
         // Check dependencies
         $pricingConfigOk = true; // Pricing config is loaded during service initialization
@@ -64,6 +68,18 @@ return function (App $app) {
         return $response
             ->withHeader('Content-Type', 'application/json')
             ->withStatus($statusCode);
+    });
+    
+    $app->get('/health/readiness', function (Request $request, Response $response) {
+        // Check dependencies
+        $pricingConfigOk = true; // Pricing config is loaded during service initialization
+        $databaseOk = true; // Quote service currently has no database connections
+        
+        if ($pricingConfigOk && $databaseOk) {
+            return $response->withStatus(200);
+        } else {
+            return $response->withStatus(503);
+        }
     });
 
     $app->post('/getquote', function (Request $request, Response $response, LoggerInterface $logger) {
