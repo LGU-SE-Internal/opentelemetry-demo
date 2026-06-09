@@ -82,7 +82,132 @@ class EmailValidationTest < Minitest::Test
     refute last_response.body.include?("Invalid request parameters")
   end
 
-  # AC-5: Validation failures generate structured error logs
+  # AC-1: Missing subject field returns 400 Bad Request with invalid_fields: ["subject"]
+  def test_ac1_missing_subject_returns_400
+    payload = @valid_payload.merge(body: "Valid body content")
+    post '/send', payload.to_json, 'CONTENT_TYPE' => 'application/json'
+
+    assert_equal 400, last_response.status
+    response_body = JSON.parse(last_response.body)
+    assert_equal "Invalid request parameters", response_body["error"]
+    assert_includes response_body["invalid_fields"], "subject"
+    assert_equal 1, response_body["invalid_fields"].length
+  end
+
+  # AC-2: Empty string subject field returns 400 Bad Request with invalid_fields: ["subject"]
+  def test_ac2_empty_subject_returns_400
+    empty_subjects = ["", "   ", "\n", "\t"]
+    empty_subjects.each do |empty_subject|
+      payload = @valid_payload.merge(subject: empty_subject, body: "Valid body content")
+      post '/send', payload.to_json, 'CONTENT_TYPE' => 'application/json'
+
+      assert_equal 400, last_response.status, "Expected 400 for empty subject: '#{empty_subject}'"
+      response_body = JSON.parse(last_response.body)
+      assert_equal "Invalid request parameters", response_body["error"]
+      assert_includes response_body["invalid_fields"], "subject"
+    end
+  end
+
+  # AC-3: Subject field longer than 255 characters returns 400 Bad Request with invalid_fields: ["subject"]
+  def test_ac3_subject_over_255_chars_returns_400
+    long_subject = "a" * 256
+    payload = @valid_payload.merge(subject: long_subject, body: "Valid body content")
+    post '/send', payload.to_json, 'CONTENT_TYPE' => 'application/json'
+
+    assert_equal 400, last_response.status
+    response_body = JSON.parse(last_response.body)
+    assert_equal "Invalid request parameters", response_body["error"]
+    assert_includes response_body["invalid_fields"], "subject"
+  end
+
+  # AC-4: Missing body field returns 400 Bad Request with invalid_fields: ["body"]
+  def test_ac4_missing_body_returns_400
+    payload = @valid_payload.merge(subject: "Valid subject")
+    post '/send', payload.to_json, 'CONTENT_TYPE' => 'application/json'
+
+    assert_equal 400, last_response.status
+    response_body = JSON.parse(last_response.body)
+    assert_equal "Invalid request parameters", response_body["error"]
+    assert_includes response_body["invalid_fields"], "body"
+    assert_equal 1, response_body["invalid_fields"].length
+  end
+
+  # AC-5: Empty string body field returns 400 Bad Request with invalid_fields: ["body"]
+  def test_ac5_empty_body_returns_400
+    empty_bodies = ["", "   ", "\n", "\t"]
+    empty_bodies.each do |empty_body|
+      payload = @valid_payload.merge(subject: "Valid subject", body: empty_body)
+      post '/send', payload.to_json, 'CONTENT_TYPE' => 'application/json'
+
+      assert_equal 400, last_response.status, "Expected 400 for empty body: '#{empty_body}'"
+      response_body = JSON.parse(last_response.body)
+      assert_equal "Invalid request parameters", response_body["error"]
+      assert_includes response_body["invalid_fields"], "body"
+    end
+  end
+
+  # AC-6: Multiple invalid fields returns 400 Bad Request with all invalid fields listed
+  def test_ac6_multiple_invalid_fields_returns_400
+    # Test missing subject AND empty body
+    payload = @valid_payload.merge(body: "")
+    post '/send', payload.to_json, 'CONTENT_TYPE' => 'application/json'
+
+    assert_equal 400, last_response.status
+    response_body = JSON.parse(last_response.body)
+    assert_equal "Invalid request parameters", response_body["error"]
+    assert_includes response_body["invalid_fields"], "subject"
+    assert_includes response_body["invalid_fields"], "body"
+    assert_equal 2, response_body["invalid_fields"].length
+  end
+
+  # AC-9: Valid requests with subject (1-255 chars) and non-empty body continue to work
+  def test_ac9_valid_subject_and_body_returns_200
+    # Test short valid subject
+    payload1 = @valid_payload.merge(subject: "Short valid subject", body: "Valid body content")
+    post '/send', payload1.to_json, 'CONTENT_TYPE' => 'application/json'
+    assert_equal 200, last_response.status, "Expected 200 for short valid subject"
+
+    # Test maximum length subject (255 chars)
+    long_valid_subject = "a" * 255
+    payload2 = @valid_payload.merge(subject: long_valid_subject, body: "Valid body content")
+    post '/send', payload2.to_json, 'CONTENT_TYPE' => 'application/json'
+    assert_equal 200, last_response.status, "Expected 200 for 255 character subject"
+
+    # Test long body (no max limit specified)
+    long_body = "a" * 1000
+    payload3 = @valid_payload.merge(subject: "Valid subject", body: long_body)
+    post '/send', payload3.to_json, 'CONTENT_TYPE' => 'application/json'
+    assert_equal 200, last_response.status, "Expected 200 for long body"
+  end
+
+  # AC-7: Validation failures generate structured warn log entry with masked PII
+  def test_ac7_validation_failures_log_structured_warn_entries
+    # Test missing subject log entry
+    payload = @valid_payload.merge(body: "Valid body content")
+    # Capture log output
+    original_stderr = $stderr
+    log_output = StringIO.new
+    $stderr = log_output
+
+    post '/send', payload.to_json, 'CONTENT_TYPE' => 'application/json'
+
+    $stderr = original_stderr
+    log_lines = log_output.string.split("\n")
+    validation_log = log_lines.find { |line| line.include?("email_send_validation_failure") }
+
+    refute_nil validation_log, "Expected structured warn log for validation failure"
+    
+    log_data = JSON.parse(validation_log)
+    assert_equal "warn", log_data["level"]
+    assert_equal "email_send_validation_failure", log_data["event"]
+    assert_equal ["subject"], log_data["invalid_fields"]
+    assert log_data.key?("request_id")
+    # Verify PII fields are masked
+    assert log_data.key?("recipient_email_masked")
+    assert log_data.key?("order_id_masked")
+  end
+
+  # AC-5 (original): Validation failures generate structured error logs
   def test_ac5_validation_failures_log_structured_errors
     # Test invalid email log entry
     payload = @valid_payload.merge(email: "invalid-email")

@@ -324,6 +324,18 @@ post "/send" do
     end
   end
 
+  # Validate subject presence and length
+  if data.subject.nil? || data.subject.to_s.strip.empty?
+    invalid_fields << "subject"
+  elsif data.subject.to_s.length > 255
+    invalid_fields << "subject"
+  end
+
+  # Validate body presence
+  if data.body.nil? || data.body.to_s.strip.empty?
+    invalid_fields << "body"
+  end
+
   # If any validation errors, return 400 and log
   unless invalid_fields.empty?
     # Mask email for logging: keep first character and domain
