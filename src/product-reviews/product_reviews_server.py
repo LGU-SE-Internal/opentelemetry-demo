@@ -14,6 +14,123 @@ import signal
 import asyncio
 from types import FrameType
 from typing import Optional, Any
+import stat
+
+# Custom TLS Exceptions
+class PartialTLSConfigurationError(Exception):
+    """Raised when incomplete TLS configuration is provided"""
+    pass
+
+class CertificateNotFoundError(Exception):
+    """Raised when a configured certificate file is not found or not readable"""
+    pass
+
+class InvalidCertificatePermissionError(Exception):
+    """Raised when a certificate file has invalid permissions"""
+    pass
+
+
+# TLS Configuration Helpers
+def validate_certificate_file(path: str, is_private_key: bool = False):
+    """Validate that a certificate file exists and has correct permissions"""
+    if not os.path.exists(path):
+        raise CertificateNotFoundError(f"Certificate file not found: {path}")
+    if not os.access(path, os.R_OK):
+        raise CertificateNotFoundError(f"Certificate file not readable: {path}")
+    
+    file_stat = os.stat(path)
+    if is_private_key:
+        # Private keys must have permissions <= 0o600
+        if (file_stat.st_mode & 0o777) > 0o600:
+            raise InvalidCertificatePermissionError(
+                f"Private key file {path} has invalid permissions: {oct(file_stat.st_mode & 0o777)}. "
+                f"Required permissions: 0o600 or stricter."
+            )
+    else:
+        # Public certs must have permissions <= 0o644
+        if (file_stat.st_mode & 0o777) > 0o644:
+            raise InvalidCertificatePermissionError(
+                f"Certificate file {path} has invalid permissions: {oct(file_stat.st_mode & 0o777)}. "
+                f"Required permissions: 0o644 or stricter."
+            )
+
+
+def load_certificate_file(path: str, is_private_key: bool = False) -> bytes:
+    """Load and return the content of a certificate file after validation"""
+    validate_certificate_file(path, is_private_key)
+    with open(path, 'rb') as f:
+        return f.read()
+
+
+def get_tls_server_config() -> Optional[grpc.ServerCredentials]:
+    """
+    Load and return TLS server credentials if configuration is present.
+    Raises exceptions for invalid or incomplete configuration.
+    """
+    server_cert_path = os.environ.get("TLS_SERVER_CERT_PATH")
+    server_key_path = os.environ.get("TLS_SERVER_KEY_PATH")
+    server_ca_path = os.environ.get("TLS_SERVER_CA_CERT_PATH")
+
+    # Check for partial configuration
+    if bool(server_cert_path) != bool(server_key_path):
+        missing = "TLS_SERVER_KEY_PATH" if server_cert_path else "TLS_SERVER_CERT_PATH"
+        raise PartialTLSConfigurationError(f"Incomplete server TLS configuration: missing {missing}")
+
+    if not server_cert_path or not server_key_path:
+        return None
+
+    # Load certs and keys
+    server_cert = load_certificate_file(server_cert_path)
+    server_key = load_certificate_file(server_key_path, is_private_key=True)
+    
+    root_certs = None
+    client_cert_request = False
+    if server_ca_path:
+        root_certs = load_certificate_file(server_ca_path)
+        client_cert_request = True
+
+    return grpc.ssl_server_credentials(
+        root_certificates=root_certs,
+        certificate_key_pairs=[(server_cert, server_key)],
+        client_certificate_request=client_cert_request
+    )
+
+
+def get_tls_client_channel(target: str) -> grpc.Channel:
+    """
+    Create and return a gRPC channel (secure or plaintext) based on TLS configuration.
+    Raises exceptions for invalid or incomplete configuration.
+    """
+    client_cert_path = os.environ.get("TLS_CLIENT_CERT_PATH")
+    client_key_path = os.environ.get("TLS_CLIENT_KEY_PATH")
+    client_ca_path = os.environ.get("TLS_CLIENT_CA_CERT_PATH")
+
+    # Check for partial client configuration
+    if bool(client_cert_path) != bool(client_key_path):
+        missing = "TLS_CLIENT_KEY_PATH" if client_cert_path else "TLS_CLIENT_CERT_PATH"
+        raise PartialTLSConfigurationError(f"Incomplete client TLS configuration: missing {missing}")
+
+    if not client_ca_path:
+        # No CA cert provided, use plaintext channel
+        return grpc.insecure_channel(target)
+
+    # Load CA cert
+    ca_cert = load_certificate_file(client_ca_path)
+    cert_key_pair = None
+
+    if client_cert_path and client_key_path:
+        # Client cert and key provided for mTLS
+        client_cert = load_certificate_file(client_cert_path)
+        client_key = load_certificate_file(client_key_path, is_private_key=True)
+        cert_key_pair = (client_cert, client_key)
+
+    # Create secure channel credentials
+    credentials = grpc.ssl_channel_credentials(
+        root_certificates=ca_cert,
+        certificate_key_pair=cert_key_pair
+    )
+
+    return grpc.secure_channel(target, credentials)
 
 # Pip
 import grpc
@@ -153,10 +270,8 @@ def get_product_reviews_from_catalog(product_id: str, timeout: float = 1.0) -> L
         No exceptions propagated to caller: all errors handled by circuit breaker fallback
     """
     # Get product catalog service stub (assuming existing stub is available here, adjust as needed)
-    # TODO: Replace with actual product catalog stub initialization if needed
-    from grpc import insecure_channel
     product_catalog_host = os.getenv("PRODUCT_CATALOG_SERVICE_ADDR", "productcatalogservice:3550")
-    channel = insecure_channel(product_catalog_host)
+    channel = get_tls_client_channel(product_catalog_host)
     stub = demo_pb2_grpc.ProductCatalogServiceStub(channel)
     
     try:
@@ -737,7 +852,15 @@ if __name__ == "__main__":
 
     # Start server
     port = must_map_env('PRODUCT_REVIEWS_PORT')
-    server.add_insecure_port(f'[::]:{port}')
+    
+    # TLS configuration for server
+    server_creds = get_tls_server_config()
+    if server_creds:
+        server.add_secure_port(f'[::]:{port}', server_creds)
+        logger.info(f"Product reviews gRPC server running with TLS on port {port}")
+    else:
+        server.add_insecure_port(f'[::]:{port}')
+        logger.info(f"Product reviews gRPC server running in plaintext mode on port {port}")
 
     async def serve():
         global service_initialized
