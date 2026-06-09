@@ -21,6 +21,20 @@ http {
         ~^(?P<first_ip>[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+) $first_ip;
     }
 
+    # Structured JSON log format for TLS events
+    log_format json_log '{'
+        '"client_ip": "$real_client_ip",'
+        '"tls_version": "$ssl_protocol",'
+        '"cipher_suite": "$ssl_cipher",'
+        '"client_cert_fingerprint": "$ssl_client_fingerprint",'
+        '"request": "$request",'
+        '"status": $status,'
+        '"error_reason": "$ssl_error"'
+    '}';
+
+    access_log /dev/stdout json_log;
+    error_log /dev/stderr warn;
+
     # Rate limit zone configuration
     limit_req_zone $real_client_ip zone=image_rate_limit:10m rate=${NGINX_RATE_LIMIT_RPS:-10}r/s;
 
@@ -30,8 +44,8 @@ http {
     include mime.types;
     sendfile on;
     server {
-        listen ${IMAGE_PROVIDER_PORT};
-        listen [::]:${IMAGE_PROVIDER_PORT};
+        listen 8080;
+        listen [::]:8080;
 
         resolver 127.0.0.11;
         autoindex off;
@@ -94,10 +108,10 @@ http {
         }
     }
 
-    ${IMAGE_PROVIDER_TLS_CERT_PATH:+
+    ${TLS_ENABLED:+${TLS_ENABLED,,} == "true" ? '
     server {
-        listen 443 ssl;
-        listen [::]:443 ssl;
+        listen 8443 ssl;
+        listen [::]:8443 ssl;
 
         resolver 127.0.0.11;
         autoindex off;
@@ -108,15 +122,21 @@ http {
         root /static;
         gzip_static on;
 
-        ssl_certificate ${IMAGE_PROVIDER_TLS_CERT_PATH};
-        ssl_certificate_key ${IMAGE_PROVIDER_TLS_KEY_PATH};
-        ssl_protocols TLSv1.2 TLSv1.3;
-        ssl_ciphers HIGH:!aNULL:!MD5;
+        ssl_certificate ${TLS_CERT_PATH};
+        ssl_certificate_key ${TLS_KEY_PATH};
+        ssl_protocols ${TLS_MIN_VERSION:-TLSv1.2} ${TLS_MIN_VERSION:-TLSv1.2} == "TLSv1.2" ? "TLSv1.3" : "";
+        ssl_ciphers ${TLS_CIPHER_SUITES:-ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384};
         ssl_prefer_server_ciphers on;
 
-        ${IMAGE_PROVIDER_TLS_CA_CERT_PATH:+
-        ssl_client_certificate ${IMAGE_PROVIDER_TLS_CA_CERT_PATH};
+        ${MTLS_ENABLED:+${MTLS_ENABLED,,} == "true" ? '
+        ssl_client_certificate ${MTLS_CA_CERT_PATH};
         ssl_verify_client on;
+        ' : ''}
+
+        error_page 495 496 497 =400 /400_bad_request;
+        location /400_bad_request {
+            default_type text/plain;
+            return 400 "Bad Request: HTTP request sent to HTTPS port";
         }
 
         location /status {
@@ -170,5 +190,5 @@ http {
             return 429 "Too Many Requests - Please try again later";
         }
     }
-    }
+    ' : ''}
 }
