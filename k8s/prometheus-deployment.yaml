@@ -18,8 +18,8 @@ spec:
     spec:
       securityContext:
         runAsNonRoot: true
-        runAsUser: 65534
-        fsGroup: 65534
+        runAsUser: {{ default 1000 ( .Values.prometheus.runAsUser | default ( index (lookup "v1" "ConfigMap" .Release.Namespace "prometheus-env").data "PROMETHEUS_RUN_AS_USER" | default 1000 ) ) }}
+        fsGroup: {{ default 1000 ( .Values.prometheus.runAsUser | default ( index (lookup "v1" "ConfigMap" .Release.Namespace "prometheus-env").data "PROMETHEUS_RUN_AS_USER" | default 1000 ) ) }}
       initContainers:
       - name: validate-config
         image: quay.io/prometheus/prometheus:v2.54.1
@@ -103,6 +103,7 @@ spec:
             port: 9090
           initialDelaySeconds: 30
           periodSeconds: 10
+          timeoutSeconds: 5
           failureThreshold: 3
         readinessProbe:
           httpGet:
@@ -110,14 +111,21 @@ spec:
             port: 9090
           initialDelaySeconds: 10
           periodSeconds: 5
+          timeoutSeconds: 3
           failureThreshold: 3
         resources:
           requests:
-            cpu: {{ .Values.prometheus.resources.requests.cpu | default "100m" | quote }}
-            memory: {{ .Values.prometheus.resources.requests.memory | default "256Mi" | quote }}
+            cpu: {{ .Values.prometheus.resources.requests.cpu | default ( index (lookup "v1" "ConfigMap" .Release.Namespace "prometheus-env").data "PROMETHEUS_CPU_REQUEST" | default "100m" ) | quote }}
+            memory: {{ .Values.prometheus.resources.requests.memory | default ( index (lookup "v1" "ConfigMap" .Release.Namespace "prometheus-env").data "PROMETHEUS_MEMORY_REQUEST" | default "256Mi" ) | quote }}
           limits:
-            cpu: {{ .Values.prometheus.resources.limits.cpu | default "500m" | quote }}
-            memory: {{ .Values.prometheus.resources.limits.memory | default "1Gi" | quote }}
+            cpu: {{ .Values.prometheus.resources.limits.cpu | default ( index (lookup "v1" "ConfigMap" .Release.Namespace "prometheus-env").data "PROMETHEUS_CPU_LIMIT" | default "500m" ) | quote }}
+            memory: {{ .Values.prometheus.resources.limits.memory | default ( index (lookup "v1" "ConfigMap" .Release.Namespace "prometheus-env").data "PROMETHEUS_MEMORY_LIMIT" | default "1Gi" ) | quote }}
+        securityContext:
+          runAsNonRoot: true
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
         volumeMounts:
         - name: prometheus-config
           mountPath: /etc/prometheus
