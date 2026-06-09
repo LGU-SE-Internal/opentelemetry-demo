@@ -3,76 +3,66 @@ kind: Deployment
 metadata:
   name: frontend-proxy
   labels:
-    app: frontend-proxy
+    app.kubernetes.io/name: frontend-proxy
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: frontend-proxy
+      app.kubernetes.io/name: frontend-proxy
   template:
     metadata:
       labels:
-        app: frontend-proxy
+        app.kubernetes.io/name: frontend-proxy
     spec:
-      terminationGracePeriodSeconds: 35
       securityContext:
         runAsNonRoot: true
         runAsUser: 101
         allowPrivilegeEscalation: false
-        seccompProfile:
-          type: RuntimeDefault
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
       containers:
-      - name: frontend-proxy
-        image: otel/demo:v1.9.0-frontend-proxy
+      - name: nginx
+        image: nginxinc/nginx-unprivileged:stable-alpine
         ports:
-        - name: http
-          containerPort: 8080
-        - name: admin
-          containerPort: 9901
-        env:
-        - name: ENVOY_ADMIN_PORT
-          value: "9901"
-        - name: FRONTEND_PROXY_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS
-          value: "30"
-        securityContext:
-          capabilities:
-            drop: ["ALL"]
-        livenessProbe:
-          httpGet:
-            path: /ready
-            port: 9901
-          initialDelaySeconds: 5
-          periodSeconds: 10
-          failureThreshold: 3
-        readinessProbe:
-          httpGet:
-            path: /ready
-            port: 9901
-          initialDelaySeconds: 2
-          periodSeconds: 5
-          failureThreshold: 2
+        - containerPort: 8080
+          name: http
+        - containerPort: 8443
+          name: https
         resources:
           requests:
             cpu: 100m
             memory: 128Mi
           limits:
-            cpu: 500m
+            cpu: 200m
             memory: 256Mi
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: frontend-proxy
-  labels:
-    app: frontend-proxy
-spec:
-  type: ClusterIP
-  ports:
-  - name: http
-    port: 8080
-    targetPort: 8080
-  - name: admin
-    port: 9901
-    targetPort: 9901
-  selector:
-    app: frontend-proxy
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 2
+          periodSeconds: 5
+          failureThreshold: 2
+        volumeMounts:
+        - name: nginx-config
+          mountPath: /etc/nginx
+        - name: var-log
+          mountPath: /var/log/nginx
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: nginx-config
+        configMap:
+          name: frontend-proxy-nginx-config
+      - name: var-log
+        emptyDir: {}
+      - name: tmp
+        emptyDir: {}
