@@ -9,6 +9,8 @@ using Google.Protobuf;
 using Microsoft.Extensions.Logging;
 using System.Diagnostics.Metrics;
 using System.Diagnostics;
+using Polly;
+using Polly.CircuitBreaker;
 
 namespace cart.cartstore;
 
@@ -42,6 +44,7 @@ public class ValkeyCartStore : ICartStore
             HistogramBucketBoundaries = [ 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1, 2.5, 5, 7.5, 10 ]
         });
     private readonly ConfigurationOptions _redisConnectionOptions;
+    private readonly AsyncCircuitBreakerPolicy _circuitBreakerPolicy;
 
     public ValkeyCartStore(ILogger<ValkeyCartStore> logger, string valkeyAddress)
     {
@@ -58,6 +61,26 @@ public class ValkeyCartStore : ICartStore
         _redisConnectionOptions.ReconnectRetryPolicy = new ExponentialRetry(1000);
 
         _redisConnectionOptions.KeepAlive = 180;
+
+        // Configure circuit breaker policy
+        _circuitBreakerPolicy = Policy
+            .Handle<Exception>()
+            .CircuitBreakerAsync(
+                exceptionsAllowedBeforeBreaking: 5,
+                durationOfBreak: TimeSpan.FromSeconds(30),
+                onBreak: (ex, state, duration, context) =>
+                {
+                    _logger.LogInformation("Circuit breaker transitioning from {PreviousState} to OPEN state for {Duration} seconds. Reason: {ExceptionMessage}",
+                        state, duration.TotalSeconds, ex.Message);
+                },
+                onReset: context =>
+                {
+                    _logger.LogInformation("Circuit breaker transitioning from HALF-OPEN to CLOSED state. Test call succeeded.");
+                },
+                onHalfOpen: () =>
+                {
+                    _logger.LogInformation("Circuit breaker transitioning from OPEN to HALF-OPEN state. Allowing 1 test call.");
+                });
     }
 
     public ConnectionMultiplexer GetConnection()
@@ -140,38 +163,46 @@ public class ValkeyCartStore : ICartStore
 
         try
         {
-            EnsureRedisConnected();
-
-            var db = _redis.GetDatabase();
-
-            // Access the cart from the cache
-            var value = await db.HashGetAsync(userId, CartFieldName);
-
-            Oteldemo.Cart cart;
-            if (value.IsNull)
+            await _circuitBreakerPolicy.ExecuteAsync(async () =>
             {
-                cart = new Oteldemo.Cart
+                EnsureRedisConnected();
+
+                var db = _redis.GetDatabase();
+
+                // Access the cart from the cache
+                var value = await db.HashGetAsync(userId, CartFieldName);
+
+                Oteldemo.Cart cart;
+                if (value.IsNull)
                 {
-                    UserId = userId
-                };
-                cart.Items.Add(new Oteldemo.CartItem { ProductId = productId, Quantity = quantity });
-            }
-            else
-            {
-                cart = Oteldemo.Cart.Parser.ParseFrom(value);
-                var existingItem = cart.Items.SingleOrDefault(i => i.ProductId == productId);
-                if (existingItem == null)
-                {
+                    cart = new Oteldemo.Cart
+                    {
+                        UserId = userId
+                    };
                     cart.Items.Add(new Oteldemo.CartItem { ProductId = productId, Quantity = quantity });
                 }
                 else
                 {
-                    existingItem.Quantity += quantity;
+                    cart = Oteldemo.Cart.Parser.ParseFrom(value);
+                    var existingItem = cart.Items.SingleOrDefault(i => i.ProductId == productId);
+                    if (existingItem == null)
+                    {
+                        cart.Items.Add(new Oteldemo.CartItem { ProductId = productId, Quantity = quantity });
+                    }
+                    else
+                    {
+                        existingItem.Quantity += quantity;
+                    }
                 }
-            }
 
-            await db.HashSetAsync(userId, new[]{ new HashEntry(CartFieldName, cart.ToByteArray()) });
-            await db.KeyExpireAsync(userId, TimeSpan.FromMinutes(60));
+                await db.HashSetAsync(userId, new[]{ new HashEntry(CartFieldName, cart.ToByteArray()) });
+                await db.KeyExpireAsync(userId, TimeSpan.FromMinutes(60));
+            });
+        }
+        catch (BrokenCircuitException ex)
+        {
+            _logger.LogWarning(ex, "Circuit breaker is open for Valkey/Redis operations");
+            throw new RpcException(new Status(StatusCode.Unavailable, "Redis circuit breaker is open; please try again later"));
         }
         catch (Exception ex)
         {
@@ -191,12 +222,20 @@ public class ValkeyCartStore : ICartStore
         }
         try
         {
-            EnsureRedisConnected();
-            var db = _redis.GetDatabase();
+            await _circuitBreakerPolicy.ExecuteAsync(async () =>
+            {
+                EnsureRedisConnected();
+                var db = _redis.GetDatabase();
 
-            // Update the cache with empty cart for given user
-            await db.HashSetAsync(userId, new[] { new HashEntry(CartFieldName, _emptyCartBytes) });
-            await db.KeyExpireAsync(userId, TimeSpan.FromMinutes(60));
+                // Update the cache with empty cart for given user
+                await db.HashSetAsync(userId, new[] { new HashEntry(CartFieldName, _emptyCartBytes) });
+                await db.KeyExpireAsync(userId, TimeSpan.FromMinutes(60));
+            });
+        }
+        catch (BrokenCircuitException ex)
+        {
+            _logger.LogWarning(ex, "Circuit breaker is open for Valkey/Redis operations");
+            throw new RpcException(new Status(StatusCode.Unavailable, "Redis circuit breaker is open; please try again later"));
         }
         catch (Exception ex)
         {
@@ -215,20 +254,28 @@ public class ValkeyCartStore : ICartStore
 
         try
         {
-            EnsureRedisConnected();
-
-            var db = _redis.GetDatabase();
-
-            // Access the cart from the cache
-            var value = await db.HashGetAsync(userId, CartFieldName);
-
-            if (!value.IsNull)
+            return await _circuitBreakerPolicy.ExecuteAsync(async () =>
             {
-                return Oteldemo.Cart.Parser.ParseFrom(value);
-            }
+                EnsureRedisConnected();
 
-            // We decided to return empty cart in cases when user wasn't in the cache before
-            return new Oteldemo.Cart();
+                var db = _redis.GetDatabase();
+
+                // Access the cart from the cache
+                var value = await db.HashGetAsync(userId, CartFieldName);
+
+                if (!value.IsNull)
+                {
+                    return Oteldemo.Cart.Parser.ParseFrom(value);
+                }
+
+                // We decided to return empty cart in cases when user wasn't in the cache before
+                return new Oteldemo.Cart();
+            });
+        }
+        catch (BrokenCircuitException ex)
+        {
+            _logger.LogWarning(ex, "Circuit breaker is open for Valkey/Redis operations");
+            throw new RpcException(new Status(StatusCode.Unavailable, "Redis circuit breaker is open; please try again later"));
         }
         catch (Exception ex)
         {
@@ -260,12 +307,27 @@ public class ValkeyCartStore : ICartStore
         {
             _logger.LogDebug("Flushing pending cart store operations");
         }
-        // For Redis, operations are immediately persisted, so no explicit flush needed
-        // Just ensure connection is active and any pending commands are processed
-        if (_isRedisConnectionOpened && _redis != null)
+        try
         {
-            await _redis.WaitAllAsync(_isShuttingDown: false, cancellationToken);
+            await _circuitBreakerPolicy.ExecuteAsync(async () =>
+            {
+                // For Redis, operations are immediately persisted, so no explicit flush needed
+                // Just ensure connection is active and any pending commands are processed
+                if (_isRedisConnectionOpened && _redis != null)
+                {
+                    await _redis.WaitAllAsync(_isShuttingDown: false, cancellationToken);
+                }
+                await Task.CompletedTask;
+            });
         }
-        await Task.CompletedTask;
+        catch (BrokenCircuitException ex)
+        {
+            _logger.LogWarning(ex, "Circuit breaker is open for Valkey/Redis operations");
+            throw new RpcException(new Status(StatusCode.Unavailable, "Redis circuit breaker is open; please try again later"));
+        }
+        catch (Exception ex)
+        {
+            throw new RpcException(new Status(StatusCode.FailedPrecondition, $"Can't access cart storage. {ex}"));
+        }
     }
 }
