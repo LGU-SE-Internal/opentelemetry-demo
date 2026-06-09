@@ -478,6 +478,17 @@ async fn main() -> std::io::Result<()> {
         message = "Shipping gRPC service is running"
     );
 
+    // Create server and get shutdown handle
+    let server = Server::builder()
+        .add_service(service);
+
+    let (shutdown_handle, server_future) = server.serve_with_graceful_shutdown(addr, async move {
+        // Empty future, we will trigger shutdown explicitly via handle
+    });
+
+    // Spawn server task
+    let server_handle = tokio::spawn(server_future);
+
     // Set up signal handlers
     let mut sigint = signal(SignalKind::interrupt()).expect("Failed to set up SIGINT handler");
     let mut sigterm = signal(SignalKind::terminate()).expect("Failed to set up SIGTERM handler");
@@ -503,17 +514,6 @@ async fn main() -> std::io::Result<()> {
         timestamp = %Utc::now().to_rfc3339(),
         "Starting graceful shutdown with 30s timeout"
     );
-
-    // Create server and get shutdown handle
-    let server = Server::builder()
-        .add_service(service);
-
-    let (shutdown_handle, server_future) = server.serve_with_graceful_shutdown(addr, async move {
-        // Empty future, we will trigger shutdown explicitly via handle
-    });
-
-    // Spawn server task
-    let server_handle = tokio::spawn(server_future);
 
     // Wait for either graceful shutdown completion or timeout
     let shutdown_result = tokio::time::timeout(
