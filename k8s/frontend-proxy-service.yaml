@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-proxy
+  labels:
+    app.kubernetes.io/name: frontend-proxy
+spec:
+  type: ClusterIP
+  ports:
+  - port: 80
+    targetPort: 8080
+    name: http
+    protocol: TCP
+  - port: 443
+    targetPort: 8443
+    name: https
+    protocol: TCP
+  selector:
+    app.kubernetes.io/name: frontend-proxy
