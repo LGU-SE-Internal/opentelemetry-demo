@@ -24,9 +24,16 @@ target_link_libraries(
 
 install(TARGETS currency DESTINATION bin)
 
-# Test executable
+# Test executables
 add_executable(test_currency_rates_config test/test_currency_rates_config.cpp src/server.cpp)
 add_dependencies(test_currency_rates_config demo-proto)
 target_link_libraries(
     test_currency_rates_config demo-proto protobuf::libprotobuf
     ${OPENTELEMETRY_CPP_LIBRARIES} gRPC::grpc++ nlohmann_json::nlohmann_json GTest::GTest GTest::Main)
+
+add_executable(test_currency_graceful_shutdown test/test_currency_graceful_shutdown.cpp src/server.cpp)
+add_dependencies(test_currency_graceful_shutdown demo-proto)
+target_link_libraries(
+    test_currency_graceful_shutdown demo-proto protobuf::libprotobuf
+    ${OPENTELEMETRY_CPP_LIBRARIES} gRPC::grpc++ nlohmann_json::nlohmann_json GTest::GTest GTest::Main)
+

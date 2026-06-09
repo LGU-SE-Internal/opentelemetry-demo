@@ -32,4 +32,12 @@ namespace
     auto provider = logs::Provider::GetLoggerProvider();
     return provider->GetLogger(name + "_logger", name, OPENTELEMETRY_SDK_VERSION);
   }
+
+  bool forceFlushLogger(std::chrono::seconds timeout) noexcept {
+    auto provider = logs::Provider::GetLoggerProvider();
+    if (auto sdk_provider = dynamic_cast<logs_sdk::LoggerProvider*>(provider.get())) {
+      return sdk_provider->ForceFlush(timeout);
+    }
+    return false;
+  }
 }
