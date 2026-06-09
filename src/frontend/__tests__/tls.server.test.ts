@@ -3,35 +3,47 @@ import { createServer as createHttpsServer, RequestListener } from 'https';
 import next, { NextServer } from 'next';
 import { readFileSync } from 'fs';
 import { env } from 'process';
+import { startServerWithTls, TlsConfigError, FileReadError, CertificateValidationError, TlsConfig, ServerStartupResult } from '../utils/tls';
 
-// Exact interface definitions from spec
-enum TlsConfigError {
-  MISSING_CERT_KEY = "TLS enabled but cert or key path not provided",
-  MISSING_CA_CERT = "mTLS enabled but CA cert path not provided",
-  TLS_DISABLED_WITH_MTLS = "mTLS enabled but TLS is disabled"
-}
-type FileReadError = { code: "FILE_NOT_FOUND" | "PERMISSION_DENIED"; path: string };
-type CertificateValidationError = { code: "INVALID_CERTIFICATE" | "INVALID_PRIVATE_KEY" | "INVALID_CA_CERT"; message: string };
+// Mock fs operations for testing
+jest.mock('fs', () => ({
+  ...jest.requireActual('fs'),
+  existsSync: jest.fn(),
+  readFileSync: jest.fn(),
+  accessSync: jest.fn(),
+  constants: {
+    R_OK: 4
+  }
+}));
 
-interface TlsConfig {
-  enabled: boolean;
-  certPath?: string;
-  keyPath?: string;
-  mtlsEnabled: boolean;
-  caCertPath?: string;
-}
+// Mock next server
+jest.mock('next', () => {
+  const mockNextServer = {
+    prepare: jest.fn().mockResolvedValue(undefined),
+    getRequestHandler: jest.fn().mockReturnValue(jest.fn()),
+    server: null
+  };
+  return jest.fn(() => mockNextServer);
+});
 
-interface ServerStartupResult {
-  success: boolean;
-  server: NextServer | null;
-  error?: TlsConfigError | FileReadError | CertificateValidationError;
-}
+// Mock http and https server listen
+jest.mock('http', () => ({
+  ...jest.requireActual('http'),
+  createServer: jest.fn(() => ({
+    listen: jest.fn((port, cb) => cb()),
+    constructor: jest.requireActual('http').Server
+  }))
+}));
 
-// Mock implementation placeholder (will be replaced with actual code later)
-async function startServerWithTls(config: TlsConfig): Promise<ServerStartupResult> {
-  // TODO: Implement this logic
-  return { success: false, server: null, error: TlsConfigError.MISSING_CERT_KEY };
-}
+jest.mock('https', () => ({
+  ...jest.requireActual('https'),
+  createServer: jest.fn((options, handler) => ({
+    listen: jest.fn((port, cb) => cb()),
+    options,
+    constructor: jest.requireActual('https').Server
+  }))
+}));
+
 
 describe('Frontend TLS Server Configuration', () => {
   const originalEnv = { ...env };
