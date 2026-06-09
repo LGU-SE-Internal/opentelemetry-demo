@@ -195,6 +195,54 @@ static_resources:
                         - match: { prefix: "/" }  # Default/catch-all route - keep last since prefix:"/" matches everything
                           route: { cluster: frontend }
                 http_filters:
+                  - name: envoy.filters.http.local_ratelimit
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+                      stat_prefix: http_local_rate_limiter
+                      token_bucket:
+                        max_tokens: {{ $rateLimitBurst }}
+                        tokens_per_fill: {{ $rateLimitRps }}
+                        fill_interval: "1s"
+                      filter_enabled:
+                        runtime_key: local_rate_limit_enabled
+                        default_value:
+                          numerator: 100
+                          denominator: HUNDRED
+                      filter_enforced:
+                        runtime_key: local_rate_limit_enforced
+                        default_value:
+                          numerator: 100
+                          denominator: HUNDRED
+                      response_headers_to_add:
+                        - append: false
+                          header:
+                            key: "X-RateLimit-Limit"
+                            value: "{{ $rateLimitRps }}"
+                        - append: false
+                          header:
+                            key: "X-RateLimit-Remaining"
+                            value: "%LOCAL_RATE_LIMIT_REMAINING%"
+                        - append: false
+                          header:
+                            key: "X-RateLimit-Reset"
+                            value: "%LOCAL_RATE_LIMIT_RESET%"
+                        - append: false
+                          header:
+                            key: "Retry-After"
+                            value: "%LOCAL_RATE_LIMIT_RETRY_AFTER%"
+                      enable_x_ratelimit_headers: DRAFT_VERSION_03
+                      status:
+                        code: TOO_MANY_REQUESTS
+                      match:
+                        not_match:
+                          path:
+                            exact: "/health"
+                        not_match:
+                          path:
+                            exact: "/healthz"
+                        not_match:
+                          path:
+                            exact: "/ready"
                   - name: envoy.filters.http.rbac
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBAC
