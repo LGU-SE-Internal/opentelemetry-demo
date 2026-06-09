@@ -116,11 +116,13 @@ func LoadTLSConfigFromEnv() (TLSConfig, error) {
 // NewGRPCServerWithTLS creates a gRPC server configured with TLS/mTLS as per the provided config
 // Returns plaintext gRPC server if TLS is disabled
 // Returns error if TLS configuration is invalid or cannot be loaded
-func NewGRPCServerWithTLS(cfg TLSConfig) (*grpc.Server, error) {
-	// Base server options with OTel handler
+func NewGRPCServerWithTLS(cfg TLSConfig, rateLimiter *perEndpointRateLimiter) (*grpc.Server, error) {
+	// Base server options with OTel handler and rate limit interceptor
 	opts := []grpc.ServerOption{
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
+		grpc.ChainUnaryInterceptor(RateLimitInterceptor(rateLimiter)),
 	}
+
 
 	if !cfg.Enabled {
 		// Return plaintext server
@@ -167,6 +169,7 @@ func runServer(ctx context.Context, port int) error {
 	tlsCfg, err := LoadTLSConfigFromEnv()
 	if err != nil {
 		return fmt.Errorf("invalid TLS configuration: %w", err)
+trateLimiter := NewPerEndpointRateLimiter()
 	}
 
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
@@ -174,7 +177,7 @@ func runServer(ctx context.Context, port int) error {
 		return fmt.Errorf("TCP listen failed: %w", err)
 	}
 
-	srv, err := NewGRPCServerWithTLS(tlsCfg)
+	srv, err := NewGRPCServerWithTLS(tlsCfg, rateLimiter)
 	if err != nil {
 		return fmt.Errorf("failed to create gRPC server: %w", err)
 	}
@@ -373,6 +376,7 @@ func main() {
 	tlsCfg, err := LoadTLSConfigFromEnv()
 	if err != nil {
 		logger.Error(fmt.Sprintf("Invalid TLS configuration: %v", err))
+trateLimiter := NewPerEndpointRateLimiter()
 		os.Exit(1)
 	}
 	
@@ -384,7 +388,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	srv, err := NewGRPCServerWithTLS(tlsCfg)
+	srv, err := NewGRPCServerWithTLS(tlsCfg, rateLimiter)
 	if err != nil {
 		logger.Error(fmt.Sprintf("Failed to create gRPC server with TLS config: %v", err))
 		os.Exit(1)
