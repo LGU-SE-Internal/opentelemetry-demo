@@ -1,5 +1,5 @@
 const request = require('supertest');
-const app = require('../index'); // Assuming the express app is exported from index.js
+const { app } = require('../index'); // Import express app exported from index.js
 
 describe('Payment Service Health and Readiness Endpoints AC Tests', () => {
   let server;

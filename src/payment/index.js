@@ -661,6 +661,7 @@ server.bindAsync(address, serverCredentials, (err, port) => {
   logger.info(`payment gRPC server started on ${address}`)
   
 let app;
+module.exports.app = app;
 
 // Setup HTTP health endpoint on same port as gRPC server
 app = express();
@@ -678,7 +679,7 @@ app = express();
     
     try {
       res.setHeader('Content-Type', 'application/json');
-      res.status(200).json({ status: 'UP' });
+      res.status(200).json({ status: 'healthy', check: 'liveness' });
       
       span.setAttributes({
         'http.method': 'GET',
@@ -697,57 +698,11 @@ app = express();
     }
   });
   
-  // Non-GET methods for /health return 405 Method Not Allowed
-  app.all('/health', (req, res) => {
-    res.setHeader('Content-Type', 'application/json');
-    res.status(405).send();
-  });
-
-  // Liveness endpoint - always returns 200 OK with JSON {"status": "ok", "service": "payment", "timestamp": <unix timestamp ms>} when process is running (AC-1)
-  app.get('/health/liveness', (req, res) => {
-    const start = Date.now();
-    const span = opentelemetry.trace.getTracer('paymentservice').startSpan('GET /health/liveness');
-    const timestamp = Date.now();
-    try {
-      res.setHeader('Content-Type', 'application/json');
-      res.status(200).json({ 
-        status: 'ok',
-        service: 'payment',
-        timestamp: timestamp
-      });
-      
-      span.setAttributes({
-        'http.method': 'GET',
-        'http.route': '/health/liveness',
-        'http.status_code': 200
-      });
-      
-      logger.info({
-        method: 'GET',
-        path: '/health/liveness',
-        status: 200,
-        duration: Date.now() - start,
-        timestamp: new Date().toISOString()
-      });
-    } finally {
-      span.end();
-    }
-  });
-  
-  // Readiness endpoint - returns 200 OK when fully initialized and able to process payment requests (AC-2, AC-3)
-  app.get('/health/readiness', async (req, res) => {
+  // Readiness endpoint /ready per AC3 - returns 200 when all dependencies are reachable
+  app.get('/ready', async (req, res) => {
     const start = Date.now();
     const tracer = opentelemetry.trace.getTracer('paymentservice');
-    const span = tracer.startSpan('GET /health/readiness');
-    const timestamp = Date.now();
-    
-    const dependencies = {
-      config: 'loaded',
-      paymentProcessor: 'connected'
-    };
-    let ready = true;
-    let statusCode = 200;
-    let status = 'ok';
+    const span = tracer.startSpan('GET /ready');
     
     try {
       // Check if gRPC server is serving (payment processor is ready to handle requests)
@@ -758,50 +713,53 @@ app = express();
           resolve();
         });
       });
-    } catch (err) {
-      ready = false;
-      statusCode = 503;
-      status = 'unavailable';
-      dependencies.paymentProcessor = 'disconnected';
-    }
-    
-    try {
+
       res.setHeader('Content-Type', 'application/json');
-      res.status(statusCode).json({
-        status: status,
-        service: 'payment',
-        ready: ready,
-        timestamp: timestamp,
-        dependencies: dependencies
-      });
+      res.status(200).json({ status: 'ready', check: 'readiness' });
       
       span.setAttributes({
         'http.method': 'GET',
-        'http.route': '/health/readiness',
-        'http.status_code': statusCode,
-        'readiness.ready': ready
+        'http.route': '/ready',
+        'http.status_code': 200
       });
       
       logger.info({
         method: 'GET',
-        path: '/health/readiness',
-        status: statusCode,
+        path: '/ready',
+        status: 200,
+        duration: Date.now() - start
+      });
+    } catch (err) {
+      res.setHeader('Content-Type', 'application/json');
+      res.status(503).json({ status: 'not ready', check: 'readiness', error: err.message });
+      
+      span.setAttributes({
+        'http.method': 'GET',
+        'http.route': '/ready',
+        'http.status_code': 503,
+        'error.message': err.message
+      });
+      
+      logger.error({
+        method: 'GET',
+        path: '/ready',
+        status: 503,
         duration: Date.now() - start,
-        ready: ready
+        error: err.message
       });
     } finally {
       span.end();
     }
   });
-  
-  // New required /health/live endpoint per issue #1238
+  // Health/live endpoint for backwards compatibility
   app.get('/health/live', (req, res) => {
     const start = Date.now();
     const tracer = opentelemetry.trace.getTracer('paymentservice');
     const span = tracer.startSpan('GET /health/live');
     
     try {
-      res.status(200).json({ status: 'UP' });
+      res.setHeader('Content-Type', 'application/json');
+      res.status(200).json({ status: 'healthy', check: 'liveness' });
       
       span.setAttributes({
         'http.method': 'GET',
@@ -819,70 +777,7 @@ app = express();
       span.end();
     }
   });
-
-  // Readiness endpoint /ready per AC2 and AC3 - returns READY when service can process requests
-  app.get('/ready', async (req, res) => {
-    const start = Date.now();
-    const tracer = opentelemetry.trace.getTracer('paymentservice');
-    const span = tracer.startSpan('GET /ready');
-    
-    try {
-      // Check if gRPC server is serving (required for processing payment requests)
-      await new Promise((resolve, reject) => {
-        healthClient.check({ service: '' }, (err, response) => {
-          if (err) return reject(err);
-          if (response.status !== health.servingStatus.SERVING) return reject(new Error('gRPC server not serving'));
-          resolve();
-        });
-      });
-      
-      // All checks passed
-      res.setHeader('Content-Type', 'application/json');
-      res.status(200).json({ status: 'READY' });
-      
-      span.setAttributes({
-        'http.method': 'GET',
-        'http.route': '/ready',
-        'http.status_code': 200
-      });
-      
-      logger.info({
-        method: 'GET',
-        path: '/ready',
-        status: 200,
-        duration: Date.now() - start
-      });
-    } catch (err) {
-      // Check failed
-      res.setHeader('Content-Type', 'application/json');
-      res.status(503).json({ status: 'NOT_READY', reason: err.message });
-      
-      span.setAttributes({
-        'http.method': 'GET',
-        'http.route': '/ready',
-        'http.status_code': 503,
-        'error.message': err.message
-      });
-      
-      logger.info({
-        method: 'GET',
-        path: '/ready',
-        status: 503,
-        duration: Date.now() - start,
-        error: err.message
-      });
-    } finally {
-      span.end();
-    }
-  });
-  
-  // Non-GET methods for /ready return 405 Method Not Allowed
-  app.all('/ready', (req, res) => {
-    res.setHeader('Content-Type', 'application/json');
-    res.status(405).send();
-  });
-
-  // Readiness endpoint - returns 200 OK with READY status when service can process requests (AC-2, AC-3)
+  // Health/readiness endpoint for backwards compatibility
   app.get('/health/readiness', async (req, res) => {
     const start = Date.now();
     const span = opentelemetry.trace.getTracer('paymentservice').startSpan('GET /health/readiness');
