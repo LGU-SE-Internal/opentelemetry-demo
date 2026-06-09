@@ -8,6 +8,8 @@ plugins {
     id 'idea'
     id 'application'
     id 'com.github.ben-manes.versions' version '0.54.0'
+    id 'org.springframework.boot' version '3.3.5'
+    id 'io.spring.dependency-management' version '1.1.6'
 }
 
 repositories {
@@ -38,6 +40,8 @@ ext {
 }
 
 dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
     if (speed) {
         implementation fileTree(dir: offlineCompile, include: '*.jar')
     } else {
@@ -139,7 +143,7 @@ task downloadRepos(type: Copy) {
 }
 
 task ad(type: CreateStartScripts) {
-    mainClass.set('oteldemo.AdService')
+    mainClass.set('oteldemo.AdServiceApplication')
     applicationName = 'Ad'
     outputDir = new File(project.buildDir, 'tmp')
     classpath = startScripts.classpath

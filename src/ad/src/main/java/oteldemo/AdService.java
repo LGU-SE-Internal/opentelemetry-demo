@@ -214,6 +214,7 @@ public final class AdService {
   private static final AdService service = new AdService();
   private static final Tracer tracer = GlobalOpenTelemetry.getTracer("ad");
   private static final Meter meter = GlobalOpenTelemetry.getMeter("ad");
+  private static volatile boolean isReady = false;
 
   private static final LongCounter adRequestsCounter =
       meter
@@ -616,6 +617,10 @@ public final class AdService {
 
   private static AdService getInstance() {
     return service;
+  }
+
+  public static boolean isReady() {
+    return isReady;
   }
 
   /** Await termination on the main thread since the grpc library uses daemon threads. */
