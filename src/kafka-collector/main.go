@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -86,6 +87,67 @@ func (l *ZapLogger) Error(ctx context.Context, msg string, fields ...zap.Field) 
 	l.logger.Error(msg, append(traceFields, fields...)...)
 }
 
+// Health handlers
+func livenessHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	resp := HealthResponse{
+		Status:  "UP",
+		Service: "kafka-collector",
+		Check:   "liveness",
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+func readinessHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	connected := kafkaConnected.Load()
+	if connected {
+		w.WriteHeader(http.StatusOK)
+		resp := HealthResponse{
+			Status:        "UP",
+			Service:       "kafka-collector",
+			Check:         "readiness",
+			KafkaConnected: &connected,
+		}
+		json.NewEncoder(w).Encode(resp)
+	} else {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		errStr := ""
+		if errPtr := kafkaLastErr.Load(); errPtr != nil {
+			errStr = *errPtr
+		}
+		resp := HealthResponse{
+			Status:        "DOWN",
+			Service:       "kafka-collector",
+			Check:         "readiness",
+			KafkaConnected: &connected,
+			Error:         errStr,
+		}
+		json.NewEncoder(w).Encode(resp)
+	}
+}
+
+func startHealthServer(port int) error {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health/liveness", livenessHandler)
+	mux.HandleFunc("/health/readiness", readinessHandler)
+
+	server := &http.Server{
+		Addr:    fmt.Sprintf("0.0.0.0:%d", port),
+		Handler: mux,
+	}
+
+	go func() {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			globalLogger.Error(context.Background(), "Health server failed", zap.Error(err))
+		}
+	}()
+
+	globalLogger.Info(context.Background(), "Health server started", zap.Int("port", port))
+	return nil
+}
+
 // InitGlobalLogger initializes the global logger instance
 func InitGlobalLogger() error {
 	logger, err := NewZapLogger()
@@ -101,6 +163,21 @@ var (
 	ShutdownTimeoutError = errors.New("shutdown timeout exceeded before all in-flight messages completed processing")
 	OffsetCommitError    = errors.New("failed to commit pending offsets to Kafka during shutdown")
 )
+
+// Health status tracking
+var (
+	kafkaConnected atomic.Bool
+	kafkaLastErr   atomic.Pointer[string]
+)
+
+type HealthResponse struct {
+	Status        string `json:"status"`
+	Service       string `json:"service"`
+	Check         string `json:"check"`
+	KafkaConnected *bool  `json:"kafka_connected,omitempty"`
+	Error         string `json:"error,omitempty"`
+}
+
 
 // KafkaTLSConfig holds TLS configuration for Kafka client connections
 type KafkaTLSConfig struct {
@@ -606,6 +683,32 @@ func main() {
 		os.Exit(1)
 	}
 	httpPort := strconv.Itoa(httpPortInt)
+
+	// Get health port from environment variable
+	healthPortStr := os.Getenv("KAFKA_COLLECTOR_HEALTH_PORT")
+	healthPort := 12001 // Default
+	if healthPortStr != "" {
+		parsedPort, err := strconv.Atoi(healthPortStr)
+		if err != nil {
+			globalLogger.Error(ctx, "Invalid health port value: must be numeric",
+				zap.String("health_port_value", healthPortStr),
+			)
+			os.Exit(1)
+		}
+		if parsedPort < 1 || parsedPort > 65535 {
+			globalLogger.Error(ctx, "Invalid health port value: must be between 1 and 65535",
+				zap.Int("health_port_value", parsedPort),
+			)
+			os.Exit(1)
+		}
+		healthPort = parsedPort
+	}
+
+	// Start health server
+	if err := startHealthServer(healthPort); err != nil {
+		globalLogger.Error(ctx, "Failed to start health server", zap.Error(err))
+		os.Exit(1)
+	}
 
 	// Get and process Kafka topics from environment variable
 	topicsStr := os.Getenv("KAFKA_COLLECTOR_KAFKA_TOPICS")
