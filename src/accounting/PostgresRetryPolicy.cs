@@ -47,7 +47,7 @@ public static class PostgresRetryPolicy
         var fallbackPolicy = Policy
             .Handle<PostgresException>(ex => TransientErrorCodes.Contains(ex.SqlState))
             .FallbackAsync(
-                fallbackAction: (ctx, ct) => Task.CompletedTask,
+                fallbackAction: (ctx, ct) => throw ctx.Exception,
                 onFallbackAsync: (exception, context) =>
                 {
                     var pgException = (PostgresException)exception.Exception;
