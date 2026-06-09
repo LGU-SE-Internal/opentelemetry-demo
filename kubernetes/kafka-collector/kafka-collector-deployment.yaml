@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-collector
+  labels:
+    app: kafka-collector
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: kafka-collector
+  template:
+    metadata:
+      labels:
+        app: kafka-collector
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+      containers:
+      - name: kafka-collector
+        image: otel/demo-kafka-collector:latest
+        ports:
+        - containerPort: 8080
+          name: http-metrics
+        securityContext:
+          capabilities:
+            drop:
+            - ALL
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          failureThreshold: 3
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        env:
+        - name: KAFKA_BROKERS
+          value: "${KAFKA_BROKERS}"
+        - name: KAFKA_TOPICS
+          value: "${KAFKA_TOPICS}"
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "${OTEL_EXPORTER_OTLP_ENDPOINT}"
