@@ -11,7 +11,8 @@ require "open_feature/sdk"
 require "openfeature/flagd/provider"
 require "openssl"
 require "prometheus/client"
-require "stoplight"
+require "retriable"
+require "circuitbox"
 
 # Initialize Prometheus registry
 Prometheus::Client.configure do |config|
@@ -19,25 +20,139 @@ Prometheus::Client.configure do |config|
 end
 PROMETHEUS_REGISTRY = Prometheus::Client.registry
 
-# SMTP retry metrics
+# AC required metrics
+$email_delivery_attempts_total = PROMETHEUS_REGISTRY.counter(
+  :email_delivery_attempts_total,
+  docstring: "Total email delivery attempts with status label",
+  labels: [:status]
+)
+$email_retry_attempts_total = PROMETHEUS_REGISTRY.counter(
+  :email_retry_attempts_total,
+  docstring: "Total number of retry attempts across all email requests"
+)
+$email_circuit_breaker_state = PROMETHEUS_REGISTRY.gauge(
+  :email_circuit_breaker_state,
+  docstring: "Current state of SMTP circuit breaker: 0=closed, 1=open, 2=half-open"
+)
+$email_circuit_breaker_state.set(0) # Initial state closed
+
+# SMTP retry metrics (keep existing for backward compatibility)
 $email_delivery_success_total = PROMETHEUS_REGISTRY.counter(:email_delivery_success_total, docstring: "Increments on every successful email delivery")
 $email_delivery_failed_total = PROMETHEUS_REGISTRY.counter(:email_delivery_failed_total, docstring: "Increments when delivery fails permanently", labels: [:failure_type])
 $email_delivery_retry_total = PROMETHEUS_REGISTRY.counter(:email_delivery_retry_total, docstring: "Increments each time a retry attempt is initiated", labels: [:retry_attempt])
 
-# Circuit Breaker metrics
-$circuit_breaker_state_gauge = PROMETHEUS_REGISTRY.gauge(:email_service_smtp_circuit_breaker_state, docstring: "Current state of SMTP circuit breaker (1 for active state)", labels: [:state])
-$circuit_breaker_transitions_counter = PROMETHEUS_REGISTRY.counter(:email_service_smtp_circuit_breaker_transitions_total, docstring: "Total number of circuit breaker state transitions", labels: [:from_state, :to_state])
+# Circuit Breaker configuration for Circuitbox
+CIRCUIT_BREAKER = Circuitbox.circuit(:smtp_delivery, {
+  exceptions: [Net::OpenTimeout, Net::ReadTimeout, Errno::ECONNREFUSED, Errno::ETIMEDOUT, Net::SMTPError],
+  sleep_window: 30,
+  volume_threshold: 5,
+  error_threshold: 100 # 100% of errors to open after 5 failures
+})
 
-# Initialize gauge values to 0
-%w[closed open half_open].each { |state| $circuit_breaker_state_gauge.set(0, labels: { state: state }) }
-$circuit_breaker_state_gauge.set(1, labels: { state: "closed" })
+# Update circuit breaker gauge when state changes
+CIRCUIT_BREAKER.on_open do
+  $email_circuit_breaker_state.set(1)
+end
 
-# Circuit Breaker configuration
-CIRCUIT_BREAKER_DEFAULTS = {
-  failure_threshold: ENV.fetch('SMTP_CIRCUIT_FAILURE_THRESHOLD', 5).to_i,
-  recovery_timeout: ENV.fetch('SMTP_CIRCUIT_RECOVERY_TIMEOUT', 30).to_i,
-  expected_exceptions: [Net::OpenTimeout, Net::ReadTimeout, Net::SMTPFatalError, Net::SMTPServerBusy, Errno::ETIMEDOUT, Errno::ECONNRESET, SocketError]
-}.freeze
+CIRCUIT_BREAKER.on_close do
+  $email_circuit_breaker_state.set(0)
+end
+
+CIRCUIT_BREAKER.on_half_open do
+  $email_circuit_breaker_state.set(2)
+end
+
+# EmailService module with resiliency features
+module EmailService
+  # Attempt to send an email, handling retries and circuit breaking
+  # @param to [String] Recipient email address
+  # @param subject [String] Email subject line
+  # @param body [String] Plain text or HTML email body
+  # @param options [Hash] Additional Pony gem options (cc, bcc, attachments, etc.)
+  # @return [Boolean] True if delivery succeeded, false if delivery failed permanently
+  # @raise [ArgumentError] Only raised for invalid input parameters (no runtime delivery errors are raised)
+  def self.send(to:, subject:, body:, **options)
+    # Input validation
+    raise ArgumentError, "to is required" if to.nil? || to.strip.empty?
+    raise ArgumentError, "subject is required" if subject.nil? || subject.strip.empty?
+    raise ArgumentError, "body is required" if body.nil? || body.strip.empty?
+    raise ArgumentError, "invalid email format" unless to.match?(URI::MailTo::EMAIL_REGEXP)
+
+    start_time = Time.now
+    retries_attempted = 0
+
+    begin
+      # Check circuit breaker first
+      unless CIRCUIT_BREAKER.closed?
+        $email_delivery_attempts_total.increment(labels: { status: 'circuit_open' })
+        return false
+      end
+
+      # Use Retriable gem for exponential backoff with jitter
+      Retriable.retriable(
+        tries: 5, # 5 total attempts = 4 retries
+        base_interval: 1,
+        multiplier: 2,
+        rand_factor: 0.2, # ±20% jitter
+        max_elapsed_time: 20, # AC-7: max 20 seconds total
+        on_retry: ->(e, try, _elapsed, next_interval) {
+          # Increment retry counter
+          $email_retry_attempts_total.increment
+          $email_delivery_retry_total.increment(labels: { retry_attempt: try })
+          retries_attempted = try
+        },
+        on: ->(e) {
+          # Check if error is retriable transient error
+          return false if e.is_a?(Circuitbox::OpenCircuitError)
+          return true if [Net::OpenTimeout, Net::ReadTimeout, Errno::ECONNREFUSED, Errno::ETIMEDOUT].any? { |c| e.is_a?(c) }
+          if e.is_a?(Net::SMTPError)
+            smtp_code = e.instance_variable_get(:@status) || e.message.match(/^(\d{3})/)&.captures&.first
+            return smtp_code && smtp_code.start_with?('4')
+          end
+          false
+        }
+      ) do
+        # Build and send email
+        mail = Pony.build_mail(
+          to: to,
+          subject: subject,
+          body: body,
+          **options
+        )
+
+        # Run via circuit breaker
+        CIRCUIT_BREAKER.run { mail.deliver }
+
+        $email_delivery_success_total.increment
+        $email_delivery_attempts_total.increment(labels: { status: 'success' })
+        return true
+      end
+    rescue Circuitbox::OpenCircuitError
+      $email_delivery_attempts_total.increment(labels: { status: 'circuit_open' })
+      return false
+    rescue Net::SMTPError => e
+      smtp_code = e.instance_variable_get(:@status) || e.message.match(/^(\d{3})/)&.captures&.first
+      if smtp_code&.start_with?('5')
+        # Permanent error
+        $email_delivery_attempts_total.increment(labels: { status: 'permanent_failure' })
+        $email_delivery_failed_total.increment(labels: { failure_type: 'permanent' })
+        return false
+      end
+      # Transient error that failed all retries
+      $email_delivery_attempts_total.increment(labels: { status: 'transient_failure' })
+      $email_delivery_failed_total.increment(labels: { failure_type: 'temporary' })
+      return false
+    rescue ArgumentError => e
+      # Re-raise invalid input errors
+      raise e
+    rescue => e
+      # All other errors are permanent
+      $email_delivery_attempts_total.increment(labels: { status: 'permanent_failure' })
+      $email_delivery_failed_total.increment(labels: { failure_type: 'permanent' })
+      return false
+    end
+  end
+end
 
 # Wraps existing SMTP delivery calls with circuit breaker protection
 # @param mail [Mail] Ruby Mail object to deliver
