@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fraud-detection-service
+  namespace: demo
+  labels:
+    app: fraud-detection-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fraud-detection-service
+  template:
+    metadata:
+      labels:
+        app: fraud-detection-service
+    spec:
+      containers:
+      - name: fraud-detection-service
+        image: ghcr.io/lgu-se-internal/opentelemetry-demo/fraud-detection-service:latest
+        ports:
+        - containerPort: 8080
+          name: grpc
+        - containerPort: 9090
+          name: management
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        livenessProbe:
+          httpGet:
+            path: /q/health/live
+            port: 9090
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        readinessProbe:
+          httpGet:
+            path: /q/health/ready
+            port: 9090
+          initialDelaySeconds: 5
+          periodSeconds: 2
+        env:
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://otelcol:4317"
+        - name: FEATURE_FLAG_SERVICE_ENDPOINT
+          value: "feature-flag-service:8080"
+        - name: GRPC_PORT
+          value: "8080"
+        - name: MANAGEMENT_PORT
+          value: "9090"
+        - name: REQUEST_TIMEOUT_MS
+          value: "5000"
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 10001
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
