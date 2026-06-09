@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flagd-ui
+  labels:
+    app.kubernetes.io/name: flagd-ui
+    app.kubernetes.io/part-of: opentelemetry-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: flagd-ui
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: flagd-ui
+        app.kubernetes.io/part-of: opentelemetry-demo
+    spec:
+      containers:
+      - name: flagd-ui
+        image: ${FLAGD_UI_IMAGE}:${FLAGD_UI_TAG}
+        ports:
+        - containerPort: 4000
+          name: http
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 4000
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 4000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "500m"
+            memory: "256Mi"
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - "ALL"
+          seccompProfile:
+            type: RuntimeDefault
