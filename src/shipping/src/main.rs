@@ -3,14 +3,47 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::env;
-use tonic::{transport::Server, Request, Status, Code};
+use std::time::Duration;
+use tonic::{transport::Server, Request, Status, Code, service::Interceptor};
 use tower_governor::{Governor, GovernorConfig, GovernorConfigBuilder, key_extractor::KeyExtractor, error::GovernorError};
 use governor::Quota;
 use std::num::NonZeroU32;
 use opentelemetry::metrics::Counter;
 use opentelemetry_proto::oteldemo::shipping_service_server::{ShippingService, ShippingServiceServer};
 use opentelemetry_proto::oteldemo::{GetQuoteRequest, GetQuoteResponse, ShipOrderRequest, ShipOrderResponse, GetShippingRequest, GetShippingResponse};
+use tokio::signal::unix::{signal, SignalKind};
+use chrono::Utc;
+
+// Active request tracker interceptor to count in-flight requests for shutdown logging
+#[derive(Debug, Clone)]
+struct ActiveRequestTracker {
+    count: Arc<AtomicUsize>,
+}
+
+impl Interceptor for ActiveRequestTracker {
+    fn call(&mut self, request: Request<()>) -> Result<Request<()>, Status> {
+        let count = self.count.clone();
+        // Increment on request start
+        count.fetch_add(1, Ordering::SeqCst);
+        // Decrement when request completes (using extension to track)
+        request.extensions_mut().insert(ActiveRequestGuard { count });
+        Ok(request)
+    }
+}
+
+// Guard to decrement active request count when request is dropped
+#[derive(Debug)]
+struct ActiveRequestGuard {
+    count: Arc<AtomicUsize>,
+}
+
+impl Drop for ActiveRequestGuard {
+    fn drop(&mut self) {
+        self.count.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 // gRPC Shipping Service implementation
 #[derive(Debug, Clone)]
@@ -429,8 +462,15 @@ async fn main() -> std::io::Result<()> {
     // Build rate limiting interceptor
     let rate_limit_interceptor = build_rate_limit_interceptor(rate_limit_counter);
 
-    // Create shipping service implementation
-    let shipping_service = ShippingServiceImpl;
+    // Create active request tracker
+    let active_requests = Arc::new(AtomicUsize::new(0));
+    let request_tracker = ActiveRequestTracker { count: active_requests.clone() };
+
+    // Chain interceptors: request tracker first, then rate limiter
+    let service = tower::ServiceBuilder::new()
+        .layer(tonic::service::interceptor(request_tracker))
+        .layer(tonic::service::interceptor(rate_limit_interceptor))
+        .service(ShippingServiceServer::new(ShippingServiceImpl));
 
     info!(
         name = "ServerStartedSuccessfully",
@@ -438,11 +478,73 @@ async fn main() -> std::io::Result<()> {
         message = "Shipping gRPC service is running"
     );
 
-    // Start gRPC server
-    Server::builder()
-        .add_service(ShippingServiceServer::with_interceptor(shipping_service, rate_limit_interceptor))
-        .serve(addr)
-        .await?;
+    // Set up signal handlers
+    let mut sigint = signal(SignalKind::interrupt()).expect("Failed to set up SIGINT handler");
+    let mut sigterm = signal(SignalKind::terminate()).expect("Failed to set up SIGTERM handler");
+
+    // Wait for signal
+    let signal_name = tokio::select! {
+        _ = sigint.recv() => "SIGINT",
+        _ = sigterm.recv() => "SIGTERM",
+    };
+
+    // Log signal received event
+    info!(
+        name = "signal_received",
+        signal = signal_name,
+        timestamp = %Utc::now().to_rfc3339(),
+        "Received shutdown signal"
+    );
+
+    // Log shutdown started event
+    info!(
+        name = "shutdown_started",
+        timeout_seconds = 30,
+        timestamp = %Utc::now().to_rfc3339(),
+        "Starting graceful shutdown with 30s timeout"
+    );
+
+    // Create server and get shutdown handle
+    let server = Server::builder()
+        .add_service(service);
+
+    let (shutdown_handle, server_future) = server.serve_with_graceful_shutdown(addr, async move {
+        // Empty future, we will trigger shutdown explicitly via handle
+    });
+
+    // Spawn server task
+    let server_handle = tokio::spawn(server_future);
+
+    // Wait for either graceful shutdown completion or timeout
+    let shutdown_result = tokio::time::timeout(
+        Duration::from_secs(30),
+        shutdown_handle.shutdown()
+    ).await;
+
+    match shutdown_result {
+        Ok(_) => {
+            // Shutdown completed successfully within timeout
+            let completed = active_requests.load(Ordering::SeqCst);
+            info!(
+                name = "shutdown_complete",
+                in_flight_requests_completed = completed,
+                timestamp = %Utc::now().to_rfc3339(),
+                "Graceful shutdown completed successfully"
+            );
+        }
+        Err(_) => {
+            // Shutdown timed out
+            let dropped = active_requests.load(Ordering::SeqCst);
+            info!(
+                name = "shutdown_timed_out",
+                in_flight_requests_dropped = dropped,
+                timestamp = %Utc::now().to_rfc3339(),
+                "Graceful shutdown timed out, dropping remaining requests"
+            );
+            // Force cancel any remaining server tasks
+            server_handle.abort();
+        }
+    }
 
     Ok(())
 }
