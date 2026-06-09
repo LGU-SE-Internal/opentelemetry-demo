@@ -170,17 +170,13 @@ func runServer(ctx context.Context, port int) error {
 	if err != nil {
 		return fmt.Errorf("invalid TLS configuration: %w", err)
 	}
-	rateLimiter, err := NewRateLimiterFromEnv()
-	if err != nil {
-		return fmt.Errorf("failed to create rate limiter: %w", err)
-	}
 
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		return fmt.Errorf("TCP listen failed: %w", err)
 	}
 
-	srv, err := NewGRPCServerWithTLS(tlsCfg, rateLimiter)
+	srv, err := NewGRPCServerWithTLS(tlsCfg, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create gRPC server: %w", err)
 	}
@@ -331,10 +327,11 @@ func main() {
 	global.SetLoggerProvider(sdk.LoggerProvider())
 	otel.SetTextMapPropagator(sdk.Propagator())
 
-	// Initialize rate limit metrics
+	// Initialize rate limiter
 	meter := sdk.MeterProvider().Meter("github.com/opentelemetry/opentelemetry-demo/src/product-catalog")
-	if err := initMetrics(meter); err != nil {
-		logger.Error(fmt.Sprintf("Failed to initialize rate limit metrics: %v", err))
+	rateLimiter, err := NewPerEndpointRateLimiter(meter)
+	if err != nil {
+		logger.Error(fmt.Sprintf("Failed to initialize rate limiter: %v", err))
 		os.Exit(1)
 	}
 
@@ -381,17 +378,10 @@ func main() {
 	svc := &productCatalog{}
 	var port string
 	mustMapEnv(&port, "PRODUCT_CATALOG_PORT")
-	
 	// Load TLS configuration
 	tlsCfg, err := LoadTLSConfigFromEnv()
 	if err != nil {
 		logger.Error(fmt.Sprintf("Invalid TLS configuration: %v", err))
-		os.Exit(1)
-	}
-	// Load rate limiter configuration from environment variables
-	rateLimiter, err := NewRateLimiterFromEnv()
-	if err != nil {
-		logger.Error(fmt.Sprintf("Failed to initialize rate limiter: %v", err))
 		os.Exit(1)
 	}
 
