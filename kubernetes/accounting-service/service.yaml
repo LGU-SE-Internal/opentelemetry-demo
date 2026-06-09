@@ -3,14 +3,13 @@ kind: Service
 metadata:
   name: accounting-service
   labels:
-    app.kubernetes.io/name: accounting-service
-    app.kubernetes.io/component: backend
+    app: accounting-service
 spec:
   type: ClusterIP
   ports:
   - port: 8080
-    targetPort: http
+    targetPort: 8080
     protocol: TCP
-    name: http
+    name: health
   selector:
-    app.kubernetes.io/name: accounting-service
+    app: accounting-service
