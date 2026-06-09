@@ -12,7 +12,7 @@ def init_metrics(meter):
     
     # Rate limited requests counter
     rate_limited_requests = meter.create_counter(
-        'recommendation_service_rate_limited_requests_total', unit='1', description="Total number of requests rejected due to rate limiting on the ListRecommendations endpoint."
+        'recommendation_service_rate_limited_requests_total', unit='1', description="Total number of requests that were rejected due to rate limiting per endpoint."
     )
     
     # Product catalog retry attempts counter
