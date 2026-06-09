@@ -27,6 +27,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cenkalti/backoff/v4"
+	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/lib/pq"
 	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
@@ -69,6 +71,172 @@ var (
 	ErrTLSInvalidCert       = errors.New("invalid TLS certificate/key")
 	ErrTLSInvalidCA         = errors.New("invalid CA bundle")
 )
+
+// RetryConfig defines configuration for retry behavior
+type RetryConfig struct {
+	MaxAttempts       int           // default: 3
+	InitialBackoff    time.Duration // default: 100ms
+	MaxBackoff        time.Duration // default: 2s
+	JitterFactor      float64       // default: 0.2
+}
+
+// PostgresRetryMiddleware wraps database operations with retry logic for transient errors
+type PostgresRetryMiddleware interface {
+	// Execute runs the given operation with retry logic if the operation is marked idempotent
+	Execute(ctx context.Context, operationName string, isIdempotent bool, op func() error) error
+}
+
+type postgresRetryMiddleware struct {
+	config RetryConfig
+	tracer trace.Tracer
+}
+
+// NewPostgresRetryMiddleware creates a new PostgresRetryMiddleware with the given config
+// If config is nil, defaults are used
+func NewPostgresRetryMiddleware(config *RetryConfig) PostgresRetryMiddleware {
+	cfg := RetryConfig{
+		MaxAttempts:    3,
+		InitialBackoff: 100 * time.Millisecond,
+		MaxBackoff:     2 * time.Second,
+		JitterFactor:   0.2,
+	}
+	if config != nil {
+		if config.MaxAttempts > 0 {
+			cfg.MaxAttempts = config.MaxAttempts
+		}
+		if config.InitialBackoff > 0 {
+			cfg.InitialBackoff = config.InitialBackoff
+		}
+		if config.MaxBackoff > 0 {
+			cfg.MaxBackoff = config.MaxBackoff
+		}
+		if config.JitterFactor >= 0 && config.JitterFactor <= 1 {
+			cfg.JitterFactor = config.JitterFactor
+		}
+	}
+	return &postgresRetryMiddleware{
+		config: cfg,
+		tracer: otel.Tracer("product-catalog/retry"),
+	}
+}
+
+// isTransientPostgresError checks if an error is a transient PostgreSQL error that should be retried
+func isTransientPostgresError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Check for context deadline exceeded errors
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, pgconn.ErrTimeout) {
+		return true
+	}
+
+	// Check for pgx error codes
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		// Lock contention errors
+		case "40P01", // deadlock detected
+			"55P03": // lock not available
+			return true
+		// Temporary outages/connection errors
+		case "08006", // connection failure
+			"08001", // sqlclient unable to establish connection
+			"57P01", // admin shutdown
+			"57P03": // cannot connect now
+			return true
+		}
+	}
+
+	// Check for connection reset errors
+	if strings.Contains(err.Error(), "connection reset by peer") ||
+		strings.Contains(err.Error(), "broken pipe") ||
+		strings.Contains(err.Error(), "connection refused") {
+		return true
+	}
+
+	return false
+}
+
+func (m *postgresRetryMiddleware) Execute(ctx context.Context, operationName string, isIdempotent bool, op func() error) error {
+	if !isIdempotent {
+		// Don't retry non-idempotent operations
+		return op()
+	}
+
+	span := trace.SpanFromContext(ctx)
+	span.SetAttributes(
+		attribute.Int("db.retry.max_attempts", m.config.MaxAttempts),
+	)
+
+	attempt := 0
+	var lastErr error
+
+	// Create exponential backoff with jitter
+	b := backoff.NewExponentialBackOff()
+	b.InitialInterval = m.config.InitialBackoff
+	b.MaxInterval = m.config.MaxBackoff
+	b.RandomizationFactor = m.config.JitterFactor
+	b.Multiplier = 2
+	b.Reset()
+
+	for attempt < m.config.MaxAttempts {
+		span.SetAttributes(attribute.Int("db.retry.attempt", attempt))
+
+		err := op()
+		if err == nil {
+			// Success
+			if attempt > 0 {
+				logger.DebugContext(ctx, "Operation succeeded after retry",
+					slog.String("operation", operationName),
+					slog.Int("attempts", attempt+1),
+				)
+			}
+			return nil
+		}
+
+		lastErr = err
+		if !isTransientPostgresError(err) {
+			// Non-transient error, don't retry
+			span.SetAttributes(attribute.String("db.retry.error_type", "non-transient"))
+			return err
+		}
+
+		attempt++
+		if attempt >= m.config.MaxAttempts {
+			break
+		}
+
+		// Calculate delay
+		delay := b.NextBackOff()
+		span.SetAttributes(
+			attribute.String("db.retry.error_type", fmt.Sprintf("%T", err)),
+			attribute.Int("db.retry.delay_ms", int(delay.Milliseconds())),
+		)
+
+		logger.DebugContext(ctx, "Retrying transient PostgreSQL error",
+			slog.String("operation", operationName),
+			slog.Int("attempt", attempt),
+			slog.Duration("delay", delay),
+			slog.String("error", err.Error()),
+		)
+
+		// Wait for delay or context cancellation
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+	}
+
+	// All attempts exhausted
+	logger.ErrorContext(ctx, "Operation failed after all retry attempts",
+		slog.String("operation", operationName),
+		slog.Int("total_attempts", m.config.MaxAttempts),
+		slog.String("error", lastErr.Error()),
+	)
+	return lastErr
+}
 
 // TLSConfig holds validated TLS configuration for the gRPC server
 type TLSConfig struct {
@@ -179,7 +347,9 @@ func runServer(ctx context.Context, port int) error {
 		return fmt.Errorf("failed to create gRPC server: %w", err)
 	}
 
-	svc := &productCatalog{}
+	svc := &productCatalog{
+		retryMiddleware: NewPostgresRetryMiddleware(nil),
+	}
 	reflection.Register(srv)
 	pb.RegisterProductCatalogServiceServer(srv, svc)
 	healthpb.RegisterHealthServer(srv, svc)
@@ -259,6 +429,7 @@ func validateSearchProductsRequest(req *pb.SearchProductsRequest) error {
 
 type productCatalog struct {
 	pb.UnimplementedProductCatalogServiceServer
+	retryMiddleware PostgresRetryMiddleware
 }
 
 func init() {
