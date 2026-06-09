@@ -8,6 +8,7 @@
 import os
 import json
 import re
+import uuid
 from concurrent import futures
 import random
 import signal
@@ -234,30 +235,34 @@ tools = [
       }
 ]
 
-PRODUCT_ID_PATTERN = re.compile(r'^OL[0-9A-F]{8}$')
-
-def validate_request_params(context, product_id: str, limit: int = None, offset: int = None):
-    """Validate request parameters according to AC rules.
+def validate_product_id(context, product_id: str):
+    """Validate product_id is non-empty and valid UUID v4.
     Raises grpc.RpcError with INVALID_ARGUMENT status if validation fails.
     """
-    # Validate product_id
     if not product_id:
-        context.abort(grpc.StatusCode.INVALID_ARGUMENT, "product_id is required and cannot be empty")
-    if not PRODUCT_ID_PATTERN.match(product_id):
-        context.abort(grpc.StatusCode.INVALID_ARGUMENT, 
-                     f"product_id {product_id} is invalid, must match pattern ^OL[0-9A-F]{{8}}$")
+        context.abort(grpc.StatusCode.INVALID_ARGUMENT, "product_id is required")
+    try:
+        uuid_obj = uuid.UUID(product_id, version=4)
+    except ValueError:
+        context.abort(grpc.StatusCode.INVALID_ARGUMENT, "product_id is not a valid UUID")
+
+def validate_create_review_request(context, request):
+    """Validate CreateProductReviewRequest fields.
+    Raises grpc.RpcError with INVALID_ARGUMENT status if validation fails.
+    """
+    validate_product_id(context, request.product_id)
     
-    # Validate limit if provided
-    if limit is not None:
-        if limit < 1 or limit > 100:
-            context.abort(grpc.StatusCode.INVALID_ARGUMENT, 
-                         f"limit {limit} is invalid, must be between 1 and 100 inclusive")
+    # Validate rating
+    if not isinstance(request.rating, int):
+        context.abort(grpc.StatusCode.INVALID_ARGUMENT, "rating must be an integer")
+    if request.rating < 1:
+        context.abort(grpc.StatusCode.INVALID_ARGUMENT, "rating must be at least 1")
+    if request.rating > 5:
+        context.abort(grpc.StatusCode.INVALID_ARGUMENT, "rating must be at most 5")
     
-    # Validate offset if provided
-    if offset is not None:
-        if offset < 0:
-            context.abort(grpc.StatusCode.INVALID_ARGUMENT, 
-                         f"offset {offset} is invalid, must be >= 0")
+    # Validate review text length
+    if len(request.review_text) > 2000:
+        context.abort(grpc.StatusCode.INVALID_ARGUMENT, "review text exceeds 2000 character limit")
 
 class RateLimitInterceptor(grpc.aio.ServerInterceptor):
     async def intercept_service(self, continuation, handler_call_details):
@@ -331,13 +336,8 @@ class ProductReviewService(demo_pb2_grpc.ProductReviewServiceServicer):
     def GetProductReviews(self, request, context):
         logger.info(f"Receive GetProductReviews for product id:{request.product_id}")
         
-        # Validate request parameters first
-        validate_request_params(
-            context,
-            product_id=request.product_id,
-            limit=request.limit if hasattr(request, 'limit') else None,
-            offset=request.offset if hasattr(request, 'offset') else None
-        )
+        # Validate product_id
+        validate_product_id(context, request.product_id)
         
         product_reviews = get_product_reviews(request.product_id)
 
@@ -346,11 +346,8 @@ class ProductReviewService(demo_pb2_grpc.ProductReviewServiceServicer):
     def SubmitProductReview(self, request, context):
         logger.info(f"Receive SubmitProductReview for product id:{request.product_id}")
         
-        # Validate request parameters first
-        validate_request_params(
-            context,
-            product_id=request.product_id
-        )
+        # Validate all request fields
+        validate_create_review_request(context, request)
         
         # Existing business logic for submitting review (placeholder as per original code)
         # This preserves existing behavior for valid requests
@@ -360,12 +357,16 @@ class ProductReviewService(demo_pb2_grpc.ProductReviewServiceServicer):
 
     def GetAverageProductReviewScore(self, request, context):
         logger.info(f"Receive GetAverageProductReviewScore for product id:{request.product_id}")
+        # Validate product_id
+        validate_product_id(context, request.product_id)
         product_reviews = get_average_product_review_score(request.product_id)
 
         return product_reviews
 
     def AskProductAIAssistant(self, request, context):
         logger.info(f"Receive AskProductAIAssistant for product id:{request.product_id}, question: {request.question}")
+        # Validate product_id
+        validate_product_id(context, request.product_id)
         ai_assistant_response = get_ai_assistant_response(request.product_id, request.question)
 
         return ai_assistant_response
