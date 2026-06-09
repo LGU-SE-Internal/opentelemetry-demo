@@ -50,6 +50,7 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
 import sun.misc.Signal
 import sun.misc.SignalHandler
+import frauddetection.health.ServiceReadinessCheck
 
 val isShuttingDown = AtomicBoolean(false)
 val kafkaConnected = AtomicBoolean(false)
@@ -77,15 +78,37 @@ class HealthCheckHandler : ChannelInboundHandlerAdapter() {
     }
 
     private fun handleReadiness(ctx: ChannelHandlerContext) {
-        val allDependenciesUp = kafkaConnected.get() && !isShuttingDown.get()
-        val status = if (allDependenciesUp) HttpResponseStatus.OK else HttpResponseStatus.SERVICE_UNAVAILABLE
-        val responseBody = if (allDependenciesUp) {
-            """{"status":"UP","dependencies":{"kafka":"UP"}}"""
+        if (isShuttingDown.get()) {
+            val status = HttpResponseStatus.SERVICE_UNAVAILABLE
+            val responseBody = """{"status":"DOWN","error":"Service is shutting down"}"""
+            sendJsonResponse(ctx, status, responseBody)
+            return
+        }
+
+        val readinessCheck = ServiceReadinessCheck()
+        val result = readinessCheck.call()
+        val status = if (result.status == org.eclipse.microprofile.health.HealthCheckResponse.Status.UP) {
+            HttpResponseStatus.OK
         } else {
-            val errors = mutableListOf<String>()
-            if (isShuttingDown.get()) errors.add("Service is shutting down")
-            if (!kafkaConnected.get()) errors.add("Kafka connection unavailable")
-            """{"status":"DOWN","error":"${errors.joinToString("; ")}","dependencies":{"kafka":"${if (kafkaConnected.get()) "UP" else "DOWN: Connection failed"}"}}"""
+            HttpResponseStatus.SERVICE_UNAVAILABLE
+        }
+
+        val dependencies = result.data.mapValues { entry ->
+            entry.value.toString()
+        }
+
+        val responseBody = buildString {
+            append("{")
+            append("\"status\":\"${if (result.status == org.eclipse.microprofile.health.HealthCheckResponse.Status.UP) "UP" else "DOWN"}\"")
+            if (dependencies.isNotEmpty()) {
+                append(",\"dependencies\":{")
+                append(dependencies.map { (key, value) -> "\"$key\":\"$value\"" }.joinToString(","))
+                append("}")
+            }
+            if (result.status == org.eclipse.microprofile.health.HealthCheckResponse.Status.DOWN) {
+                append(",\"error\":\"One or more dependencies are unavailable\"")
+            }
+            append("}")
         }
         sendJsonResponse(ctx, status, responseBody)
     }
