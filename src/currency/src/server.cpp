@@ -338,7 +338,14 @@ class CurrencyService final : public oteldemo::CurrencyService::Service
       }
       
       std::shared_lock<std::shared_mutex> lock(rates_mutex);
-      double rate = current_rates[from_code];
+      // Validate from currency code is supported
+      if (current_rates.find(from_code) == current_rates.end()) {
+        span->SetStatus(StatusCode::kError);
+        logger->Error(std::string(__func__) + " conversion failed: unsupported from currency code: " + from_code);
+        span->End();
+        return Status(grpc::INVALID_ARGUMENT, "unsupported currency code: " + from_code);
+      }
+      double rate = current_rates.at(from_code);
       double one_euro = getDouble(from) / rate ;
 
       string to_code = request->to_code();
@@ -351,7 +358,14 @@ class CurrencyService final : public oteldemo::CurrencyService::Service
         return Status(grpc::INVALID_ARGUMENT, "to currency code cannot be empty");
       }
       
-      double to_rate = current_rates[to_code];
+      // Validate to currency code is supported
+      if (current_rates.find(to_code) == current_rates.end()) {
+        span->SetStatus(StatusCode::kError);
+        logger->Error(std::string(__func__) + " conversion failed: unsupported to currency code: " + to_code);
+        span->End();
+        return Status(grpc::INVALID_ARGUMENT, "unsupported currency code: " + to_code);
+      }
+      double to_rate = current_rates.at(to_code);
 
       double final = one_euro * to_rate;
       getUnitsAndNanos(*response, final);
