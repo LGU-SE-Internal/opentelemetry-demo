@@ -42,8 +42,17 @@ builder.Services.AddHealthChecks()
         tags: new[] { "ready" },
         timeout: TimeSpan.FromSeconds(5));
 
+// Add DbContext Factory
+builder.Services.AddDbContextFactory<DBContext>();
+
+// Add Postgres retry policy
+builder.Services.AddSingleton(sp => PostgresRetryPolicy.CreateWriteRetryPolicy(sp.GetRequiredService<IMeterFactory>()));
+
+// Add Idempotent DB Writer
+builder.Services.AddScoped<IIdempotentDbWriter, IdempotentDbWriter>();
+
 // Add our Kafka consumer service
-builder.Services.AddSingleton<Consumer>(sp => new Consumer(sp.GetRequiredService<ILogger<Consumer>>(), sp.GetRequiredService<IConfiguration>()));
+builder.Services.AddSingleton<Consumer>(sp => new Consumer(sp.GetRequiredService<ILogger<Consumer>>(), sp.GetRequiredService<IConfiguration>(), sp.GetRequiredService<IDbContextFactory<DBContext>>(), sp.GetRequiredService<IIdempotentDbWriter>()));
 // Add graceful shutdown service
 builder.Services.AddSingleton<IGracefulShutdownService, GracefulShutdownService>();
 

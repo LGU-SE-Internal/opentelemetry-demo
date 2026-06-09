@@ -56,4 +56,6 @@ internal class OrderEntity
     [Column("order_id")]
     public required string Id { get; set; }
 
+    [Column("idempotency_key")]
+    public string? IdempotencyKey { get; set; }
 }
