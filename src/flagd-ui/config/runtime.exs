@@ -49,16 +49,12 @@ if config_env() == :prod do
   tls_enabled = System.get_env("FLAGD_UI_TLS_ENABLED") == "true"
   tls_cert_path = System.get_env("FLAGD_UI_TLS_CERT_PATH") || ""
   tls_key_path = System.get_env("FLAGD_UI_TLS_KEY_PATH") || ""
-  tls_client_ca_path = System.get_env("FLAGD_UI_TLS_CLIENT_CA_PATH") || ""
-  tls_client_require = if System.get_env("FLAGD_UI_TLS_CLIENT_REQUIRE") do
-    System.get_env("FLAGD_UI_TLS_CLIENT_REQUIRE") == "true"
-  else
-    tls_client_ca_path != ""
-  end
+  mtls_enabled = System.get_env("FLAGD_UI_TLS_MTLS_ENABLED") == "true"
+  tls_ca_cert_path = System.get_env("FLAGD_UI_TLS_CA_CERT_PATH") || ""
 
   if tls_enabled do
     if tls_cert_path == "" or tls_key_path == "" do
-      raise "Missing required TLS configuration: FLAGD_UI_TLS_CERT_PATH and FLAGD_UI_TLS_KEY_PATH must be set when TLS is enabled"
+      raise "TLS enabled but required configuration parameters (FLAGD_UI_TLS_CERT_PATH, FLAGD_UI_TLS_KEY_PATH) are missing"
     end
 
     # Validate certificate and key files exist and are readable
@@ -76,19 +72,24 @@ if config_env() == :prod do
       port: port,
       cipher_suite: :strong,
       keyfile: tls_key_path,
-      certfile: tls_cert_path
+      certfile: tls_cert_path,
+      tls_versions: [:"tlsv1.2", :"tlsv1.3"]
     ]
 
-    # Add mTLS config if client CA is provided
-    https_opts = if tls_client_ca_path != "" do
-      unless File.exists?(tls_client_ca_path) and File.readable?(tls_client_ca_path) do
-        raise "Invalid client CA certificate file: #{tls_client_ca_path} does not exist or is not readable"
+    # Add mTLS config if enabled
+    https_opts = if mtls_enabled do
+      if tls_ca_cert_path == "" do
+        raise "mTLS enabled but required FLAGD_UI_TLS_CA_CERT_PATH parameter is missing"
+      end
+
+      unless File.exists?(tls_ca_cert_path) and File.readable?(tls_ca_cert_path) do
+        raise "Invalid CA certificate file: #{tls_ca_cert_path} does not exist or is not readable"
       end
 
       https_opts ++ [
-        cacertfile: tls_client_ca_path,
-        verify: if tls_client_require, do: :verify_peer, else: :verify_none,
-        fail_if_no_peer_cert: tls_client_require
+        cacertfile: tls_ca_cert_path,
+        verify: :verify_peer,
+        fail_if_no_peer_cert: true
       ]
     else
       https_opts
