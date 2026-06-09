@@ -1,69 +1,70 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: recommendation-service
+  name: recommendationservice
   labels:
-    app: recommendation-service
+    app.kubernetes.io/name: recommendationservice
+    app.kubernetes.io/part-of: opentelemetry-demo
+    app.kubernetes.io/component: service
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: recommendation-service
+      app.kubernetes.io/name: recommendationservice
   template:
     metadata:
       labels:
-        app: recommendation-service
+        app.kubernetes.io/name: recommendationservice
+        app.kubernetes.io/part-of: opentelemetry-demo
+        app.kubernetes.io/component: service
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+        readOnlyRootFilesystem: true
+        privileged: false
       containers:
-      - name: recommendation-service
-        image: otel/opentelemetry-demo-recommendation:latest
+      - name: recommendationservice
+        image: {{ .Values.image.repository | default "otel/opentelemetry-demo-recommendation" }}:{{ .Values.image.tag | default "latest" }}
         env:
-        - name: RECOMMENDATION_PORT
+        - name: PORT
           value: "8080"
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: {{ .Values.otel.exporter.otlp.endpoint | default "http://otel-collector:4317" }}
+        - name: TLS_ENABLED
+          value: {{ .Values.tls.enabled | default "false" | quote }}
+        - name: RETRY_MAX_ATTEMPTS
+          value: {{ .Values.retry.maxAttempts | default "3" | quote }}
+        - name: UPSTREAM_CATALOG_SERVICE_ADDR
+          value: {{ .Values.upstream.catalogServiceAddr | default "productcatalogservice:8080" }}
         ports:
         - containerPort: 8080
           name: grpc
         livenessProbe:
           grpc:
             port: 8080
-            service: ""
-          initialDelaySeconds: 10
-          periodSeconds: 30
-          timeoutSeconds: 5
+            service: recommendationservice
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 1
           failureThreshold: 3
         readinessProbe:
           grpc:
             port: 8080
-            service: ""
-          initialDelaySeconds: 5
-          periodSeconds: 10
-          timeoutSeconds: 3
+            service: recommendationservice
+          initialDelaySeconds: 2
+          periodSeconds: 5
+          timeoutSeconds: 1
           failureThreshold: 3
         resources:
           requests:
-            cpu: "100m"
-            memory: "128Mi"
+            cpu: {{ .Values.resources.requests.cpu | default "100m" }}
+            memory: {{ .Values.resources.requests.memory | default "128Mi" }}
           limits:
-            cpu: "500m"
-            memory: "256Mi"
-        securityContext:
-          runAsNonRoot: true
-          runAsUser: 1000
-          allowPrivilegeEscalation: false
-          readOnlyRootFilesystem: true
-          privileged: false
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: recommendation-service
-  labels:
-    app: recommendation-service
-spec:
-  type: ClusterIP
-  ports:
-  - port: 8080
-    targetPort: 8080
-    name: grpc
-  selector:
-    app: recommendation-service
+            cpu: {{ .Values.resources.limits.cpu | default "200m" }}
+            memory: {{ .Values.resources.limits.memory | default "256Mi" }}
