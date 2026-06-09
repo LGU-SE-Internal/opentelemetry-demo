@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"os/signal"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -478,14 +480,27 @@ func main() {
 
 	logger.Info(fmt.Sprintf("service config: %+v", svc))
 
+	// Load gRPC server TLS configuration
+	serverTLSConfig := ServerTLSConfig{
+		Enabled:            os.Getenv("GRPC_SERVER_TLS_ENABLED") == "true",
+		CertPath:           os.Getenv("GRPC_SERVER_TLS_CERT_PATH"),
+		KeyPath:            os.Getenv("GRPC_SERVER_TLS_KEY_PATH"),
+		ClientAuthRequired: os.Getenv("GRPC_SERVER_TLS_CLIENT_AUTH_REQUIRED") == "true",
+		CACertPath:         os.Getenv("GRPC_SERVER_TLS_CA_CERT_PATH"),
+	}
+
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%s", port))
 	if err != nil {
 		logger.Error(err.Error())
 	}
 
-	srv := grpc.NewServer(
+	srv, err := NewGRPCServer(serverTLSConfig,
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 	)
+	if err != nil {
+		logger.Error(fmt.Sprintf("failed to create gRPC server: %v", err))
+		os.Exit(1)
+	}
 	pb.RegisterCheckoutServiceServer(srv, svc)
 
 	healthpb.RegisterHealthServer(srv, healthcheck)
@@ -825,8 +840,16 @@ func mustCreateClient(addr string, svcName string) *grpc.ClientConn {
 		}]
 	}`, maxRetryAttempts, initialBackoff, maxBackoff, backoffMultiplier, totalRetryTimeout)
 
-	c, err := grpc.NewClient(addr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	// Load client TLS configuration for this service
+	svcNameUpper := strings.ToUpper(svcName)
+	clientTLSConfig := ClientTLSConfig{
+		Enabled:        os.Getenv(fmt.Sprintf("%s_GRPC_CLIENT_TLS_ENABLED", svcNameUpper)) == "true",
+		CACertPath:     os.Getenv(fmt.Sprintf("%s_GRPC_CLIENT_TLS_CA_CERT_PATH", svcNameUpper)),
+		ClientCertPath: os.Getenv(fmt.Sprintf("%s_GRPC_CLIENT_TLS_CLIENT_CERT_PATH", svcNameUpper)),
+		ClientKeyPath:  os.Getenv(fmt.Sprintf("%s_GRPC_CLIENT_TLS_CLIENT_KEY_PATH", svcNameUpper)),
+	}
+
+	c, err := NewGRPCClientConn(addr, clientTLSConfig,
 		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 		grpc.WithDefaultServiceConfig(retryPolicy),
 		grpc.WithUnaryInterceptor(circuitBreakerUnaryInterceptor(svcName)),
