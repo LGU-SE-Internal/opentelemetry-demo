@@ -190,8 +190,11 @@ class RecommendationService(demo_pb2_grpc.RecommendationServiceServicer):
     def ListRecommendations(self, request, context):
         span = trace.get_current_span()
         trace_id = format(span.get_span_context().trace_id, '016x') if span.is_recording() else "unknown"
+        # Extract client IP from context
+        peer = context.peer()
+        client_ip = peer.split(':')[1] if peer and ':' in peer else "unknown"
         
-        # Helper function to strip control characters (AC-6)
+        # Helper function to strip control characters
         def sanitize_string(s):
             if not s:
                 return s
@@ -202,45 +205,50 @@ class RecommendationService(demo_pb2_grpc.RecommendationServiceServicer):
         sanitized_user_id = sanitize_string(request.user_id)
         sanitized_product_ids = [sanitize_string(pid) for pid in request.product_ids]
         
-        # AC-1: If user_id is present, validate it's UUID v4 format
-        if sanitized_user_id:
-            try:
-                user_uuid = uuid.UUID(sanitized_user_id, version=4)
-            except ValueError:
-                error_msg = "user_id has invalid format: must be UUID v4"
-                logger.error(
-                    f"Validation failed for recommendation request (trace_id={trace_id}): parameter=user_id, error={error_msg}, value={sanitized_user_id}"
-                )
-                context.abort(grpc.StatusCode.INVALID_ARGUMENT, error_msg)
-        
-        # AC-3: Validate product_ids list size <=100
-        if len(sanitized_product_ids) > 100:
-            error_msg = "product_ids list exceeds maximum allowed size of 100"
+        # Validate user_id is present and valid UUID v4
+        if not sanitized_user_id:
+            error_msg = "user_id is required and must be a valid UUID v4"
             logger.error(
-                f"Validation failed for recommendation request (trace_id={trace_id}): parameter=product_ids, error={error_msg}, count={len(sanitized_product_ids)}"
+                f"invalid_request: field=user_id, error={error_msg}, client_ip={client_ip}, trace_id={trace_id}"
+            )
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, error_msg)
+        try:
+            user_uuid = uuid.UUID(sanitized_user_id, version=4)
+        except ValueError:
+            error_msg = "user_id must be valid UUID v4"
+            logger.error(
+                f"invalid_request: field=user_id, error={error_msg}, client_ip={client_ip}, value={sanitized_user_id}, trace_id={trace_id}"
             )
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, error_msg)
         
-        # AC-4: Validate each product ID format
-        product_id_pattern = re.compile(r'^[a-zA-Z0-9]+$')
+        # Validate product_ids list size <=100
+        if len(sanitized_product_ids) > 100:
+            error_msg = "product_ids list exceeds maximum allowed length of 100 entries"
+            logger.error(
+                f"invalid_request: field=product_ids, error={error_msg}, client_ip={client_ip}, count={len(sanitized_product_ids)}, trace_id={trace_id}"
+            )
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, error_msg)
+        
+        # Validate each product ID entry is non-empty
         for idx, product_id in enumerate(sanitized_product_ids):
-            if not product_id_pattern.match(product_id):
-                error_msg = f"product ID at index {idx}: invalid format, must be alphanumeric only"
+            if not product_id:
+                error_msg = f"product_ids entry at index {idx} is empty"
                 logger.error(
-                    f"Validation failed for recommendation request (trace_id={trace_id}): parameter=product_ids[{idx}], error={error_msg}, value={product_id}"
+                    f"invalid_request: field=product_ids[{idx}], error={error_msg}, client_ip={client_ip}, trace_id={trace_id}"
                 )
                 context.abort(grpc.StatusCode.INVALID_ARGUMENT, error_msg)
         
-        # AC-4: Validate max_results bounds
+        # Validate max_results bounds (optional field)
         max_results = getattr(request, 'max_results', 5)
         if max_results <= 0:  # use default 5 if not set or 0
             max_results = 5
         if max_results < 1 or max_results > 20:
             error_msg = "max_results must be between 1 and 20 (inclusive)"
             logger.error(
-                f"Validation failed for recommendation request (trace_id={trace_id}): parameter=max_results, error={error_msg}, value={max_results}"
+                f"invalid_request: field=max_results, error={error_msg}, client_ip={client_ip}, value={max_results}, trace_id={trace_id}"
             )
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, error_msg)
+        result_size = max_results
         
         # Update request object with sanitized values for further processing
         request.user_id = sanitized_user_id
