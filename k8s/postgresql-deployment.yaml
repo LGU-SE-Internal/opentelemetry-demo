@@ -15,9 +15,10 @@ spec:
         app.kubernetes.io/name: postgresql
     spec:
       securityContext:
-        runAsUser: 999
+        runAsUser: 1001
+        runAsGroup: 1001
         runAsNonRoot: true
-        fsGroup: 999
+        fsGroup: 1001
       containers:
         - name: postgresql
           image: postgres:15-alpine
@@ -60,19 +61,20 @@ spec:
             - name: POSTGRES_READINESS_PROBE_FAILURE_THRESHOLD
               value: "3"
             - name: POSTGRES_RESOURCES_REQUESTS_CPU
-              value: "100m"
-            - name: POSTGRES_RESOURCES_REQUESTS_MEMORY
-              value: "256Mi"
-            - name: POSTGRES_RESOURCES_LIMITS_CPU
               value: "500m"
-            - name: POSTGRES_RESOURCES_LIMITS_MEMORY
+            - name: POSTGRES_RESOURCES_REQUESTS_MEMORY
               value: "1Gi"
+            - name: POSTGRES_RESOURCES_LIMITS_CPU
+              value: "2"
+            - name: POSTGRES_RESOURCES_LIMITS_MEMORY
+              value: "4Gi"
             - name: POSTGRES_RUN_AS_USER
-              value: "999"
+              value: "1001"
           securityContext:
             runAsNonRoot: true
             runAsUser: $(POSTGRES_RUN_AS_USER)
             allowPrivilegeEscalation: false
+            privileged: false
             readOnlyRootFilesystem: true
           livenessProbe:
             exec:
@@ -100,7 +102,10 @@ spec:
           volumeMounts:
             - name: postgresql-data
               mountPath: /var/lib/postgresql/data
+            - name: postgresql-run
+              mountPath: /var/run/postgresql
       volumes:
         - name: postgresql-data
-          persistentVolumeClaim:
-            claimName: postgresql-data
+          emptyDir: {}
+        - name: postgresql-run
+          emptyDir: {}
