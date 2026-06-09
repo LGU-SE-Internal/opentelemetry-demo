@@ -6,6 +6,126 @@ use serde::Serialize;
 use open_feature::provider::FeatureProvider;
 use open_feature::EvaluationContext;
 use tracing::{error, info, warn};
+use std::path::{Path, PathBuf};
+use std::env;
+use thiserror::Error;
+use tonic::transport::Server;
+use tonic::transport::ServerTlsConfig;
+use rustls_pemfile::{certs, pkcs8_private_keys};
+use std::fs::File;
+use std::io::BufReader;
+
+#[derive(Debug, Error)]
+pub enum TlsConfigError {
+    #[error("Missing required environment variable: {0}")]
+    MissingRequiredVariable(String),
+    #[error("File not found at path: {0}")]
+    FileNotFound(PathBuf),
+    #[error("Invalid certificate or key: {0}")]
+    InvalidCertificate(String),
+    #[error("TLS configuration error: {0}")]
+    TonicError(#[from] tonic::transport::Error),
+    #[error("IO error: {0}")]
+    IoError(#[from] std::io::Error),
+}
+
+#[derive(Debug, Clone)]
+pub struct TlsConfig {
+    pub enabled: bool,
+    pub ca_cert_path: PathBuf,
+    pub server_cert_path: PathBuf,
+    pub server_key_path: PathBuf,
+    pub mtls_enabled: bool,
+}
+
+fn is_truthy(s: &str) -> bool {
+    matches!(s.to_lowercase().as_str(), "true" | "1" | "yes")
+}
+
+/// Load TLS configuration from environment variables, validates all paths exist when TLS is enabled
+/// Returns TlsConfig if valid, returns error with descriptive message if validation fails
+pub fn load_tls_config_from_env() -> Result<TlsConfig, TlsConfigError> {
+    let enabled = env::var("SHIPPING_GRPC_TLS_ENABLED")
+        .map(|v| is_truthy(&v))
+        .unwrap_or(false);
+    
+    if !enabled {
+        return Ok(TlsConfig {
+            enabled: false,
+            ca_cert_path: PathBuf::new(),
+            server_cert_path: PathBuf::new(),
+            server_key_path: PathBuf::new(),
+            mtls_enabled: false,
+        });
+    }
+
+    // TLS is enabled, load required variables
+    let ca_cert_path = env::var("SHIPPING_GRPC_TLS_CA_CERT_PATH")
+        .map_err(|_| TlsConfigError::MissingRequiredVariable("SHIPPING_GRPC_TLS_CA_CERT_PATH".into()))?
+        .into();
+    let server_cert_path = env::var("SHIPPING_GRPC_TLS_SERVER_CERT_PATH")
+        .map_err(|_| TlsConfigError::MissingRequiredVariable("SHIPPING_GRPC_TLS_SERVER_CERT_PATH".into()))?
+        .into();
+    let server_key_path = env::var("SHIPPING_GRPC_TLS_SERVER_KEY_PATH")
+        .map_err(|_| TlsConfigError::MissingRequiredVariable("SHIPPING_GRPC_TLS_SERVER_KEY_PATH".into()))?
+        .into();
+    
+    let mtls_enabled = env::var("SHIPPING_GRPC_MTLS_ENABLED")
+        .map(|v| is_truthy(&v))
+        .unwrap_or(false);
+
+    // Validate files exist
+    for path in &[&ca_cert_path, &server_cert_path, &server_key_path] {
+        if !Path::new(path).exists() {
+            return Err(TlsConfigError::FileNotFound(path.clone()));
+        }
+    }
+
+    Ok(TlsConfig {
+        enabled: true,
+        ca_cert_path,
+        server_cert_path,
+        server_key_path,
+        mtls_enabled,
+    })
+}
+
+/// Applies TLS configuration to the provided tonic Server builder
+/// Returns configured Server builder if successful, error if certificate parsing fails
+pub fn configure_tls_server(mut server: Server, config: &TlsConfig) -> Result<Server, TlsConfigError> {
+    if !config.enabled {
+        return Ok(server);
+    }
+
+    // Load server cert and key
+    let cert_file = File::open(&config.server_cert_path)?;
+    let mut cert_reader = BufReader::new(cert_file);
+    let cert_chain = certs(&mut cert_reader)?
+        .into_iter()
+        .map(rustls::Certificate)
+        .collect();
+
+    let key_file = File::open(&config.server_key_path)?;
+    let mut key_reader = BufReader::new(key_file);
+    let mut keys = pkcs8_private_keys(&mut key_reader)?;
+    if keys.is_empty() {
+        return Err(TlsConfigError::InvalidCertificate("No private key found in server key file".into()));
+    }
+    let private_key = rustls::PrivateKey(keys.remove(0));
+
+    let mut tls_config = ServerTlsConfig::new()
+        .identity(tonic::transport::Identity::from_cert_and_key(cert_chain, private_key));
+
+    if config.mtls_enabled {
+        // Load CA cert for client validation
+        let ca_cert_pem = std::fs::read_to_string(&config.ca_cert_path)?;
+        tls_config = tls_config.client_ca_root(tonic::transport::Certificate::from_pem(ca_cert_pem));
+    }
+
+    server = server.tls_config(tls_config)?;
+
+    Ok(server)
+}
 
 mod quote;
 use quote::{check_quote_service_health, create_quote_from_count};

@@ -58,3 +58,4 @@ tokio = { version = "1.0", features = ["full"] }
 serde_json = "1.0"
 libc = "0.2"
 tracing-test = "0.2.6"
+tempfile = "3.0"
