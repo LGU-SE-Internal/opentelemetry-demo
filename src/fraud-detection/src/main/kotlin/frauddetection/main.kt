@@ -35,6 +35,9 @@ import io.grpc.netty.shaded.io.grpc.netty.GrpcSslContexts
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder
 import io.grpc.netty.shaded.io.netty.handler.ssl.ClientAuth
 import io.grpc.netty.shaded.io.netty.handler.ssl.SslContext
+import io.opentelemetry.demo.frauddetection.CheckTransactionRequest
+import io.opentelemetry.demo.frauddetection.CheckTransactionResponse
+import io.opentelemetry.demo.frauddetection.FraudDetectionServiceGrpc
 import java.io.File
 import java.io.FileInputStream
 import java.util.concurrent.atomic.AtomicBoolean
@@ -42,6 +45,22 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
 import sun.misc.Signal
 import sun.misc.SignalHandler
+
+class FraudDetectionServiceImpl : FraudDetectionServiceGrpc.FraudDetectionServiceImplBase() {
+    override fun checkTransaction(
+        request: CheckTransactionRequest,
+        responseObserver: io.grpc.stub.StreamObserver<CheckTransactionResponse>
+    ) {
+        // Basic implementation for validation test
+        val response = CheckTransactionResponse.newBuilder()
+            .setFraudScore(0.0)
+            .setIsFraudulent(false)
+            .build()
+        responseObserver.onNext(response)
+        responseObserver.onCompleted()
+    }
+}
+
 
 // Validation types
 sealed class Result<out T> {
@@ -583,6 +602,7 @@ fun main() {
         val plaintextServer = ServerBuilder.forPort(plaintextPort)
             .addService(healthStatusManager.healthService)
             .addService(fraudDetectionService)
+            .intercept(CheckTransactionValidationInterceptor())
             .build()
             .start()
         servers.add(plaintextServer)
@@ -595,6 +615,7 @@ fun main() {
         val tlsServer = NettyServerBuilder.forPort(tlsPort)
             .addService(healthStatusManager.healthService)
             .addService(fraudDetectionService)
+            .intercept(CheckTransactionValidationInterceptor())
             .sslContext(sslContext)
             .build()
             .start()
