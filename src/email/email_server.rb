@@ -700,21 +700,22 @@ Signal.trap('SIGINT') { handle_shutdown_signal('SIGINT') }
 Signal.trap('SIGTERM') { handle_shutdown_signal('SIGTERM') }
 
 # Add gRPC Health Check implementation
-# health_checker = Grpc::Health::Checker.new
-# health_checker.add_status("", Grpc::Health::V1::HealthCheckResponse::ServingStatus::SERVING)
+require "grpc/health/checker"
+health_checker = Grpc::Health::Checker.new
+health_checker.add_status("", Grpc::Health::V1::HealthCheckResponse::ServingStatus::SERVING)
 
-# # Override check method to return INVALID_ARGUMENT for non-empty service names
-# class << health_checker
-#   alias :original_check :check
+# Override check method to return SERVICE_UNKNOWN for non-empty service names
+class << health_checker
+  alias :original_check :check
 
-#   def check(req, call)
-#     unless req.service.empty?
-#       raise GRPC::InvalidArgument.new("service name parameter is not supported")
-#     end
-#     status = $shutting_down ? Grpc::Health::V1::HealthCheckResponse::ServingStatus::NOT_SERVING : Grpc::Health::V1::HealthCheckResponse::ServingStatus::SERVING
-#     Grpc::Health::V1::HealthCheckResponse.new(status: status)
-#   end
-# end
+  def check(req, call)
+    unless req.service.empty?
+      return Grpc::Health::V1::HealthCheckResponse.new(status: Grpc::Health::V1::HealthCheckResponse::ServingStatus::SERVICE_UNKNOWN)
+    end
+    status = $shutting_down ? Grpc::Health::V1::HealthCheckResponse::ServingStatus::NOT_SERVING : Grpc::Health::V1::HealthCheckResponse::ServingStatus::SERVING
+    Grpc::Health::V1::HealthCheckResponse.new(status: status)
+  end
+end
 
-# # Register health servicer with the gRPC server
-# server.handle(health_checker)
+# Register health servicer with the gRPC server
+server.handle(health_checker)
