@@ -738,7 +738,64 @@ if __name__ == "__main__":
 
     # Start server
     port = must_map_env('PRODUCT_REVIEWS_PORT')
-    server.add_insecure_port(f'[::]:{port}')
+    
+    # TLS configuration for gRPC server
+    grpc_tls_cert_path = os.environ.get('PRODUCT_REVIEWS_GRPC_TLS_CERT_PATH')
+    grpc_tls_key_path = os.environ.get('PRODUCT_REVIEWS_GRPC_TLS_KEY_PATH')
+    grpc_mtls_ca_path = os.environ.get('PRODUCT_REVIEWS_GRPC_MTLS_CA_CERT_PATH')
+    
+    if grpc_tls_cert_path and grpc_tls_key_path:
+        # Validate TLS files exist and are readable
+        if not os.path.exists(grpc_tls_cert_path) or not os.access(grpc_tls_cert_path, os.R_OK):
+            raise Exception(f"TLS configuration error: Server certificate file is missing or unreadable (path: {grpc_tls_cert_path})")
+        if not os.path.exists(grpc_tls_key_path) or not os.access(grpc_tls_key_path, os.R_OK):
+            raise Exception(f"TLS configuration error: Server private key file is missing or unreadable (path: {grpc_tls_key_path})")
+        
+        # Read certificate and key files
+        try:
+            with open(grpc_tls_cert_path, 'rb') as f:
+                server_cert = f.read()
+            with open(grpc_tls_key_path, 'rb') as f:
+                server_key = f.read()
+        except Exception as e:
+            raise Exception(f"TLS configuration error: Failed to read certificate/key files: {str(e)}")
+        
+        # Create server credentials
+        server_creds = grpc.ssl_server_credentials([(server_key, server_cert)])
+        
+        # Configure mTLS if CA cert is provided
+        if grpc_mtls_ca_path:
+            if not os.path.exists(grpc_mtls_ca_path) or not os.access(grpc_mtls_ca_path, os.R_OK):
+                raise Exception(f"TLS configuration error: mTLS CA certificate file is missing or unreadable (path: {grpc_mtls_ca_path})")
+            try:
+                with open(grpc_mtls_ca_path, 'rb') as f:
+                    ca_cert = f.read()
+            except Exception as e:
+                raise Exception(f"TLS configuration error: Failed to read mTLS CA certificate: {str(e)}")
+            
+            # Require client certificate validation
+            server_creds = grpc.ssl_server_credentials(
+                [(server_key, server_cert)],
+                root_certificates=ca_cert,
+                require_client_auth=True
+            )
+        
+        # Add secure port with minimum TLS 1.2
+        server_options = server._options.copy()
+        server_options.append(('grpc.ssl_target_name_override', 'localhost'))
+        server_options.append(('grpc.min_tls_version', grpc.TLS_VERSION_1_2))
+        server._options = server_options
+        
+        server.add_secure_port(f'[::]:{port}', server_creds)
+        logger.info(f"gRPC server configured with TLS 1.2+ encryption, listening on port {port}")
+        if grpc_mtls_ca_path:
+            logger.info("mTLS client authentication enabled")
+    elif grpc_tls_cert_path or grpc_tls_key_path:
+        raise Exception("TLS configuration error: Both PRODUCT_REVIEWS_GRPC_TLS_CERT_PATH and PRODUCT_REVIEWS_GRPC_TLS_KEY_PATH must be provided to enable TLS")
+    else:
+        # Default: plaintext insecure port for backwards compatibility
+        server.add_insecure_port(f'[::]:{port}')
+        logger.info(f"gRPC server configured with plaintext (unencrypted) connections, listening on port {port}")
 
     async def serve():
         global service_initialized
