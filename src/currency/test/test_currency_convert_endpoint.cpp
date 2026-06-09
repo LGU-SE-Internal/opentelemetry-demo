@@ -134,8 +134,122 @@ TEST_F(CurrencyConvertEndpointTest, test_ac5_valid_conversions_still_work) {
     EXPECT_NEAR(response.units() + response.nanos() / 1e9, 90.0, 0.01);
 }
 
-// AC-6: No division by zero or crashes when using invalid currency codes
-TEST_F(CurrencyConvertEndpointTest, test_ac6_no_crashes_or_division_by_zero) {
+// AC-3: Negative units value returns INVALID_ARGUMENT with descriptive error
+TEST_F(CurrencyConvertEndpointTest, test_ac3_negative_units_returns_error) {
+    ConversionRequest request;
+    request.set_units(-100);
+    request.set_nanos(0);
+    request.set_from_currency_code("USD");
+    request.set_to_currency_code("EUR");
+
+    ConversionResponse response;
+    ClientContext context;
+
+    Status status = stub_->Convert(&context, request, &response);
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_NE(status.error_message().find("Monetary amount units cannot be negative: -100"), std::string::npos);
+}
+
+// AC-4: Negative nanos value returns INVALID_ARGUMENT with descriptive error
+TEST_F(CurrencyConvertEndpointTest, test_ac4_negative_nanos_returns_error) {
+    ConversionRequest request;
+    request.set_units(100);
+    request.set_nanos(-1);
+    request.set_from_currency_code("USD");
+    request.set_to_currency_code("EUR");
+
+    ConversionResponse response;
+    ClientContext context;
+
+    Status status = stub_->Convert(&context, request, &response);
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_NE(status.error_message().find("Monetary amount nanos must be between 0 and 999,999,999: -1"), std::string::npos);
+}
+
+// AC-5: Nanos value exceeding 999,999,999 returns INVALID_ARGUMENT with descriptive error
+TEST_F(CurrencyConvertEndpointTest, test_ac5_nanos_exceeding_max_returns_error) {
+    ConversionRequest request;
+    request.set_units(100);
+    request.set_nanos(1000000000);
+    request.set_from_currency_code("USD");
+    request.set_to_currency_code("EUR");
+
+    ConversionResponse response;
+    ClientContext context;
+
+    Status status = stub_->Convert(&context, request, &response);
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_NE(status.error_message().find("Monetary amount nanos must be between 0 and 999,999,999: 1000000000"), std::string::npos);
+}
+
+// AC-6: All valid fields work correctly, conversion proceeds normally
+TEST_F(CurrencyConvertEndpointTest, test_ac6_all_valid_fields_convert_successfully) {
+    ConversionRequest request;
+    request.set_units(123);
+    request.set_nanos(456789012);
+    request.set_from_currency_code("USD");
+    request.set_to_currency_code("CAD");
+
+    ConversionResponse response;
+    ClientContext context;
+
+    Status status = stub_->Convert(&context, request, &response);
+
+    EXPECT_TRUE(status.ok());
+    EXPECT_GE(response.units(), 0);
+    EXPECT_GE(response.nanos(), 0);
+    EXPECT_LE(response.nanos(), 999999999);
+}
+
+// AC-7: All validation failure cases return correct error code and message
+TEST_F(CurrencyConvertEndpointTest, test_ac7_all_validation_cases_covered) {
+    std::vector<std::tuple<ConversionRequest, std::string>> test_cases = {
+        // Invalid source currency
+        [](){
+            ConversionRequest r;
+            r.set_units(100); r.set_nanos(0); r.set_from_currency_code("XXX"); r.set_to_currency_code("USD");
+            return r;
+        }(), "Invalid source currency code: XXX",
+        // Invalid target currency
+        [](){
+            ConversionRequest r;
+            r.set_units(100); r.set_nanos(0); r.set_from_currency_code("USD"); r.set_to_currency_code("XXX");
+            return r;
+        }(), "Invalid target currency code: XXX",
+        // Negative units
+        [](){
+            ConversionRequest r;
+            r.set_units(-50); r.set_nanos(0); r.set_from_currency_code("USD"); r.set_to_currency_code("EUR");
+            return r;
+        }(), "Monetary amount units cannot be negative: -50",
+        // Negative nanos
+        [](){
+            ConversionRequest r;
+            r.set_units(100); r.set_nanos(-123); r.set_from_currency_code("USD"); r.set_to_currency_code("EUR");
+            return r;
+        }(), "Monetary amount nanos must be between 0 and 999,999,999: -123",
+        // Nanos exceed max
+        [](){
+            ConversionRequest r;
+            r.set_units(100); r.set_nanos(1000000000); r.set_from_currency_code("USD"); r.set_to_currency_code("EUR");
+            return r;
+        }(), "Monetary amount nanos must be between 0 and 999,999,999: 1000000000"
+    };
+
+    for (const auto& [req, expected_msg_substring] : test_cases) {
+        ConversionResponse response;
+        ClientContext context;
+        Status status = stub_->Convert(&context, req, &response);
+        EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+        EXPECT_NE(status.error_message().find(expected_msg_substring), std::string::npos);
+    }
+}
+
+// AC-8: No division by zero or crashes when using invalid currency codes
+TEST_F(CurrencyConvertEndpointTest, test_ac8_no_crashes_or_division_by_zero) {
     // Test multiple invalid cases, should not crash or throw
     EXPECT_NO_THROW({
         std::vector<std::pair<std::string, std::string>> test_cases = {
@@ -163,8 +277,8 @@ TEST_F(CurrencyConvertEndpointTest, test_ac6_no_crashes_or_division_by_zero) {
     });
 }
 
-// AC-7: Existing valid conversion tests still pass
-TEST_F(CurrencyConvertEndpointTest, test_ac7_existing_valid_tests_pass) {
+// AC-9: Existing valid conversion tests still pass
+TEST_F(CurrencyConvertEndpointTest, test_ac9_existing_valid_tests_pass) {
     // Test all valid pairs from default rates: USD, EUR, JPY, GBP, CAD
     std::vector<std::pair<std::string, std::string>> valid_pairs = {
         {"USD", "EUR"}, {"EUR", "USD"}, {"USD", "JPY"}, {"JPY", "USD"},
