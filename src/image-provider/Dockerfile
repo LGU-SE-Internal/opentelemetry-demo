@@ -15,35 +15,32 @@ USER 101
 COPY src/image-provider/static/ /static/
 COPY src/image-provider/nginx.conf.template /nginx.conf.template
 
-EXPOSE ${IMAGE_PROVIDER_PORT:-80}
-EXPOSE 443
+EXPOSE 8080
+EXPOSE 8443
 
 STOPSIGNAL SIGQUIT
 
 # Start nginx
 CMD ["/bin/sh" , "-c" , "\
   # Handle TLS and mTLS environment variables\n\
-  if [ \"${IMAGE_PROVIDER_TLS_ENABLED:-false}\" = \"true\" ]; then\n\
-    export IMAGE_PROVIDER_TLS_CERT_PATH=\"/etc/nginx/ssl/cert.pem\"\n\
-    export IMAGE_PROVIDER_TLS_KEY_PATH=\"/etc/nginx/ssl/key.pem\"\n\
+  if [ \"${TLS_ENABLED:-false}\" = \"true\" ]; then\n\
     # Check required TLS files exist\n\
-    if [ ! -f \"$IMAGE_PROVIDER_TLS_CERT_PATH\" ]; then\n\
-      echo \"ERROR: TLS enabled but missing certificate file at $IMAGE_PROVIDER_TLS_CERT_PATH\" >&2\n\
+    if [ -z \"${TLS_CERT_PATH}\" ] || [ ! -f \"${TLS_CERT_PATH}\" ]; then\n\
+      echo \"ERROR: TLS enabled but missing certificate file at ${TLS_CERT_PATH}\" >&2\n\
       exit 1\n\
     fi\n\
-    if [ ! -f \"$IMAGE_PROVIDER_TLS_KEY_PATH\" ]; then\n\
-      echo \"ERROR: TLS enabled but missing private key file at $IMAGE_PROVIDER_TLS_KEY_PATH\" >&2\n\
+    if [ -z \"${TLS_KEY_PATH}\" ] || [ ! -f \"${TLS_KEY_PATH}\" ]; then\n\
+      echo \"ERROR: TLS enabled but missing private key file at ${TLS_KEY_PATH}\" >&2\n\
       exit 1\n\
     fi\n\
     # Handle mTLS if enabled\n\
-    if [ \"${IMAGE_PROVIDER_MTLS_ENABLED:-false}\" = \"true\" ]; then\n\
-      export IMAGE_PROVIDER_TLS_CA_CERT_PATH=\"/etc/nginx/ssl/ca-bundle.pem\"\n\
-      if [ ! -f \"$IMAGE_PROVIDER_TLS_CA_CERT_PATH\" ]; then\n\
-        echo \"ERROR: mTLS enabled but missing CA bundle file at $IMAGE_PROVIDER_TLS_CA_CERT_PATH\" >&2\n\
+    if [ \"${MTLS_ENABLED:-false}\" = \"true\" ]; then\n\
+      if [ -z \"${MTLS_CA_CERT_PATH}\" ] || [ ! -f \"${MTLS_CA_CERT_PATH}\" ]; then\n\
+        echo \"ERROR: mTLS enabled but missing CA bundle file at ${MTLS_CA_CERT_PATH}\" >&2\n\
         exit 1\n\
       fi\n\
     fi\n\
   fi\n\
   # Generate nginx.conf from template with conditional TLS support\n\
-  envsubst '$OTEL_COLLECTOR_HOST $IMAGE_PROVIDER_PORT $OTEL_COLLECTOR_PORT_GRPC $OTEL_SERVICE_NAME $NGINX_RATE_LIMIT_RPS $IMAGE_PROVIDER_TLS_CERT_PATH $IMAGE_PROVIDER_TLS_KEY_PATH $IMAGE_PROVIDER_TLS_CA_CERT_PATH' < /nginx.conf.template > /etc/nginx/nginx.conf && \n\
+  envsubst '$OTEL_COLLECTOR_HOST $OTEL_COLLECTOR_PORT_GRPC $OTEL_SERVICE_NAME $NGINX_RATE_LIMIT_RPS $TLS_ENABLED $TLS_CERT_PATH $TLS_KEY_PATH $MTLS_ENABLED $MTLS_CA_CERT_PATH $TLS_MIN_VERSION $TLS_CIPHER_SUITES' < /nginx.conf.template > /etc/nginx/nginx.conf && \n\
   exec nginx -g 'daemon off;'\n"]
