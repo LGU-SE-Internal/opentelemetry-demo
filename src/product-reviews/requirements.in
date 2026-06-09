@@ -12,3 +12,4 @@ simplejson==4.1.1
 
 pybreaker==2.1.0
 cachetools==5.5.0
+tenacity==9.1.4

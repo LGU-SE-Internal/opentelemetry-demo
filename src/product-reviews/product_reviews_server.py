@@ -51,7 +51,111 @@ from metrics import (
 )
 
 # OpenAI
-from openai import OpenAI
+from openai import OpenAI, APIConnectionError, InternalServerError, APIError, RateLimitError
+import openai
+import requests.exceptions
+
+# Tenacity for retry logic
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, wait_random, stop_before_attempt, before_sleep_log, retry_if_result
+from typing import Callable, TypeVar, ParamSpec
+import functools
+
+P = ParamSpec("P")
+R = TypeVar("R")
+
+# Load retry configuration from environment variables
+LLM_RETRY_MAX_ATTEMPTS = int(os.getenv("LLM_RETRY_MAX_ATTEMPTS", "3"))
+LLM_RETRY_INITIAL_BACKOFF_SEC = float(os.getenv("LLM_RETRY_INITIAL_BACKOFF_SEC", "1.0"))
+LLM_RETRY_MAX_BACKOFF_SEC = float(os.getenv("LLM_RETRY_MAX_BACKOFF_SEC", "30.0"))
+
+def with_llm_retry(func: Callable[P, R]) -> Callable[P, R]:
+    """
+    Decorator that adds retry logic for LLM API calls.
+    Applied to all functions making OpenAI-compatible API requests.
+    
+    Retry triggers on:
+    - Network errors (requests.exceptions.RequestException, openai.APIConnectionError)
+    - 5xx status codes (openai.InternalServerError, openai.APIError)
+    - 429 rate limit errors (openai.RateLimitError)
+    
+    Raises original error after max retry attempts are exhausted.
+    """
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        # Generate idempotency key once per original request
+        idempotency_key = str(uuid.uuid4())
+        # Add X-Idempotency-Key to headers if not present
+        if "headers" not in kwargs:
+            kwargs["headers"] = {}
+        kwargs["headers"]["X-Idempotency-Key"] = idempotency_key
+        
+        retry_attempt = 0
+        
+        def custom_wait(retry_state):
+            nonlocal retry_attempt
+            retry_attempt = retry_state.attempt_number
+            exception = retry_state.outcome.exception()
+            
+            # Handle Retry-After header for 429 errors
+            if isinstance(exception, RateLimitError) and hasattr(exception, 'response') and exception.response is not None:
+                retry_after = exception.response.headers.get("Retry-After")
+                if retry_after is not None:
+                    try:
+                        return float(retry_after)
+                    except ValueError:
+                        pass
+            
+            # Exponential backoff with jitter
+            base_delay = LLM_RETRY_INITIAL_BACKOFF_SEC * (2 ** (retry_state.attempt_number - 1))
+            jitter = random.uniform(0.5, 1.5)
+            delay = min(base_delay * jitter, LLM_RETRY_MAX_BACKOFF_SEC)
+            return delay
+        
+        def log_retry(retry_state):
+            exception = retry_state.outcome.exception()
+            delay = custom_wait(retry_state)
+            
+            retry_after_header = None
+            if isinstance(exception, RateLimitError) and hasattr(exception, 'response') and exception.response is not None:
+                retry_after = exception.response.headers.get("Retry-After")
+                if retry_after is not None:
+                    try:
+                        retry_after_header = float(retry_after)
+                    except ValueError:
+                        pass
+            
+            # Structured log
+            log_data = {
+                "event": "llm_api_retry",
+                "attempt_number": retry_state.attempt_number,
+                "max_attempts": LLM_RETRY_MAX_ATTEMPTS,
+                "backoff_delay_sec": delay,
+                "error_type": type(exception).__name__,
+                "error_message": str(exception)[:200],
+                "retry_after_header": retry_after_header
+            }
+            logger.info(log_data, extra=log_data)
+        
+        @retry(
+            stop=stop_after_attempt(LLM_RETRY_MAX_ATTEMPTS),
+            wait=custom_wait,
+            retry=retry_if_exception_type((
+                requests.exceptions.RequestException,
+                APIConnectionError,
+                InternalServerError,
+                APIError,
+                RateLimitError
+            )),
+            before_sleep=log_retry,
+            reraise=True
+        )
+        def wrapped_call():
+            return func(*args, **kwargs)
+        
+        return wrapped_call()
+    
+    return wrapper
+
 
 from google.protobuf.json_format import MessageToJson, MessageToDict
 

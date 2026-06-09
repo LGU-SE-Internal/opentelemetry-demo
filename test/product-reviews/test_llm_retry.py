@@ -1,4 +1,6 @@
 import os
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../src/product-reviews"))
 import time
 import uuid
 from unittest.mock import Mock, patch
@@ -7,7 +9,7 @@ import openai
 from requests.exceptions import RequestException, Timeout, ConnectionError
 
 # Import the decorator from the spec interface
-from src.product_reviews.product_reviews_server import with_llm_retry
+from product_reviews_server import with_llm_retry
 
 TEST_MAX_ATTEMPTS = 3
 TEST_INITIAL_BACKOFF = 1.0
