@@ -29,6 +29,7 @@ public class ValkeyCartStore : ICartStore
 
     private static readonly ActivitySource CartActivitySource = new("OpenTelemetry.Demo.Cart");
     private static readonly Meter CartMeter = new Meter("OpenTelemetry.Demo.Cart");
+    private static readonly Meter ResilienceMeter = new Meter("Cartservice.Resilience");
     private static readonly Histogram<double> addItemHistogram = CartMeter.CreateHistogram(
         "demo.cart.add_item.latency",
         unit: "s",
@@ -43,20 +44,21 @@ public class ValkeyCartStore : ICartStore
         {
             HistogramBucketBoundaries = [ 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1, 2.5, 5, 7.5, 10 ]
         });
-    private static readonly UpDownGauge<int> CircuitBreakerStateGauge = CartMeter.CreateUpDownGauge<int>(
+    private static readonly UpDownGauge<int> CircuitBreakerStateGauge = ResilienceMeter.CreateUpDownGauge<int>(
         "resilience.circuit_breaker.state",
         unit: "1",
         description: "Current state of the circuit breaker: 0 = CLOSED, 1 = OPEN, 2 = HALF_OPEN");
-    private static readonly Counter<int> CircuitBreakerTransitionsCounter = CartMeter.CreateCounter<int>(
+    private static readonly Counter<int> CircuitBreakerTransitionsCounter = ResilienceMeter.CreateCounter<int>(
         "resilience.circuit_breaker.transitions",
         unit: "{transition}",
         description: "Total number of circuit breaker state transitions");
-    private static readonly Counter<int> CircuitBreakerRequestsRejectedCounter = CartMeter.CreateCounter<int>(
+    private static readonly Counter<int> CircuitBreakerRequestsRejectedCounter = ResilienceMeter.CreateCounter<int>(
         "resilience.circuit_breaker.requests_rejected",
         unit: "{request}",
         description: "Total number of requests rejected while the circuit breaker is open");
     private readonly ConfigurationOptions _redisConnectionOptions;
     private readonly AsyncCircuitBreakerPolicy _circuitBreakerPolicy;
+    public AsyncCircuitBreakerPolicy CircuitBreaker => _circuitBreakerPolicy;
 
     public ValkeyCartStore(ILogger<ValkeyCartStore> logger, string valkeyAddress)
     {
@@ -235,6 +237,10 @@ public class ValkeyCartStore : ICartStore
         catch (BrokenCircuitException ex)
         {
             _logger.LogWarning(ex, "Circuit breaker is open for Valkey/Redis operations");
+            // Record rejected request metric
+            CircuitBreakerRequestsRejectedCounter.Add(1,
+                new KeyValuePair<string, object>("resilience.circuit_breaker.name", "redis"),
+                new KeyValuePair<string, object>("error.type", "circuit_breaker_open"));
             throw new RpcException(new Status(StatusCode.Unavailable, "Redis circuit breaker is open; please try again later"));
         }
         catch (Exception ex)
@@ -268,6 +274,10 @@ public class ValkeyCartStore : ICartStore
         catch (BrokenCircuitException ex)
         {
             _logger.LogWarning(ex, "Circuit breaker is open for Valkey/Redis operations");
+            // Record rejected request metric
+            CircuitBreakerRequestsRejectedCounter.Add(1,
+                new KeyValuePair<string, object>("resilience.circuit_breaker.name", "redis"),
+                new KeyValuePair<string, object>("error.type", "circuit_breaker_open"));
             throw new RpcException(new Status(StatusCode.Unavailable, "Redis circuit breaker is open; please try again later"));
         }
         catch (Exception ex)
@@ -308,6 +318,10 @@ public class ValkeyCartStore : ICartStore
         catch (BrokenCircuitException ex)
         {
             _logger.LogWarning(ex, "Circuit breaker is open for Valkey/Redis operations");
+            // Record rejected request metric
+            CircuitBreakerRequestsRejectedCounter.Add(1,
+                new KeyValuePair<string, object>("resilience.circuit_breaker.name", "redis"),
+                new KeyValuePair<string, object>("error.type", "circuit_breaker_open"));
             throw new RpcException(new Status(StatusCode.Unavailable, "Redis circuit breaker is open; please try again later"));
         }
         catch (Exception ex)
@@ -356,6 +370,10 @@ public class ValkeyCartStore : ICartStore
         catch (BrokenCircuitException ex)
         {
             _logger.LogWarning(ex, "Circuit breaker is open for Valkey/Redis operations");
+            // Record rejected request metric
+            CircuitBreakerRequestsRejectedCounter.Add(1,
+                new KeyValuePair<string, object>("resilience.circuit_breaker.name", "redis"),
+                new KeyValuePair<string, object>("error.type", "circuit_breaker_open"));
             throw new RpcException(new Status(StatusCode.Unavailable, "Redis circuit breaker is open; please try again later"));
         }
         catch (Exception ex)
