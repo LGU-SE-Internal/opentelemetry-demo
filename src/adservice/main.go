@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log"
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -18,22 +20,94 @@ import (
 	pb "github.com/open-telemetry/opentelemetry-demo/pb/oteldemo"
 )
 
+// Config holds all service configuration values
+type Config struct {
+	ServicePort int
+	DBHost      string
+	DBPort      int
+	DBUser      string
+	DBPassword  string
+	DBName      string
+}
+
+// LoadConfig reads configuration from environment variables and returns a validated Config instance
+// Returns error if:
+// - Any integer port value is <1 or >65535
+func LoadConfig() (Config, error) {
+	cfg := Config{
+		ServicePort: 9555,
+		DBHost:      "localhost",
+		DBPort:      5432,
+		DBUser:      "postgres",
+		DBPassword:  "postgres",
+		DBName:      "ads",
+	}
+
+	// Read service port from environment
+	if portStr := os.Getenv("AD_SERVICE_PORT"); portStr != "" {
+		port, err := strconv.Atoi(portStr)
+		if err != nil {
+			return cfg, fmt.Errorf("invalid AD_SERVICE_PORT: %w", err)
+		}
+		if port < 1 || port > 65535 {
+			return cfg, fmt.Errorf("AD_SERVICE_PORT must be between 1 and 65535, got %d", port)
+		}
+		cfg.ServicePort = port
+	}
+
+	// Read database host from environment
+	if host := os.Getenv("AD_DB_HOST"); host != "" {
+		cfg.DBHost = host
+	}
+
+	// Read database port from environment
+	if portStr := os.Getenv("AD_DB_PORT"); portStr != "" {
+		port, err := strconv.Atoi(portStr)
+		if err != nil {
+			return cfg, fmt.Errorf("invalid AD_DB_PORT: %w", err)
+		}
+		if port < 1 || port > 65535 {
+			return cfg, fmt.Errorf("AD_DB_PORT must be between 1 and 65535, got %d", port)
+		}
+		cfg.DBPort = port
+	}
+
+	// Read database user from environment
+	if user := os.Getenv("AD_DB_USER"); user != "" {
+		cfg.DBUser = user
+	}
+
+	// Read database password from environment
+	if pass := os.Getenv("AD_DB_PASSWORD"); pass != "" {
+		cfg.DBPassword = pass
+	}
+
+	// Read database name from environment
+	if name := os.Getenv("AD_DB_NAME"); name != "" {
+		cfg.DBName = name
+	}
+
+	return cfg, nil
+}
+
 const (
-	port           = ":9555"
-	dbHost         = "postgresql"
-	dbPort         = "5432"
-	dbUser         = "postgres"
-	dbPassword     = "postgres"
-	dbName         = "adservice"
 	shutdownWindow = 10 * time.Second
 )
 
 var logger = log.New(os.Stdout, "[adservice] ", log.LstdFlags|log.Lshortfile)
 
 func main() {
+	// Load configuration
+	cfg, err := LoadConfig()
+	if err != nil {
+		logger.Fatalf("Failed to load configuration: %v", err)
+	}
+
 	// Initialize database connection
+	portStr := strconv.Itoa(cfg.DBPort)
 	dbConn, err := sql.Open("postgres",
-		"host="+dbHost+" port="+dbPort+" user="+dbUser+" password="+dbPassword+" dbname="+dbName+" sslmode=disable")
+		fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+			cfg.DBHost, portStr, cfg.DBUser, cfg.DBPassword, cfg.DBName))
 	if err != nil {
 		logger.Fatalf("Failed to connect to database: %v", err)
 	}
@@ -45,9 +119,10 @@ func main() {
 	logger.Println("Successfully connected to database")
 
 	// Create gRPC server
-	lis, err := net.Listen("tcp", port)
+	listenAddr := fmt.Sprintf(":%d", cfg.ServicePort)
+	lis, err := net.Listen("tcp", listenAddr)
 	if err != nil {
-		logger.Fatalf("Failed to listen: %v", err)
+		logger.Fatalf("Failed to listen on %s: %v", listenAddr, err)
 	}
 
 	s := grpc.NewServer(
@@ -77,7 +152,7 @@ func main() {
 		os.Exit(0)
 	}()
 
-	logger.Printf("Ad service starting on %s", port)
+	logger.Printf("Ad service starting on %s", listenAddr)
 	if err := s.Serve(lis); err != nil && err != grpc.ErrServerStopped {
 		logger.Fatalf("Failed to serve: %v", err)
 	}
