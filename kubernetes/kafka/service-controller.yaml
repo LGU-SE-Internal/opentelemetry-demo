@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-controller
+  namespace: opentelemetry-demo
+  labels:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/component: broker
+spec:
+  type: ClusterIP
+  ports:
+  - port: 9093
+    targetPort: controller
+    protocol: TCP
+    name: controller
+  selector:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/component: broker
