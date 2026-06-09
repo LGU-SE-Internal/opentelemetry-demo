@@ -191,23 +191,55 @@ $errorMiddleware = $app->addErrorMiddleware(true, true, true);
 // Graceful Shutdown Implementation
 $activeRequestCount = 0;
 $isShuttingDown = false;
-$gracePeriod = (int)getenv('QUOTE_SERVICE_SHUTDOWN_GRACE_PERIOD_SECONDS') ?: 30;
+$gracePeriod = (int)getenv('GRACEFUL_SHUTDOWN_TIMEOUT') ?: 30;
 $logger = $container->get(Psr\Log\LoggerInterface::class);
-global $shutdownHandler;
+global $shutdownHandler, $gracePeriod, $isShuttingDown, $activeRequestCount;
+
+// Public API functions as per interface
+function registerShutdownSignalHandlers(int $timeout = 30): void {
+    global $gracePeriod;
+    $gracePeriod = $timeout ?: (int)getenv('GRACEFUL_SHUTDOWN_TIMEOUT') ?: 30;
+    React\EventLoop\Loop::get()->addSignal(SIGTERM, 'handleSigTerm');
+    React\EventLoop\Loop::get()->addSignal(SIGINT, 'handleSigInt');
+}
+
+function isShuttingDown(): bool {
+    global $isShuttingDown;
+    return $isShuttingDown;
+}
+
+function incrementInFlightRequestCount(): void {
+    global $activeRequestCount;
+    $activeRequestCount++;
+}
+
+function decrementInFlightRequestCount(): void {
+    global $activeRequestCount;
+    $activeRequestCount--;
+}
 
 // Middleware to track active requests
-$app->add(function (ServerRequestInterface $request, Psr\Http\Server\RequestHandlerInterface $handler) use (&$activeRequestCount, &$isShuttingDown) {
+$app->add(function (ServerRequestInterface $request, Psr\Http\Server\RequestHandlerInterface $handler) use (&$activeRequestCount, &$isShuttingDown, &$gracePeriod) {
     if ($isShuttingDown) {
         $response = new Slim\Psr7\Response();
-        return $response->withStatus(503)->withHeader('Connection', 'close');
+        $payload = json_encode([
+            'error' => 'Service Unavailable',
+            'message' => 'Service is shutting down gracefully'
+        ]);
+        $response->getBody()->write($payload);
+        return $response
+            ->withHeader('Content-Type', 'application/json')
+            ->withHeader('Retry-After', (string)$gracePeriod)
+            ->withHeader('Connection', 'close')
+            ->withStatus(503);
     }
     
-    $activeRequestCount++;
+    incrementInFlightRequestCount();
     try {
         $response = $handler->handle($request);
         return $response;
     } finally {
-        $activeRequestCount--;
+        decrementInFlightRequestCount();
     }
 });
 
@@ -352,5 +384,5 @@ function handleSigTerm() {
     $shutdownHandler();
 }
 
-Loop::get()->addSignal(SIGTERM, 'handleSigTerm');
-Loop::get()->addSignal(SIGINT, 'handleSigInt');
+// Register signal handlers on application start
+registerShutdownSignalHandlers();
