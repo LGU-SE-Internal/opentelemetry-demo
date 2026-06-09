@@ -22,49 +22,54 @@ let dbClient; // We'll need to check if there's a DB client
 
 // Rate limit configuration
 const rateLimiters = new Map();
-const DEFAULT_RATE_LIMIT_RPS = 10;
+const DEFAULT_RATE_LIMIT_PER_MINUTE = 100;
 
 // Parse and validate rate limit configuration on startup
 function parseRateLimitConfig() {
   // Parse default limit first
-  const defaultLimitVar = 'PAYMENT_SERVICE_DEFAULT_RATE_LIMIT_RPS';
+  const defaultLimitVar = 'PAYMENT_SERVICE_RATE_LIMIT_DEFAULT';
   const defaultLimitVal = process.env[defaultLimitVar];
-  let defaultLimit = DEFAULT_RATE_LIMIT_RPS;
+  let defaultLimit = DEFAULT_RATE_LIMIT_PER_MINUTE;
   
   if (defaultLimitVal !== undefined) {
     const parsed = parseInt(defaultLimitVal, 10);
     if (isNaN(parsed) || parsed <= 0) {
-      logger.fatal(`Invalid RPS limit for ${defaultLimitVar}: ${defaultLimitVal} must be a positive integer`);
+      logger.fatal(`Invalid limit for ${defaultLimitVar}: ${defaultLimitVal} must be a positive integer (requests per minute)`);
       process.exit(1);
     }
     defaultLimit = parsed;
   }
 
-  // Parse all per-endpoint limits
-  const endpointLimitRegex = /^PAYMENT_SERVICE_(\w+)_RATE_LIMIT_RPS$/;
-  for (const [envVar, envVal] of Object.entries(process.env)) {
-    const match = envVar.match(endpointLimitRegex);
-    if (!match) continue;
-
-    const endpointName = match[1].toLowerCase();
-    const parsed = parseInt(envVal, 10);
-    if (isNaN(parsed) || parsed <= 0) {
-      logger.fatal(`Invalid RPS limit for ${envVar}: ${envVal} must be a positive integer`);
+  // Parse per-endpoint overrides from JSON
+  const overridesVar = 'PAYMENT_SERVICE_RATE_LIMIT_OVERRIDES';
+  const overridesVal = process.env[overridesVar];
+  let overrides = {};
+  if (overridesVal) {
+    try {
+      overrides = JSON.parse(overridesVal);
+    } catch (err) {
+      logger.fatal(`Invalid JSON for ${overridesVar}: ${err.message}`);
       process.exit(1);
     }
-
-    // Create rate limiter for this endpoint
-    rateLimiters.set(endpointName, new RateLimiterMemory({
-      points: parsed,
-      duration: 1, // per second
-    }));
+    for (const [endpointName, limit] of Object.entries(overrides)) {
+      const parsedLimit = parseInt(limit, 10);
+      if (isNaN(parsedLimit) || parsedLimit <= 0) {
+        logger.fatal(`Invalid limit for endpoint ${endpointName} in ${overridesVar}: ${limit} must be a positive integer`);
+        process.exit(1);
+      }
+      // Create rate limiter for this endpoint (per minute)
+      rateLimiters.set(endpointName.toLowerCase(), new RateLimiterMemory({
+        points: parsedLimit,
+        duration: 60, // 1 minute window
+      }));
+    }
   }
 
   // Create default rate limiter if no custom default set
   if (!rateLimiters.has('default')) {
     rateLimiters.set('default', new RateLimiterMemory({
       points: defaultLimit,
-      duration: 1,
+      duration: 60, // 1 minute window
     }));
   }
 }
@@ -96,28 +101,56 @@ function getLimitRpsForEndpoint(endpointPath) {
 
 async function rateLimitInterceptor(call, callback, next) {
   const endpoint = call.getPath()
+  const endpointName = endpoint.split('/').pop().toLowerCase();
   const rateLimiter = getRateLimiterForEndpoint(endpoint);
+  
+  // Get client identifier: X-Client-Id first, fallback to IP
+  let clientId = call.metadata.get('x-client-id')[0];
+  if (!clientId) {
+    clientId = getClientIp(call);
+  }
 
-  const clientIp = getClientIp(call)
+  // Get active trace context for logging
+  const activeSpan = opentelemetry.trace.getActiveSpan();
+  const traceId = activeSpan?.spanContext().traceId || '';
+  const spanId = activeSpan?.spanContext().spanId || '';
+
   try {
-    await rateLimiter.consume(clientIp)
-    return next(call, callback)
+    const res = await rateLimiter.consume(clientId);
+    // Add rate limit headers to successful response
+    call.on('send_metadata', (metadata) => {
+      metadata.set('x-ratelimit-limit', rateLimiter.points.toString());
+      metadata.set('x-ratelimit-remaining', Math.floor(res.remainingPoints).toString());
+      metadata.set('x-ratelimit-reset', Math.floor(Date.now() / 1000 + res.msBeforeNext / 1000).toString());
+    });
+    return next(call, callback);
   } catch (rejRes) {
     // Rate limit exceeded
+    const limit = rateLimiter.points;
+    const remaining = Math.floor(rejRes.remainingPoints);
+    const reset = Math.floor(Date.now() / 1000 + rejRes.msBeforeNext / 1000);
+    
     logger.warn({
-      level: 'warn',
-      message: 'Rate limit exceeded',
+      message: 'Rate limit exceeded, try again later',
+      client_id: clientId,
       endpoint: endpoint,
-      client_ip: clientIp,
-      limit_rps: getLimitRpsForEndpoint(endpoint),
-      request_id: call.metadata.get('x-request-id')[0] || undefined
-    })
-    const err = new Error(`Rate limit exceeded for endpoint ${endpoint}`)
-    err.code = grpc.status.RESOURCE_EXHAUSTED
-    // Add retry-info trailer
-    const metadata = new grpc.Metadata()
-    metadata.set('retry-info', 'retry-delay=1')
-    return callback(err, null, metadata)
+      trace_id: traceId,
+      span_id: spanId,
+      limit: limit,
+      remaining: remaining,
+      reset_timestamp: reset
+    });
+    
+    const err = new Error('Rate limit exceeded, try again later');
+    err.code = grpc.status.RESOURCE_EXHAUSTED;
+    
+    // Add rate limit headers to error response
+    const metadata = new grpc.Metadata();
+    metadata.set('x-ratelimit-limit', limit.toString());
+    metadata.set('x-ratelimit-remaining', remaining.toString());
+    metadata.set('x-ratelimit-reset', reset.toString());
+    
+    return callback(err, null, metadata);
   }
 }
 
