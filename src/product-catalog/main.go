@@ -328,6 +328,13 @@ func main() {
 	global.SetLoggerProvider(sdk.LoggerProvider())
 	otel.SetTextMapPropagator(sdk.Propagator())
 
+	// Initialize rate limit metrics
+	meter := sdk.MeterProvider().Meter("github.com/opentelemetry/opentelemetry-demo/src/product-catalog")
+	if err := initMetrics(meter); err != nil {
+		logger.Error(fmt.Sprintf("Failed to initialize rate limit metrics: %v", err))
+		os.Exit(1)
+	}
+
 	// Initialize database connection
 	if err := initDatabase(); err != nil {
 		logger.Error(fmt.Sprintf("Error initializing database: %v", err))
