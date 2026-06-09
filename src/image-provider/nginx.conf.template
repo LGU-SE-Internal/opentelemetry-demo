@@ -35,11 +35,13 @@ http {
     access_log /dev/stdout json_log;
     error_log /dev/stderr warn;
 
-    # Rate limit zone configuration
-    limit_req_zone $real_client_ip zone=image_rate_limit:10m rate=${NGINX_RATE_LIMIT_RPS:-10}r/s;
+# Rate limit zone configuration
+limit_req_zone $real_client_ip zone=image_rate_limit:10m rate=${NGINX_RATE_LIMIT_RPS:-10}r/s;
+# Per-image rate limit zone: limit by request URI (image path)
+limit_req_zone $request_uri zone=per_image:10m rate=${NGINX_PER_IMAGE_RATE_LIMIT_RPS:-2}r/s;
 
-    # Custom 429 error page handler
-    error_page 429 @rate_limit_exceeded;
+# Custom 429 error page handler
+error_page 429 @rate_limit_exceeded;
 
     include mime.types;
     sendfile on;
@@ -92,6 +94,7 @@ http {
         # Rate limit image assets only
         location ~* \.(png|jpg|jpeg|gif|webp|svg)$ {
             limit_req zone=image_rate_limit burst=5 nodelay;
+            limit_req zone=per_image burst=5 nodelay;
             try_files $uri =404;
         }
 
@@ -175,6 +178,7 @@ http {
         # Rate limit image assets only
         location ~* \.(png|jpg|jpeg|gif|webp|svg)$ {
             limit_req zone=image_rate_limit burst=5 nodelay;
+            limit_req zone=per_image burst=5 nodelay;
             try_files $uri =404;
         }
 
