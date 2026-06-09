@@ -33,6 +33,7 @@ repositories {
 
 
 dependencies {
+    implementation("io.quarkus:quarkus-smallrye-health")
     implementation("com.google.protobuf:protobuf-java:${protobufVersion}")
     testImplementation(kotlin("test"))
     implementation(kotlin("script-runtime"))
