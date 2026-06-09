@@ -24,5 +24,37 @@ elif [ -n "$FLAGD_TLS_SERVER_KEY_PATH" ]; then
     exit 1
 fi
 
-# Execute the flagd command
-exec flagd $START_ARGS
+# Configure graceful shutdown timeout
+DEFAULT_SHUTDOWN_TIMEOUT="30s"
+SHUTDOWN_TIMEOUT="${FLAGD_GRACEFUL_SHUTDOWN_TIMEOUT:-$DEFAULT_SHUTDOWN_TIMEOUT}"
+
+# Validate timeout format (supports s/m/h units)
+if ! echo "$SHUTDOWN_TIMEOUT" | grep -Eq '^[0-9]+(s|m|h)$'; then
+    echo "ERROR: Invalid FLAGD_GRACEFUL_SHUTDOWN_TIMEOUT format: $SHUTDOWN_TIMEOUT. Must be number followed by s/m/h (e.g. 10s, 1m)"
+    exit 1
+fi
+
+START_ARGS="$START_ARGS --graceful-shutdown-timeout $SHUTDOWN_TIMEOUT"
+
+# Function to forward signals to child process
+forward_signal() {
+    local signal=$1
+    echo "Received $signal, forwarding to flagd process..."
+    kill -$signal $FLAGD_PID 2>/dev/null
+}
+
+# Set up signal handlers
+trap 'forward_signal TERM' TERM
+trap 'forward_signal INT' INT
+
+# Start flagd as child process
+echo "Starting flagd with args: $START_ARGS"
+flagd $START_ARGS &
+FLAGD_PID=$!
+
+# Wait for flagd to exit
+wait $FLAGD_PID
+EXIT_CODE=$?
+
+echo "flagd process exited with code $EXIT_CODE"
+exit $EXIT_CODE
