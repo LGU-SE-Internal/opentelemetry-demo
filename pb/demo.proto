@@ -289,17 +289,21 @@ message PlaceOrderResponse {
 // ------------Ad service------------------
 
 service AdService {
-    rpc GetAds(AdRequest) returns (AdResponse) {}
+    rpc GetAds(GetAdsRequest) returns (GetAdsResponse) {}
 }
 
-message AdRequest {
-    // List of important key words from the current page describing the context.
+message GetAdsRequest {
+    // List of context keys used for ad targeting (must match length of context_values)
     repeated string context_keys = 1;
+    // List of context values corresponding to context_keys (must match length of context_keys)
+    repeated string context_values = 2;
+    // Optional category filter for ad results
+    optional string category = 3;
     // List of categories to target ads for.
-    repeated string context_categories = 2;
+    repeated string context_categories = 4;
 }
 
-message AdResponse {
+message GetAdsResponse {
     repeated Ad ads = 1;
 }
 

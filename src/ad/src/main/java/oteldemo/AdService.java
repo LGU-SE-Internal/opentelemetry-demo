@@ -470,7 +470,7 @@ public final class AdService {
      *     AdResponse}
      */
     @Override
-    public void getAds(AdRequest req, StreamObserver<AdResponse> responseObserver) {
+    public void getAds(GetAdsRequest req, StreamObserver<GetAdsResponse> responseObserver) {
       AdService service = AdService.getInstance();
       int inFlight = service.inFlightRequests.incrementAndGet();
       logger.debug("Incremented in-flight requests, current count: {}", inFlight);
@@ -478,6 +478,61 @@ public final class AdService {
       // get the current span in context
       Span span = Span.current();
       try {
+        // Input validation
+        // Check context keys and values length match
+        if (req.getContextKeysCount() != req.getContextValuesCount()) {
+          responseObserver.onError(Status.INVALID_ARGUMENT
+            .withDescription(String.format("context_keys length (%d) does not match context_values length (%d)",
+              req.getContextKeysCount(), req.getContextValuesCount()))
+            .asRuntimeException());
+          return;
+        }
+
+        // Check for empty context keys
+        for (int i = 0; i < req.getContextKeysCount(); i++) {
+          String key = req.getContextKeys(i);
+          if (key == null || key.trim().isEmpty()) {
+            responseObserver.onError(Status.INVALID_ARGUMENT
+              .withDescription(String.format("context_keys contains empty string at index %d", i))
+              .asRuntimeException());
+            return;
+          }
+        }
+
+        // Check for empty context values
+        for (int i = 0; i < req.getContextValuesCount(); i++) {
+          String value = req.getContextValues(i);
+          if (value == null || value.trim().isEmpty()) {
+            responseObserver.onError(Status.INVALID_ARGUMENT
+              .withDescription(String.format("context_values contains empty string at index %d", i))
+              .asRuntimeException());
+            return;
+          }
+        }
+
+        // Validate category if present
+        if (req.hasCategory()) {
+          String category = req.getCategory();
+          if (!category.isEmpty()) {
+            // Check length
+            if (category.length() > 100) {
+              responseObserver.onError(Status.INVALID_ARGUMENT
+                .withDescription(String.format("category '%s' exceeds maximum allowed length of 100 characters", category))
+                .asRuntimeException());
+              return;
+            }
+            // Check valid characters: only alphanumeric, '-', '_'
+            for (char c : category.toCharArray()) {
+              if (!Character.isLetterOrDigit(c) && c != '-' && c != '_') {
+                responseObserver.onError(Status.INVALID_ARGUMENT
+                  .withDescription(String.format("category '%s' contains invalid characters: %c", category, c))
+                  .asRuntimeException());
+                return;
+              }
+            }
+          }
+        }
+
         // Validate all context category parameters first
         for (int i = 0; i < req.getContextCategoriesCount(); i++) {
           service.validateAdCategory(req.getContextCategories(i));
