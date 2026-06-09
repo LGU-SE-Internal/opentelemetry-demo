@@ -14,6 +14,9 @@
 {{ $retryBudgetFraction := getenv "ENVOY_RETRY_BUDGET_FRACTION" "0.2" | toFloat }}
 {{ $retryBudgetMinRetryConcurrency := getenv "ENVOY_RETRY_BUDGET_MIN_RETRY_CONCURRENCY" "10" | toInt }}
 
+{{ $rateLimitRps := getenv "FRONTEND_PROXY_RATE_LIMIT_RPS" "100" | toInt }}
+{{ $rateLimitBurst := getenv "FRONTEND_PROXY_RATE_LIMIT_BURST" "200" | toInt }}
+
 static_resources:
   listeners:
     - address:
@@ -108,6 +111,19 @@ static_resources:
                                         - source_ip:
                                             address_prefix: "192.168.0.0"
                                             prefix_len: 16
+                            envoy.filters.http.local_ratelimit:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+                              stat_prefix: http_local_rate_limiter
+                              filter_enabled:
+                                runtime_key: local_rate_limit_enabled
+                                default_value:
+                                  numerator: 0
+                                  denominator: HUNDRED
+                              filter_enforced:
+                                runtime_key: local_rate_limit_enforced
+                                default_value:
+                                  numerator: 0
+                                  denominator: HUNDRED
                                         - source_ip:
                                             address_prefix: "127.0.0.0"
                                             prefix_len: 8
@@ -243,22 +259,48 @@ static_resources:
                       budget_percent:
                         value: {{ mul $retryBudgetFraction 100 }}
                       min_retry_concurrency: {{ $retryBudgetMinRetryConcurrency }}
+                  - name: envoy.filters.http.local_ratelimit
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+                      stat_prefix: http_local_rate_limiter
+                      token_bucket:
+                        max_tokens: {{ $rateLimitBurst }}
+                        tokens_per_fill: {{ $rateLimitRps }}
+                        fill_interval: 1s
+                      filter_enabled:
+                        runtime_key: local_rate_limit_enabled
+                        default_value:
+                          numerator: 100
+                          denominator: HUNDRED
+                      filter_enforced:
+                        runtime_key: local_rate_limit_enforced
+                        default_value:
+                          numerator: 100
+                          denominator: HUNDRED
+                      add_response_headers:
+                        x-rate-limit-limit:
+                          append: false
+                          value: "{{ $rateLimitRps }}"
+                        x-rate-limit-remaining:
+                          append: false
+                          value: "%RESPONSE_HEADER(x-local-rate-limit-remaining)%"
+                        x-rate-limit-reset:
+                          append: false
+                          value: "%RESPONSE_HEADER(x-local-rate-limit-reset)%"
+                        retry-after:
+                          append: false
+                          value: "%RESPONSE_HEADER(x-local-rate-limit-retry-after)%"
+                      response_headers_to_add:
+                        - append: false
+                          header:
+                            key: "Content-Type"
+                            value: "text/plain"
+                      status:
+                        code: TOO_MANY_REQUESTS
+                      enable_x_ratelimit_headers: DRAFT_VERSION_03
                   - name: envoy.filters.http.router
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
-                access_log:
-                  - name: envoy.access_loggers.open_telemetry
-                    typed_config:
-                      "@type": "type.googleapis.com/envoy.extensions.access_loggers.open_telemetry.v3.OpenTelemetryAccessLogConfig"
-                      common_config:
-                        log_name: "otel_envoy_access_log"
-                        grpc_service:
-                          envoy_grpc:
-                            cluster_name: opentelemetry_collector_grpc
-                        transport_api_version: "V3"
-                      body:
-                        # yamllint disable-line rule:line-length
-                        string_value: "[%START_TIME%] \"%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL%\" %RESPONSE_CODE% %RESPONSE_FLAGS% %RESPONSE_CODE_DETAILS% %CONNECTION_TERMINATION_DETAILS% \"%UPSTREAM_TRANSPORT_FAILURE_REASON%\" %BYTES_RECEIVED% %BYTES_SENT% %DURATION% %RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)% \"%REQ(X-FORWARDED-FOR)%\" \"%REQ(USER-AGENT)%\" \"%REQ(X-REQUEST-ID)%\" \"%REQ(:AUTHORITY)%\" \"%UPSTREAM_HOST%\" %UPSTREAM_CLUSTER% %UPSTREAM_LOCAL_ADDRESS% %DOWNSTREAM_LOCAL_ADDRESS% %DOWNSTREAM_REMOTE_ADDRESS% %REQUESTED_SERVER_NAME% %ROUTE_NAME%\n"
                       resource_attributes:
                         values:
                           - key: "service.name"
