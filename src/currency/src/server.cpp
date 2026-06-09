@@ -204,6 +204,7 @@ namespace
   if (g_shutdown_initiated.exchange(true)) {
     return; // Already shutting down
   }
+  logger->Info("Shutdown initiated, waiting up to 10s for in-flight requests to complete");
   // Stop refresh thread first
   refresh_running = false;
   // Initiate gRPC server shutdown
@@ -693,6 +694,7 @@ void RunServer(uint16_t port)
   // Wait for all components to shut down
   bool shutdown_clean = WaitForShutdownComplete(g_shutdown_timeout);
   
+  logger->Info("Shutdown completed, exiting");
   // Determine exit code
   if (shutdown_clean) {
     exit(0);
