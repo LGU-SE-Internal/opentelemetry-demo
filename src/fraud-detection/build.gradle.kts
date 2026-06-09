@@ -17,6 +17,13 @@ plugins {
     id("com.github.johnrengelman.shadow") version "8.2.0"
 }
 
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+        mavenCentral()
+    }
+}
+
 group = "io.opentelemetry"
 version = "1.0"
 
