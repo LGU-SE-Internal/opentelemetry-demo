@@ -112,4 +112,56 @@ return function (App $app) {
                 ->withStatus(500);
         }
     })->add(\App\Application\Middleware\QuoteRequestValidationMiddleware::class);
+    
+    $app->post('/calculate', function (Request $request, Response $response, LoggerInterface $logger) {
+        $span = Span::getCurrent();
+        $span->addEvent('Received calculate quote request, processing it');
+
+        $body = $request->getParsedBody();
+        
+        $weight = (float)$body['weight'];
+        $destinationZip = $body['destination_zip'];
+        $shippingMethod = $body['shipping_method'];
+        $forceFailure = isset($body['forceFailure']) ? (bool)$body['forceFailure'] : false;
+
+        try {
+            $quoteService = new QuoteService($logger);
+            // Calculate quote based on weight only for this endpoint
+            $data = $quoteService->calculateQuote(1, $weight, $forceFailure);
+
+            $payload = json_encode(['quote' => $data, 'shipping_cost_usd' => $data]);
+            $response->getBody()->write($payload);
+
+            $span->addEvent('Quote processed, response sent back', [
+                'demo.shipping.quote.cost.total' => $data,
+                'demo.shipping.quote.weight' => $weight,
+                'demo.shipping.quote.destination_zip' => $destinationZip,
+                'demo.shipping.quote.shipping_method' => $shippingMethod
+            ]);
+            
+            $logger->info('Calculated quote', [
+                'total' => $data,
+                'weight' => $weight,
+                'destination_zip' => $destinationZip,
+                'shipping_method' => $shippingMethod
+            ]);
+
+            return $response
+                ->withHeader('Content-Type', 'application/json');
+        } catch (QuoteCalculationException $e) {
+            $span->setStatus(\OpenTelemetry\API\Trace\StatusCode::STATUS_ERROR, 'Quote calculation failed');
+            $span->recordException($e);
+            
+            $traceId = $span->getContext()->getTraceId();
+            $payload = json_encode([
+                'error' => 'Quote calculation failed',
+                'traceId' => $traceId
+            ]);
+            $response->getBody()->write($payload);
+            
+            return $response
+                ->withHeader('Content-Type', 'application/json')
+                ->withStatus(500);
+        }
+    })->add(\App\Application\Middleware\QuoteRequestValidationMiddleware::class);
 };
