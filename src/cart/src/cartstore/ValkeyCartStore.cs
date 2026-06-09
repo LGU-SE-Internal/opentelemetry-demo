@@ -43,6 +43,18 @@ public class ValkeyCartStore : ICartStore
         {
             HistogramBucketBoundaries = [ 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1, 2.5, 5, 7.5, 10 ]
         });
+    private static readonly UpDownGauge<int> CircuitBreakerStateGauge = CartMeter.CreateUpDownGauge<int>(
+        "resilience.circuit_breaker.state",
+        unit: "1",
+        description: "Current state of the circuit breaker: 0 = CLOSED, 1 = OPEN, 2 = HALF_OPEN");
+    private static readonly Counter<int> CircuitBreakerTransitionsCounter = CartMeter.CreateCounter<int>(
+        "resilience.circuit_breaker.transitions",
+        unit: "{transition}",
+        description: "Total number of circuit breaker state transitions");
+    private static readonly Counter<int> CircuitBreakerRequestsRejectedCounter = CartMeter.CreateCounter<int>(
+        "resilience.circuit_breaker.requests_rejected",
+        unit: "{request}",
+        description: "Total number of requests rejected while the circuit breaker is open");
     private readonly ConfigurationOptions _redisConnectionOptions;
     private readonly AsyncCircuitBreakerPolicy _circuitBreakerPolicy;
 
@@ -72,14 +84,35 @@ public class ValkeyCartStore : ICartStore
                 {
                     _logger.LogInformation("Circuit breaker transitioning from {PreviousState} to OPEN state for {Duration} seconds. Reason: {ExceptionMessage}",
                         state, duration.TotalSeconds, ex.Message);
+                    // Update state gauge to OPEN (1)
+                    CircuitBreakerStateGauge.Record(1, new KeyValuePair<string, object>("resilience.circuit_breaker.name", "redis"));
+                    // Emit transition counter
+                    CircuitBreakerTransitionsCounter.Add(1,
+                        new KeyValuePair<string, object>("resilience.circuit_breaker.name", "redis"),
+                        new KeyValuePair<string, object>("resilience.circuit_breaker.state.from", state.ToString().ToUpperInvariant()),
+                        new KeyValuePair<string, object>("resilience.circuit_breaker.state.to", "OPEN"));
                 },
                 onReset: context =>
                 {
                     _logger.LogInformation("Circuit breaker transitioning from HALF-OPEN to CLOSED state. Test call succeeded.");
+                    // Update state gauge to CLOSED (0)
+                    CircuitBreakerStateGauge.Record(0, new KeyValuePair<string, object>("resilience.circuit_breaker.name", "redis"));
+                    // Emit transition counter
+                    CircuitBreakerTransitionsCounter.Add(1,
+                        new KeyValuePair<string, object>("resilience.circuit_breaker.name", "redis"),
+                        new KeyValuePair<string, object>("resilience.circuit_breaker.state.from", "HALF_OPEN"),
+                        new KeyValuePair<string, object>("resilience.circuit_breaker.state.to", "CLOSED"));
                 },
                 onHalfOpen: () =>
                 {
                     _logger.LogInformation("Circuit breaker transitioning from OPEN to HALF-OPEN state. Allowing 1 test call.");
+                    // Update state gauge to HALF_OPEN (2)
+                    CircuitBreakerStateGauge.Record(2, new KeyValuePair<string, object>("resilience.circuit_breaker.name", "redis"));
+                    // Emit transition counter
+                    CircuitBreakerTransitionsCounter.Add(1,
+                        new KeyValuePair<string, object>("resilience.circuit_breaker.name", "redis"),
+                        new KeyValuePair<string, object>("resilience.circuit_breaker.state.from", "OPEN"),
+                        new KeyValuePair<string, object>("resilience.circuit_breaker.state.to", "HALF_OPEN"));
                 });
     }
 
