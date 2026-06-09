@@ -14,14 +14,7 @@ plugins {
     id("java")
     id("idea")
     id("com.google.protobuf") version "0.10.0"
-    id("com.github.johnrengelman.shadow") version "8.2.0"
-}
-
-pluginManagement {
-    repositories {
-        gradlePluginPortal()
-        mavenCentral()
-    }
+    id("com.github.johnrengelman.shadow") version "8.1.1"
 }
 
 group = "io.opentelemetry"
