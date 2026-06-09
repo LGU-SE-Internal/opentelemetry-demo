@@ -16,6 +16,74 @@ internal static class TlsConfiguration
     private const string POSTGRES_TLS_CA_CERT_PATH = "POSTGRES_TLS_CA_CERT_PATH";
     private const string POSTGRES_TLS_CLIENT_CERT_PATH = "POSTGRES_TLS_CLIENT_CERT_PATH";
     private const string POSTGRES_TLS_CLIENT_KEY_PATH = "POSTGRES_TLS_CLIENT_KEY_PATH";
+    
+    private const string ACCOUNTING_SERVICE_TLS_CERT_PATH = "ACCOUNTING_SERVICE_TLS_CERT_PATH";
+    private const string ACCOUNTING_SERVICE_TLS_KEY_PATH = "ACCOUNTING_SERVICE_TLS_KEY_PATH";
+    private const string ACCOUNTING_SERVICE_MTLS_CA_CERT_PATH = "ACCOUNTING_SERVICE_MTLS_CA_CERT_PATH";
+
+    public static (bool TlsEnabled, bool MtlsEnabled, string CertPath, string KeyPath, string CaCertPath) GetHttpServerTlsConfig()
+    {
+        var certPath = Environment.GetEnvironmentVariable(ACCOUNTING_SERVICE_TLS_CERT_PATH) ?? string.Empty;
+        var keyPath = Environment.GetEnvironmentVariable(ACCOUNTING_SERVICE_TLS_KEY_PATH) ?? string.Empty;
+        var caCertPath = Environment.GetEnvironmentVariable(ACCOUNTING_SERVICE_MTLS_CA_CERT_PATH) ?? string.Empty;
+
+        var hasCert = !string.IsNullOrWhiteSpace(certPath);
+        var hasKey = !string.IsNullOrWhiteSpace(keyPath);
+        var hasCaCert = !string.IsNullOrWhiteSpace(caCertPath);
+
+        if (hasCert != hasKey)
+        {
+            throw new InvalidTlsConfigurationException("Both ACCOUNTING_SERVICE_TLS_CERT_PATH and ACCOUNTING_SERVICE_TLS_KEY_PATH must be provided when configuring TLS for HTTP server");
+        }
+
+        if (!hasCert)
+        {
+            if (hasCaCert)
+            {
+                Console.WriteLine("WARNING: ACCOUNTING_SERVICE_MTLS_CA_CERT_PATH provided without TLS cert/key, mTLS configuration will be ignored");
+            }
+            return (false, false, string.Empty, string.Empty, string.Empty);
+        }
+
+        // Validate cert and key files exist and are valid
+        if (!File.Exists(certPath))
+        {
+            throw new InvalidTlsConfigurationException($"TLS certificate file not found at path: {certPath}");
+        }
+        if (!File.Exists(keyPath))
+        {
+            throw new InvalidTlsConfigurationException($"TLS private key file not found at path: {keyPath}");
+        }
+
+        try
+        {
+            _ = X509Certificate2.CreateFromPemFile(certPath, keyPath);
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidTlsConfigurationException($"TLS certificate/key pair is invalid: {ex.Message}", ex);
+        }
+
+        bool mtlsEnabled = false;
+        if (hasCaCert)
+        {
+            if (!File.Exists(caCertPath))
+            {
+                throw new InvalidTlsConfigurationException($"mTLS CA certificate file not found at path: {caCertPath}");
+            }
+            try
+            {
+                _ = new X509Certificate2(caCertPath);
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidTlsConfigurationException($"mTLS CA certificate file is invalid: {ex.Message}", ex);
+            }
+            mtlsEnabled = true;
+        }
+
+        return (true, mtlsEnabled, certPath, keyPath, caCertPath);
+    }
 
     public static (bool Enabled, string CaCertPath, string ClientCertPath, string ClientKeyPath) GetKafkaTlsConfig()
     {
