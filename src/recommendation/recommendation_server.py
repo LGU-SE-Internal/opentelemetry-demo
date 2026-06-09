@@ -191,21 +191,6 @@ class RecommendationService(demo_pb2_grpc.RecommendationServiceServicer):
         span = trace.get_current_span()
         trace_id = format(span.get_span_context().trace_id, '016x') if span.is_recording() else "unknown"
         
-        # Rate limiting check
-        if limiter is not None and rate_limit is not None:
-            if not limiter.check(rate_limit, "list_recommendations_endpoint"):
-                # Increment rate limit metric
-                rec_svc_metrics["rate_limited_requests"].add(1, {'endpoint': 'ListRecommendations', 'status': 'rate_limited'})
-                error_msg = "Rate limit exceeded. Try again later."
-                logger.warning(
-                    f"Rate limit exceeded for recommendation request (trace_id={trace_id})",
-                    extra={
-                        "event": "rate_limit_exceeded",
-                        "trace_id": trace_id
-                    }
-                )
-                context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, error_msg)
-        
         # Helper function to strip control characters (AC-6)
         def sanitize_string(s):
             if not s:
@@ -437,8 +422,11 @@ def create_product_catalog_client(catalog_addr: str, logger=None):
 
 def serve(listen_addr: str, product_catalog_channel=None, test_mode: bool = False, logger=None):
     """Start recommendation service gRPC server with optional TLS/mTLS configuration."""
-    # Create gRPC server
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+    # Create gRPC server with rate limit interceptor if enabled
+    interceptors = []
+    if limiter is not None:
+        interceptors.append(RateLimitInterceptor())
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10), interceptors=interceptors)
 
     # Add class to gRPC server
     service = RecommendationService()
@@ -580,15 +568,85 @@ product_catalog_stub, product_catalog_channel = create_product_catalog_client(ca
 product_catalog_client = product_catalog_stub
 
 # Initialize rate limiter
-rate_limit_rps = int(os.environ.get('RECOMMENDATION_SERVICE_RATE_LIMIT_RPS', '0'))
+LEGACY_RATE_LIMIT_ENV_VAR = 'RECOMMENDATION_SERVICE_RATE_LIMIT_RPS'
+DEFAULT_RATE_LIMIT_ENV_VAR = 'RECOMMENDATION_SERVICE_RATE_LIMIT_DEFAULT_RPS'
+RATE_LIMIT_ENV_VAR_PREFIX = 'RECOMMENDATION_SERVICE_RATE_LIMIT_'
+RATE_LIMIT_ENV_VAR_SUFFIX = '_RPS'
+DEFAULT_PER_ENDPOINT_RPS = 100
+
+# Helper to normalize gRPC method name to env var suffix
+def normalize_endpoint_name(method_name):
+    # Extract the method name part after the last slash
+    if '/' in method_name:
+        method_part = method_name.rsplit('/', 1)[-1]
+    else:
+        method_part = method_name
+    # Convert to uppercase, replace non-alphanumeric with underscores
+    normalized = re.sub(r'[^a-zA-Z0-9]', '_', method_part).upper()
+    return normalized
+
+# Load rate limit configuration
 limiter = None
-rate_limit = None
-if rate_limit_rps > 0:
+endpoint_limits = {}
+legacy_rate_limit_rps = int(os.environ.get(LEGACY_RATE_LIMIT_ENV_VAR, '0'))
+default_limit_rps = int(os.environ.get(DEFAULT_RATE_LIMIT_ENV_VAR, str(legacy_rate_limit_rps if legacy_rate_limit_rps > 0 else DEFAULT_PER_ENDPOINT_RPS)))
+
+# Check if rate limiting is enabled at all
+if legacy_rate_limit_rps > 0 or default_limit_rps > 0:
     limiter = Limiter(
         storage=MemoryStorage(),
         strategy=FixedWindowRateLimiter()
     )
-    rate_limit = RateLimitItemPerSecond(rate_limit_rps)
+    # Load per-endpoint limits from env vars
+    for env_key, env_value in os.environ.items():
+        if env_key.startswith(RATE_LIMIT_ENV_VAR_PREFIX) and env_key.endswith(RATE_LIMIT_ENV_VAR_SUFFIX) and env_key != DEFAULT_RATE_LIMIT_ENV_VAR:
+            try:
+                limit_rps = int(env_value)
+                if limit_rps > 0:
+                    endpoint_limits[env_key] = RateLimitItemPerSecond(limit_rps)
+            except ValueError:
+                # Ignore invalid values
+                pass
+
+# gRPC interceptor for rate limiting
+class RateLimitInterceptor(grpc.ServerInterceptor):
+    def intercept_service(self, continuation, handler_call_details):
+        method_name = handler_call_details.method
+        def rate_limit_wrapper(behavior, request_streaming, response_streaming):
+            def new_behavior(request, context):
+                if limiter is None:
+                    return behavior(request, context)
+                
+                # Get limit for this endpoint
+                normalized_name = normalize_endpoint_name(method_name)
+                endpoint_env_key = f"{RATE_LIMIT_ENV_VAR_PREFIX}{normalized_name}{RATE_LIMIT_ENV_VAR_SUFFIX}"
+                limit = endpoint_limits.get(endpoint_env_key, RateLimitItemPerSecond(default_limit_rps))
+                
+                if limit.amount > 0:
+                    if not limiter.check(limit, f"endpoint_{normalized_name}"):
+                        # Increment rate limit metric
+                        rec_svc_metrics["rate_limited_requests"].add(1, {'endpoint': method_name})
+                        error_msg = f"Rate limit exceeded for endpoint {method_name}: allowed {limit.amount} requests per second, please retry later"
+                        logger.warning(
+                            f"Rate limit exceeded for endpoint {method_name}",
+                            extra={
+                                "event": "rate_limit_exceeded",
+                                "endpoint": method_name,
+                                "limit": limit.amount
+                            }
+                        )
+                        context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, error_msg)
+                
+                return behavior(request, context)
+            return new_behavior
+        return grpc.unary_unary_rpc_method_handler(
+            rate_limit_wrapper(
+                handler_call_details.request_deserializer,
+                handler_call_details.response_deserializer
+            ),
+            request_deserializer=handler_call_details.request_deserializer,
+            response_deserializer=handler_call_details.response_deserializer
+        )
 
 # Start server
 port = must_map_env('RECOMMENDATION_PORT')
