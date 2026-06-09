@@ -8,6 +8,7 @@ use std::env;
 use std::time::Duration;
 use regex::Regex;
 use tonic::{transport::Server, Request, Status, Code, service::Interceptor};
+use tonic_health::server::HealthReporter;
 use tower_governor::{Governor, GovernorConfig, GovernorConfigBuilder, key_extractor::KeyExtractor, error::GovernorError};
 use governor::Quota;
 use std::num::NonZeroU32;
@@ -547,6 +548,40 @@ async fn main() -> std::io::Result<()> {
 
     // Create active request tracker
     let active_requests = Arc::new(AtomicUsize::new(0));
+    const MAX_ACTIVE_REQUESTS: usize = 100;
+    const SHIPPING_SERVICE_NAME: &str = "opentelemetry.demo.shipping.v1.ShippingService";
+
+    // Set up gRPC health check service
+    let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+    health_reporter
+        .set_serving::<ShippingServiceServer<ShippingServiceImpl>>()
+        .await;
+    health_reporter.set_service_status(SHIPPING_SERVICE_NAME, tonic_health::ServingStatus::Serving).await;
+
+    // Spawn task to monitor active request count and update health status
+    let health_reporter_clone = health_reporter.clone();
+    let active_requests_clone = active_requests.clone();
+    tokio::spawn(async move {
+        let mut current_serving = true;
+        loop {
+            let count = active_requests_clone.load(Ordering::SeqCst);
+            let should_serve = count < MAX_ACTIVE_REQUESTS;
+            
+            if should_serve != current_serving {
+                let status = if should_serve {
+                    tonic_health::ServingStatus::Serving
+                } else {
+                    tonic_health::ServingStatus::NotServing
+                };
+                health_reporter_clone.set_service_status("", status.clone()).await;
+                health_reporter_clone.set_service_status(SHIPPING_SERVICE_NAME, status).await;
+                current_serving = should_serve;
+            }
+            
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    });
+
     let request_tracker = ActiveRequestTracker { count: active_requests.clone() };
 
     // Chain interceptors: request tracker first, then rate limiter
@@ -563,7 +598,8 @@ async fn main() -> std::io::Result<()> {
 
     // Create server and get shutdown handle
     let server = Server::builder()
-        .add_service(service);
+        .add_service(service)
+        .add_service(health_service);
 
     let (shutdown_handle, server_future) = server.serve_with_graceful_shutdown(addr, async move {
         // Empty future, we will trigger shutdown explicitly via handle
@@ -581,6 +617,10 @@ async fn main() -> std::io::Result<()> {
         _ = sigint.recv() => "SIGINT",
         _ = sigterm.recv() => "SIGTERM",
     };
+
+    // Immediately set health status to NOT_SERVING when shutdown signal is received
+    health_reporter.set_service_status("", tonic_health::ServingStatus::NotServing).await;
+    health_reporter.set_service_status(SHIPPING_SERVICE_NAME, tonic_health::ServingStatus::NotServing).await;
 
     // Log signal received event
     info!(
