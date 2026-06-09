@@ -234,16 +234,16 @@ public final class AdService {
           .setDescription("Total number of ad requests rejected due to invalid category parameters")
           .build();
 
-  private void validateTlsFile(String path) {
+  private void validateTlsFile(String path) throws FileNotFoundException {
     File file = new File(path);
     if (!file.exists()) {
-      throw new RuntimeException("Failed to read TLS file at " + path + ": File not found");
+      throw new FileNotFoundException("Failed to read TLS file at " + path + ": File not found");
     }
     if (!file.isFile()) {
-      throw new RuntimeException("Failed to read TLS file at " + path + ": Not a file");
+      throw new FileNotFoundException("Failed to read TLS file at " + path + ": Not a file");
     }
     if (!file.canRead()) {
-      throw new RuntimeException("Failed to read TLS file at " + path + ": Permission denied");
+      throw new FileNotFoundException("Failed to read TLS file at " + path + ": Permission denied");
     }
   }
 
@@ -319,40 +319,36 @@ public final class AdService {
     OpenFeatureAPI.getInstance().setProvider(flagdProvider);
     
     // TLS configuration
-    boolean tlsEnabled = Boolean.parseBoolean(
-      Optional.ofNullable(System.getenv("AD_SERVICE_TLS_ENABLED"))
-        .orElse(System.getProperty("AD_SERVICE_TLS_ENABLED", "false"))
-    );
-
+    String certPath = System.getenv("AD_SERVICE_GRPC_TLS_CERT_PATH");
+    String keyPath = System.getenv("AD_SERVICE_GRPC_TLS_KEY_PATH");
+    String clientCaPath = System.getenv("AD_SERVICE_GRPC_TLS_CA_CERT_PATH");
+    
+    boolean tlsEnabled = (certPath != null && !certPath.isEmpty()) || (keyPath != null && !keyPath.isEmpty());
     SslContext sslContext = null;
-    if (tlsEnabled) {
-      String certPath = Optional.ofNullable(System.getenv("AD_SERVICE_TLS_CERT_PATH"))
-        .orElse(System.getProperty("AD_SERVICE_TLS_CERT_PATH", ""));
-      String keyPath = Optional.ofNullable(System.getenv("AD_SERVICE_TLS_KEY_PATH"))
-        .orElse(System.getProperty("AD_SERVICE_TLS_KEY_PATH", ""));
-      String clientCaPath = Optional.ofNullable(System.getenv("AD_SERVICE_TLS_CLIENT_CA_CERT_PATH"))
-        .orElse(System.getProperty("AD_SERVICE_TLS_CLIENT_CA_CERT_PATH", ""));
 
-      if (certPath.isEmpty() || keyPath.isEmpty()) {
-        throw new RuntimeException("TLS enabled but required certificate/key path configuration is missing");
+    if (tlsEnabled) {
+      if (certPath == null || certPath.isEmpty() || keyPath == null || keyPath.isEmpty()) {
+        throw new IllegalArgumentException("Both AD_SERVICE_GRPC_TLS_CERT_PATH and AD_SERVICE_GRPC_TLS_KEY_PATH must be provided to enable TLS");
       }
 
       // Validate files exist and are readable
       validateTlsFile(certPath);
       validateTlsFile(keyPath);
-      if (!clientCaPath.isEmpty()) {
+      if (clientCaPath != null && !clientCaPath.isEmpty()) {
         validateTlsFile(clientCaPath);
       }
 
       try {
         SslContextBuilder sslContextBuilder = GrpcSslContexts.forServer(new File(certPath), new File(keyPath));
-        if (!clientCaPath.isEmpty()) {
+        if (clientCaPath != null && !clientCaPath.isEmpty()) {
           sslContextBuilder.trustManager(new File(clientCaPath))
             .clientAuth(ClientAuth.REQUIRE);
         }
         sslContext = sslContextBuilder.build();
+      } catch (FileNotFoundException | CertificateException e) {
+        throw e;
       } catch (Exception e) {
-        throw new RuntimeException("Invalid TLS configuration: " + e.getMessage(), e);
+        throw new IllegalArgumentException("Invalid TLS configuration: " + e.getMessage(), e);
       }
     }
 
