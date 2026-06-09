@@ -4,6 +4,7 @@
  * Copied with modification from src/frontend/utils/Request.ts
  */
 import getFrontendProxyURL from "@/utils/Settings";
+import { withResilience } from "@/utils/resilience";
 
 interface IRequestParams {
   url: string;
@@ -11,6 +12,7 @@ interface IRequestParams {
   method?: "GET" | "POST" | "PUT" | "DELETE";
   queryParams?: Record<string, any>;
   headers?: Record<string, string>;
+  retryable?: boolean;
 }
 
 const request = async <T>({
@@ -21,21 +23,38 @@ const request = async <T>({
   headers = {
     "content-type": "application/json",
   },
+  retryable,
 }: IRequestParams): Promise<T> => {
   const proxyURL = await getFrontendProxyURL();
   const requestURL = `${proxyURL}${url}?${new URLSearchParams(queryParams).toString()}`;
   const requestBody = body ? JSON.stringify(body) : undefined;
-  const response = await fetch(requestURL, {
-    method,
-    body: requestBody,
-    headers,
-  });
 
-  const responseText = await response.text();
+  // Determine if request is retryable
+  const isIdempotent = retryable !== undefined 
+    ? retryable 
+    : ['GET', 'HEAD'].includes(method.toUpperCase());
 
-  if (!!responseText) return JSON.parse(responseText);
+  const performRequest = async () => {
+    const response = await fetch(requestURL, {
+      method,
+      body: requestBody,
+      headers,
+    });
 
-  return undefined as unknown as T;
+    const responseText = await response.text();
+
+    if (!response.ok) {
+      const error: any = new Error(`Request failed with status ${response.status}`);
+      error.response = { status: response.status, statusText: response.statusText };
+      throw error;
+    }
+
+    if (!!responseText) return JSON.parse(responseText);
+
+    return undefined as unknown as T;
+  };
+
+  return withResilience(performRequest, isIdempotent, undefined, { url: requestURL, method });
 };
 
 export default request;

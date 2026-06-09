@@ -1,5 +1,6 @@
 import CircuitBreaker from 'opossum';
 import Toast from 'react-native-toast-message';
+import { trace } from '@opentelemetry/api';
 
 export enum ResilienceErrorType {
   TIMEOUT = "TIMEOUT",
@@ -22,8 +23,11 @@ export interface ResilienceConfig {
   requestTimeoutMs: number;
   retry: {
     maxRetries: number;
-    initialBackoffMs: number;
-    maxBackoffMs: number;
+    initialDelayMs: number;
+    backoffFactor: number;
+    maxDelayMs: number;
+    retryableMethods: string[];
+    retryableStatusCodes: number[];
   };
   circuitBreaker: {
     failureThreshold: number;
@@ -36,8 +40,11 @@ const defaultConfig: ResilienceConfig = {
   requestTimeoutMs: parseInt(process.env.RESILIENCE_REQUEST_TIMEOUT_MS || '10000', 10),
   retry: {
     maxRetries: parseInt(process.env.RESILIENCE_RETRY_MAX_RETRIES || '3', 10),
-    initialBackoffMs: parseInt(process.env.RESILIENCE_RETRY_INITIAL_BACKOFF_MS || '100', 10),
-    maxBackoffMs: parseInt(process.env.RESILIENCE_RETRY_MAX_BACKOFF_MS || '2000', 10),
+    initialDelayMs: parseInt(process.env.RESILIENCE_RETRY_INITIAL_DELAY_MS || '100', 10),
+    backoffFactor: parseInt(process.env.RESILIENCE_RETRY_BACKOFF_FACTOR || '2', 10),
+    maxDelayMs: parseInt(process.env.RESILIENCE_RETRY_MAX_DELAY_MS || '5000', 10),
+    retryableMethods: ['GET', 'HEAD'],
+    retryableStatusCodes: [429, 500, 502, 503, 504],
   },
   circuitBreaker: {
     failureThreshold: parseInt(process.env.RESILIENCE_CIRCUIT_BREAKER_FAILURE_THRESHOLD || '5', 10),
@@ -74,10 +81,10 @@ function getCircuitBreaker(config: ResilienceConfig) {
   return circuitBreaker;
 }
 
-function isTransientError(error: any): boolean {
+function isTransientError(error: any, retryableStatusCodes: number[]): boolean {
   if (!error) return false;
-  if (error.message && error.message.includes('Network Error')) return true;
-  if (error.response && error.response.status >= 500 && error.response.status < 600) return true;
+  if (error.message && (error.message.includes('Network Error') || error.message.includes('timeout') || error.message.includes('Failed to fetch') || error.message.includes('connectivity'))) return true;
+  if (error.response && retryableStatusCodes.includes(error.response.status)) return true;
   
   const grpcStatus = error.code;
   if (
@@ -88,15 +95,14 @@ function isTransientError(error: any): boolean {
     grpcStatus === 13
   ) return true;
   
-  if (error.message && (error.message.includes('500') || error.message.includes('Internal Server Error'))) return true;
-  
   return false;
 }
 
 async function withRetry<T>(
   requestFn: () => Promise<T>,
   config: ResilienceConfig,
-  isIdempotent: boolean
+  isIdempotent: boolean,
+  requestMeta?: { url: string; method: string }
 ): Promise<T> {
   if (!isIdempotent) {
     return requestFn();
@@ -104,6 +110,7 @@ async function withRetry<T>(
 
   let attempt = 0;
   let lastError: any;
+  const activeSpan = trace.getActiveSpan();
 
   while (attempt <= config.retry.maxRetries) {
     try {
@@ -113,28 +120,44 @@ async function withRetry<T>(
       attempt++;
       
       if (attempt > config.retry.maxRetries) break;
-      if (!isTransientError(error)) break;
+      if (!isTransientError(error, config.retry.retryableStatusCodes)) break;
       
-      const backoffMs = Math.min(
-        config.retry.initialBackoffMs * Math.pow(2, attempt - 1),
-        config.retry.maxBackoffMs
-      );
+      const baseDelay = config.retry.initialDelayMs * Math.pow(config.retry.backoffFactor, attempt - 1);
+      const jitteredDelay = baseDelay * (0.5 + Math.random());
+      const backoffMs = Math.min(jitteredDelay, config.retry.maxDelayMs);
+      
+      // Log retry event
+      console.log(JSON.stringify({
+        timestamp: new Date().toISOString(),
+        "request.url": requestMeta?.url,
+        "request.method": requestMeta?.method,
+        "retry.attempt": attempt,
+        "retry.error_details": error.message || String(error),
+        "retry.delay_before_next_retry_ms": backoffMs
+      }));
+      
+      // Add OTel span event
+      if (activeSpan) {
+        activeSpan.addEvent('request.retry', {
+          "retry.attempt_number": attempt,
+          "retry.error_type": error.response ? `${error.response.status}_server_error` : error.message?.includes('timeout') ? 'network_timeout' : 'connectivity_drop',
+          "retry.error_message": error.message || String(error),
+          "retry.next_delay_ms": backoffMs
+        });
+      }
       
       await new Promise(resolve => setTimeout(resolve, backoffMs));
     }
   }
 
-  throw new ResilienceError(
-    ResilienceErrorType.RETRY_EXHAUSTED,
-    `Maximum retries (${config.retry.maxRetries}) exceeded`,
-    lastError
-  );
+  throw lastError;
 }
 
 export async function withResilience<T>(
   requestFn: () => Promise<T>,
   isIdempotent: boolean,
-  configOverride?: Partial<ResilienceConfig>
+  configOverride?: Partial<ResilienceConfig>,
+  requestMeta?: { url: string; method: string }
 ): Promise<T> {
   const config: ResilienceConfig = {
     ...defaultConfig,
@@ -153,7 +176,7 @@ export async function withResilience<T>(
 
   try {
     const result = await breaker.fire(async () => {
-      return await withRetry(requestFn, config, isIdempotent);
+      return await withRetry(requestFn, config, isIdempotent, requestMeta);
     });
     return result;
   } catch (error: any) {
