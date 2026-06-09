@@ -16,7 +16,13 @@ FROM base
 WORKDIR /usr/src/app/
 COPY --from=builder /reqs /usr/local
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
-RUN playwright install --with-deps chromium
+RUN playwright install --with-deps chromium \
+    && groupadd -r appgroup \
+    && useradd -r -u 10001 -g appgroup -s /sbin/nologin appuser \
+    && chown -R appuser:appgroup /usr/src/app \
+    && mkdir -p /tmp/locust \
+    && chown -R appuser:appgroup /tmp/locust
 COPY ./src/load-generator/locustfile.py .
 COPY ./src/load-generator/people.json .
+USER 10001
 ENTRYPOINT ["locust", "--skip-log-setup"]
