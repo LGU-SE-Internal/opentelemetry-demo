@@ -1,6 +1,3 @@
-// Copyright The OpenTelemetry Authors
-// SPDX-License-Identifier: Apache-2.0
-
 using Accounting;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
@@ -9,6 +6,10 @@ using Microsoft.Extensions.Logging;
 using Confluent.Kafka;
 using Microsoft.AspNetCore.Http;
 using System.Text.Json;
+using Microsoft.AspNetCore.Server.Kestrel.Core;
+using System.Net;
+using System.Security.Cryptography.X509Certificates;
+using Microsoft.AspNetCore.Authentication.Certificate;
 
 Console.WriteLine("Accounting service started");
 
@@ -18,9 +19,93 @@ Environment.GetEnvironmentVariables()
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Load TLS configuration
+var (tlsEnabled, mtlsEnabled, certPath, keyPath, caCertPath) = TlsConfiguration.GetHttpServerTlsConfig();
+
+// Log TLS configuration status
+Console.WriteLine($"TLS configuration status: TLS {(tlsEnabled ? "ENABLED" : "DISABLED")}, mTLS {(mtlsEnabled ? "ENABLED" : "DISABLED")}");
+if (tlsEnabled)
+{
+    Console.WriteLine($"TLS certificate path: {certPath}");
+    Console.WriteLine($"TLS private key path: {keyPath}");
+    if (mtlsEnabled)
+    {
+        Console.WriteLine($"mTLS CA certificate path: {caCertPath}");
+    }
+}
+
 // Configure health port
 var healthPort = Environment.GetEnvironmentVariable("ACCOUNTING_HEALTH_PORT") ?? "8080";
-builder.WebHost.UseUrls($"http://*:{healthPort}");
+var httpsPort = Environment.GetEnvironmentVariable("ACCOUNTING_HTTPS_PORT") ?? "8443";
+
+// Configure Kestrel endpoints
+builder.WebHost.ConfigureKestrel(options =>
+{
+    // Always listen on HTTP port for health checks and backward compatibility
+    options.Listen(IPAddress.Any, int.Parse(healthPort), listenOptions =>
+    {
+        listenOptions.Protocols = HttpProtocols.Http1AndHttp2;
+    });
+
+    // Add HTTPS endpoint if TLS is enabled
+    if (tlsEnabled)
+    {
+        options.Listen(IPAddress.Any, int.Parse(httpsPort), listenOptions =>
+        {
+            listenOptions.Protocols = HttpProtocols.Http1AndHttp2;
+            listenOptions.UseHttps(httpsOptions =>
+            {
+                httpsOptions.ServerCertificate = X509Certificate2.CreateFromPemFile(certPath, keyPath);
+                
+                // Configure client certificate validation if mTLS is enabled
+                if (mtlsEnabled)
+                {
+                    httpsOptions.ClientCertificateMode = Microsoft.AspNetCore.Server.Kestrel.Https.ClientCertificateMode.RequireCertificate;
+                    httpsOptions.AllowAnyClientCertificate = false;
+                    httpsOptions.ClientCertificateValidation = (cert, chain, sslPolicyErrors) =>
+                    {
+                        if (cert == null) return false;
+                        
+                        var caCert = new X509Certificate2(caCertPath);
+                        chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
+                        chain.ChainPolicy.CustomTrustStore.Add(caCert);
+                        chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+                        
+                        return chain.Build(cert);
+                    };
+                }
+                else
+                {
+                    httpsOptions.ClientCertificateMode = Microsoft.AspNetCore.Server.Kestrel.Https.ClientCertificateMode.NoCertificate;
+                }
+            });
+        });
+    }
+});
+
+// Add certificate authentication if mTLS is enabled
+if (mtlsEnabled)
+{
+    builder.Services.AddAuthentication(CertificateAuthenticationDefaults.AuthenticationScheme)
+        .AddCertificate(options =>
+        {
+            options.AllowedCertificateTypes = CertificateTypes.All;
+            options.RevocationMode = X509RevocationMode.NoCheck;
+            options.ValidateCertificateUse = false;
+            options.ValidateValidityPeriod = true;
+            
+            options.Events = new CertificateAuthenticationEvents
+            {
+                OnAuthenticationFailed = context =>
+                {
+                    context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                    return Task.CompletedTask;
+                }
+            };
+        });
+    
+    builder.Services.AddAuthorization();
+}
 
 // Add health checks
 builder.Services.AddHealthChecks()
@@ -48,6 +133,13 @@ builder.Services.AddSingleton<Consumer>(sp => new Consumer(sp.GetRequiredService
 builder.Services.AddSingleton<IGracefulShutdownService, GracefulShutdownService>();
 
 var app = builder.Build();
+
+// Use authentication and authorization if mTLS is enabled
+if (mtlsEnabled)
+{
+    app.UseAuthentication();
+    app.UseAuthorization();
+}
 
 // Get graceful shutdown service and register handlers
 var shutdownService = app.Services.GetRequiredService<IGracefulShutdownService>();
