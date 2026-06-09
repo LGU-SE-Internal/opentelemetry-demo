@@ -35,7 +35,13 @@ import demo_pb2_grpc
 from grpc_health.v1 import health_pb2
 from grpc_health.v1 import health_pb2_grpc
 from grpc_health.v1.health import HealthServicer
-from database import fetch_product_reviews, fetch_product_reviews_from_db, fetch_avg_product_review_score_from_db, db_connection_str
+from database import (
+    fetch_product_reviews, 
+    fetch_product_reviews_from_db, 
+    fetch_avg_product_review_score_from_db, 
+    db_connection_str,
+    db_pool
+)
 
 # Circuit breaker imports
 from pybreaker import CircuitBreaker, CircuitBreakerListener
@@ -704,13 +710,8 @@ if __name__ == "__main__":
     pc_channel = grpc.aio.insecure_channel(catalog_addr)
     product_catalog_stub = demo_pb2_grpc.ProductCatalogServiceStub(pc_channel)
 
-    # Dummy database connection pool (current implementation uses per-request connections, no pool)
-    class DummyDBPool:
-        async def close(self):
-            # No-op since we don't have a persistent pool
-            pass
-
-    db_connection_pool = DummyDBPool()
+    # Real database connection pool
+    db_connection_pool = db_pool
 
     # Register signal handlers
     signal.signal(signal.SIGINT, handle_shutdown_signal)
