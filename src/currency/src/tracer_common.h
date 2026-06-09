@@ -98,4 +98,12 @@ opentelemetry::nostd::shared_ptr<opentelemetry::trace::Tracer> get_tracer(std::s
   return provider->GetTracer(tracer_name);
 }
 
+bool forceFlushTracer(std::chrono::seconds timeout) noexcept {
+  auto provider = opentelemetry::trace::Provider::GetTracerProvider();
+  if (auto sdk_provider = dynamic_cast<opentelemetry::sdk::trace::TracerProvider*>(provider.get())) {
+    return sdk_provider->ForceFlush(timeout);
+  }
+  return false;
+}
+
 } // namespace

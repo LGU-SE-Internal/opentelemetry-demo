@@ -58,6 +58,15 @@ namespace semconv     = opentelemetry::semconv;
 
 namespace
 {
+  // Shutdown related globals
+  std::atomic<bool> g_shutdown_initiated{false};
+  std::atomic<int> g_received_signal{0};
+  std::chrono::seconds g_shutdown_timeout{10};
+  std::shared_ptr<Server> g_server;
+  std::unique_ptr<httplib::Server> g_http_server;
+  std::atomic<bool> g_is_healthy{true};
+  std::atomic<bool> g_is_ready{false};
+
   // Hardcoded default rates
   const std::unordered_map<std::string, double> HARDCODED_DEFAULT_RATES = {
     {"EUR", 1.0},
@@ -191,7 +200,47 @@ namespace
     }
   }
 
-  void start_refresh_loop(int interval_seconds) {
+  void InitiateGracefulShutdown() noexcept {
+  if (g_shutdown_initiated.exchange(true)) {
+    return; // Already shutting down
+  }
+  // Stop refresh thread first
+  refresh_running = false;
+  // Initiate gRPC server shutdown
+  if (g_server) {
+    g_server->Shutdown(std::chrono::system_clock::now() + g_shutdown_timeout);
+  }
+}
+
+bool WaitForShutdownComplete(std::chrono::seconds timeout) noexcept {
+  auto start = std::chrono::steady_clock::now();
+  // Wait for refresh thread to join
+  if (refresh_thread.joinable()) {
+    refresh_thread.join();
+  }
+  // Flush all telemetry
+  forceFlushTracer(std::chrono::seconds(1));
+  forceFlushMeter(std::chrono::seconds(1));
+  forceFlushLogger(std::chrono::seconds(1));
+  // Return true if we completed before timeout
+  return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start) < timeout;
+}
+
+void SignalHandler(int signal) {
+  g_received_signal = signal;
+  InitiateGracefulShutdown();
+}
+
+void RegisterShutdownSignalHandlers() {
+  struct sigaction action;
+  action.sa_handler = SignalHandler;
+  sigemptyset(&action.sa_mask);
+  action.sa_flags = 0;
+  sigaction(SIGINT, &action, nullptr);
+  sigaction(SIGTERM, &action, nullptr);
+}
+
+void start_refresh_loop(int interval_seconds) {
     if (interval_seconds < 10) {
       logger->Warning("Refresh interval " + std::to_string(interval_seconds) + "s is below minimum 10s, using 10s");
       interval_seconds = 10;
@@ -631,7 +680,7 @@ void RunServer(uint16_t port)
   g_is_ready = true;
 
   // Register signal handlers for SIGINT and SIGTERM
-  RegisterShutdownSignalHandlers(g_server);
+  RegisterShutdownSignalHandlers();
 
   g_server->Wait();
   g_is_ready = false;
@@ -640,9 +689,21 @@ void RunServer(uint16_t port)
     g_http_server->stop();
     http_thread.join();
   }
-  // Final shutdown if not already done
-  if (g_server && !g_shutdown_initiated) {
-    g_server->Shutdown();
+
+  // Wait for all components to shut down
+  bool shutdown_clean = WaitForShutdownComplete(g_shutdown_timeout);
+  
+  // Determine exit code
+  if (shutdown_clean) {
+    exit(0);
+  } else {
+    if (g_received_signal == SIGINT) {
+      exit(130);
+    } else if (g_received_signal == SIGTERM) {
+      exit(143);
+    } else {
+      exit(1);
+    }
   }
 }
 }
@@ -692,6 +753,22 @@ int main(int argc, char **argv) {
   if (rates_file != nullptr && strlen(rates_file) > 0) {
     start_refresh_loop(refresh_interval);
     logger->Info("Automatic rate refresh configured with interval " + std::to_string(refresh_interval) + "s");
+  }
+
+  // Parse shutdown timeout configuration
+  const char* shutdown_timeout_env = std::getenv("CURRENCY_SERVICE_SHUTDOWN_TIMEOUT_SEC");
+  if (shutdown_timeout_env != nullptr && strlen(shutdown_timeout_env) > 0) {
+    try {
+      int timeout_val = std::stoi(shutdown_timeout_env);
+      if (timeout_val <= 0) {
+        logger->Warning("Invalid CURRENCY_SERVICE_SHUTDOWN_TIMEOUT_SEC value: " + std::string(shutdown_timeout_env) + ", using default 10s");
+      } else {
+        g_shutdown_timeout = std::chrono::seconds(timeout_val);
+        logger->Info("Using configured shutdown timeout: " + std::to_string(timeout_val) + "s");
+      }
+    } catch (const std::exception& e) {
+      logger->Warning("Invalid CURRENCY_SERVICE_SHUTDOWN_TIMEOUT_SEC value: " + std::string(shutdown_timeout_env) + " is not a valid integer, using default 10s");
+    }
   }
 
   RunServer(port);

@@ -40,4 +40,12 @@ namespace
     auto int_counter = meter->CreateUInt64Counter(counter_name);
     return int_counter;
   }
+
+  bool forceFlushMeter(std::chrono::seconds timeout) noexcept {
+    auto provider = metrics_api::Provider::GetMeterProvider();
+    if (auto sdk_provider = dynamic_cast<metric_sdk::MeterProvider*>(provider.get())) {
+      return sdk_provider->ForceFlush(timeout);
+    }
+    return false;
+  }
 }
