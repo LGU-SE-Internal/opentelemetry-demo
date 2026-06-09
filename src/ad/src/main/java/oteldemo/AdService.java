@@ -78,6 +78,8 @@ import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
 import io.github.resilience4j.retry.Retry;
 import io.github.resilience4j.retry.RetryConfig;
 import io.github.resilience4j.core.IntervalFunction;
+import io.github.resilience4j.ratelimiter.RateLimiter;
+import io.github.resilience4j.ratelimiter.RateLimiterConfig;
 import java.time.Duration;
 
 
@@ -86,12 +88,15 @@ public final class AdService {
   // Resilience4j components
   private static final Retry retry;
   private static final CircuitBreaker circuitBreaker;
+  private static final RateLimiter rateLimiter;
 
   // Configuration from environment variables
   private static final int MAX_RETRY_ATTEMPTS = Integer.parseInt(System.getenv().getOrDefault("AD_SERVICE_UPSTREAM_RETRY_MAX_ATTEMPTS", "3"));
   private static final int INITIAL_RETRY_DELAY_MS = Integer.parseInt(System.getenv().getOrDefault("AD_SERVICE_UPSTREAM_RETRY_INITIAL_DELAY_MS", "100"));
   private static final int CIRCUIT_BREAKER_FAILURE_THRESHOLD = Integer.parseInt(System.getenv().getOrDefault("AD_SERVICE_CIRCUIT_BREAKER_FAILURE_THRESHOLD", "5"));
   private static final int CIRCUIT_BREAKER_RESET_TIMEOUT_MS = Integer.parseInt(System.getenv().getOrDefault("AD_SERVICE_CIRCUIT_BREAKER_RESET_TIMEOUT_MS", "30000"));
+  private static final int RATE_LIMIT_REQUESTS_PER_PERIOD = Integer.parseInt(System.getenv().getOrDefault("AD_SERVICE_RATE_LIMIT_REQUESTS_PER_PERIOD", "1000"));
+  private static final int RATE_LIMIT_PERIOD_DURATION_MS = Integer.parseInt(System.getenv().getOrDefault("AD_SERVICE_RATE_LIMIT_PERIOD_DURATION_MS", "1000"));
 
   static {
     // Configure retry with exponential backoff and jitter
@@ -115,13 +120,25 @@ public final class AdService {
 
     // Configure circuit breaker
     CircuitBreakerConfig circuitBreakerConfig = CircuitBreakerConfig.custom()
-        .failureThresholdCount(CIRCUIT_BREAKER_FAILURE_THRESHOLD) // open after threshold consecutive failures
+        .slidingWindowType(CircuitBreakerConfig.SlidingWindowType.COUNT_BASED)
+        .slidingWindowSize(CIRCUIT_BREAKER_FAILURE_THRESHOLD)
+        .minimumNumberOfCalls(CIRCUIT_BREAKER_FAILURE_THRESHOLD)
+        .failureRateThreshold(100.0f) // Open circuit when all calls in window fail
         .waitDurationInOpenState(Duration.ofMillis(CIRCUIT_BREAKER_RESET_TIMEOUT_MS))
         .permittedNumberOfCallsInHalfOpenState(1)
         .recordExceptions(IOException.class, StatusRuntimeException.class)
         .build();
 
     circuitBreaker = CircuitBreaker.of("adUpstreamCircuitBreaker", circuitBreakerConfig);
+
+    // Configure rate limiter
+    RateLimiterConfig rateLimiterConfig = RateLimiterConfig.custom()
+        .limitForPeriod(RATE_LIMIT_REQUESTS_PER_PERIOD)
+        .limitRefreshPeriod(Duration.ofMillis(RATE_LIMIT_PERIOD_DURATION_MS))
+        .timeoutDuration(Duration.ZERO) // Reject immediately when rate limit is hit
+        .build();
+
+    rateLimiter = RateLimiter.of("adServiceRateLimiter", rateLimiterConfig);
 
     // Add retry event listener to track attempts
     retry.getEventPublisher()
@@ -345,14 +362,35 @@ public final class AdService {
             .clientAuth(ClientAuth.REQUIRE);
         }
         sslContext = sslContextBuilder.build();
-      } catch (FileNotFoundException | CertificateException e) {
-        throw e;
       } catch (Exception e) {
         throw new IllegalArgumentException("Invalid TLS configuration: " + e.getMessage(), e);
       }
     }
 
+    // Rate limiting interceptor
+    class RateLimitInterceptor implements ServerInterceptor {
+      @Override
+      public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(ServerCall<ReqT, RespT> call, Metadata headers, ServerCallHandler<ReqT, RespT> next) {
+        String methodName = call.getMethodDescriptor().getFullMethodName();
+        String remoteAddress = call.getAttributes().get(Grpc.TRANSPORT_ATTR_REMOTE_ADDR).toString();
+
+        if (!rateLimiter.acquirePermission()) {
+          // Rate limit hit
+          logger.warn("event=rate_limit_hit, endpoint={}, remote_address={}, limit={}, period_ms={}",
+              methodName, remoteAddress, RATE_LIMIT_REQUESTS_PER_PERIOD, RATE_LIMIT_PERIOD_DURATION_MS);
+          
+          Span.current().setAttribute("resilience4j.rate_limit.hit", true);
+          
+          call.close(Status.RESOURCE_EXHAUSTED.withDescription("Rate limit exceeded. Try again later."), new Metadata());
+          return new ServerCall.Listener<ReqT>() {};
+        }
+
+        return next.startCall(call, headers);
+      }
+    }
+
     NettyServerBuilder serverBuilder = NettyServerBuilder.forPort(port)
+        .intercept(new RateLimitInterceptor())
         .addService(new AdServiceImpl())
         .addService(healthMgr.getHealthService());
 
@@ -480,8 +518,8 @@ public final class AdService {
         }
 
         List<Ad> allAds = new ArrayList<>();
-        AdRequestType adRequestType;
-        AdResponseType adResponseType;
+        final java.util.concurrent.atomic.AtomicReference<AdRequestType> adRequestType = new java.util.concurrent.atomic.AtomicReference<>();
+        final java.util.concurrent.atomic.AtomicReference<AdResponseType> adResponseType = new java.util.concurrent.atomic.AtomicReference<>();
 
         Baggage baggage = Baggage.fromContextOrNull(Context.current());
         MutableContext evaluationContext = new MutableContext();
@@ -519,18 +557,18 @@ public final class AdService {
                 Collection<Ad> categoryAds = service.getAdsByCategory(req.getContextKeys(i));
                 ads.addAll(categoryAds);
               }
-              adRequestType = AdRequestType.TARGETED;
-              adResponseType = AdResponseType.TARGETED;
+              adRequestType.set(AdRequestType.TARGETED);
+              adResponseType.set(AdResponseType.TARGETED);
             } else {
               logger.info("Non-targeted ad request received, preparing random response.");
               ads = service.getRandomAds();
-              adRequestType = AdRequestType.NOT_TARGETED;
-              adResponseType = AdResponseType.RANDOM;
+              adRequestType.set(AdRequestType.NOT_TARGETED);
+              adResponseType.set(AdResponseType.RANDOM);
             }
             if (ads.isEmpty()) {
               // Serve random ads.
               ads = service.getRandomAds();
-              adResponseType = AdResponseType.RANDOM;
+              adResponseType.set(AdResponseType.RANDOM);
             }
             
             // Throw 1/10 of the time to simulate a failure when the feature flag is enabled
