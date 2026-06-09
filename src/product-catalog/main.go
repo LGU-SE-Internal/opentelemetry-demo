@@ -169,8 +169,8 @@ func runServer(ctx context.Context, port int) error {
 	tlsCfg, err := LoadTLSConfigFromEnv()
 	if err != nil {
 		return fmt.Errorf("invalid TLS configuration: %w", err)
-trateLimiter := NewPerEndpointRateLimiter()
 	}
+	rateLimiter := NewPerEndpointRateLimiter()
 
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
@@ -376,9 +376,9 @@ func main() {
 	tlsCfg, err := LoadTLSConfigFromEnv()
 	if err != nil {
 		logger.Error(fmt.Sprintf("Invalid TLS configuration: %v", err))
-trateLimiter := NewPerEndpointRateLimiter()
 		os.Exit(1)
 	}
+	rateLimiter := NewPerEndpointRateLimiter()
 	
 	logger.Info(fmt.Sprintf("Product Catalog gRPC server started on port: %s", port))
 
