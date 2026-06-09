@@ -15,8 +15,6 @@ using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using System.Threading.Tasks;
 using System.Threading;
 
-using AspNetCoreRateLimit;
-
 using cart.cartstore;
 using cart.services;
 using cart.healthcheck;
@@ -24,6 +22,7 @@ using cart.Interceptors;
 
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Logging;
@@ -269,75 +268,151 @@ builder.Services.AddHealthChecks()
 builder.Services.AddSingleton<HealthServiceImpl>();
 
 // Rate Limiting Configuration
-string redisAddress = builder.Configuration["CART_SERVICE_RATELIMIT_REDIS_ADDRESS"] ?? "redis-cart:6379";
+const string GetCartPolicy = "GetCartPolicy";
+const string AddItemPolicy = "AddItemPolicy";
+const string RemoveItemPolicy = "RemoveItemPolicy";
 
-var rateLimitRules = new List<RateLimitRule>
-{
-    new()
-    {
-        Endpoint = "*/oteldemo.CartService/GetCart",
-        Limit = int.TryParse(builder.Configuration["CART_SERVICE_RATELIMIT_GETCART_MAX"], out int getCartMax) ? getCartMax : 100,
-        Period = int.TryParse(builder.Configuration["CART_SERVICE_RATELIMIT_GETCART_WINDOW_SECONDS"], out int getCartWindow) ? $"{getCartWindow}s" : "60s"
-    },
-    new()
-    {
-        Endpoint = "*/oteldemo.CartService/AddItem",
-        Limit = int.TryParse(builder.Configuration["CART_SERVICE_RATELIMIT_ADDITEM_MAX"], out int addItemMax) ? addItemMax : 50,
-        Period = int.TryParse(builder.Configuration["CART_SERVICE_RATELIMIT_ADDITEM_WINDOW_SECONDS"], out int addItemWindow) ? $"{addItemWindow}s" : "60s"
-    },
-    new()
-    {
-        Endpoint = "*/oteldemo.CartService/RemoveItem",
-        Limit = int.TryParse(builder.Configuration["CART_SERVICE_RATELIMIT_REMOVEITEM_MAX"], out int removeItemMax) ? removeItemMax : 50,
-        Period = int.TryParse(builder.Configuration["CART_SERVICE_RATELIMIT_REMOVEITEM_WINDOW_SECONDS"], out int removeItemWindow) ? $"{removeItemWindow}s" : "60s"
-    },
-    new()
-    {
-        Endpoint = "*/oteldemo.CartService/EmptyCart",
-        Limit = int.TryParse(builder.Configuration["CART_SERVICE_RATELIMIT_EMPTYCART_MAX"], out int emptyCartMax) ? emptyCartMax : 20,
-        Period = int.TryParse(builder.Configuration["CART_SERVICE_RATELIMIT_EMPTYCART_WINDOW_SECONDS"], out int emptyCartWindow) ? $"{emptyCartWindow}s" : "60s"
-    }
-};
+// Load rate limit configuration from environment variables
+int getCartPermitLimit = int.TryParse(builder.Configuration["CART_SERVICE_RATELIMIT_GETCART_PERMITLIMIT"], out int gcl) ? gcl : 100;
+int getCartWindowSeconds = int.TryParse(builder.Configuration["CART_SERVICE_RATELIMIT_GETCART_WINDOWSECONDS"], out int gcw) ? gcw : 10;
 
-builder.Services.AddMemoryCache();
-builder.Services.Configure<IpRateLimitOptions>(options =>
+int addItemPermitLimit = int.TryParse(builder.Configuration["CART_SERVICE_RATELIMIT_ADDITEM_PERMITLIMIT"], out int ail) ? ail : 100;
+int addItemWindowSeconds = int.TryParse(builder.Configuration["CART_SERVICE_RATELIMIT_ADDITEM_WINDOWSECONDS"], out int aiw) ? aiw : 10;
+
+int removeItemPermitLimit = int.TryParse(builder.Configuration["CART_SERVICE_RATELIMIT_REMOVEITEM_PERMITLIMIT"], out int ril) ? ril : 100;
+int removeItemWindowSeconds = int.TryParse(builder.Configuration["CART_SERVICE_RATELIMIT_REMOVEITEM_WINDOWSECONDS"], out int riw) ? riw : 10;
+
+builder.Services.AddRateLimiter(rateLimiterOptions =>
 {
-    options.GeneralRules = rateLimitRules;
-    options.QuotaExceededResponse = new QuotaExceededResponse
+    rateLimiterOptions.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    
+    rateLimiterOptions.AddFixedWindowLimiter(policyName: GetCartPolicy, options =>
     {
-        StatusCode = StatusCodes.Status429TooManyRequests,
-        ContentType = "application/grpc",
-        Content = "Rate limit exceeded for endpoint {0}. Try again later."
+        options.PermitLimit = getCartPermitLimit;
+        options.Window = TimeSpan.FromSeconds(getCartWindowSeconds);
+        options.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
+        options.QueueLimit = 0;
+    });
+    
+    rateLimiterOptions.AddFixedWindowLimiter(policyName: AddItemPolicy, options =>
+    {
+        options.PermitLimit = addItemPermitLimit;
+        options.Window = TimeSpan.FromSeconds(addItemWindowSeconds);
+        options.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
+        options.QueueLimit = 0;
+    });
+    
+    rateLimiterOptions.AddFixedWindowLimiter(policyName: RemoveItemPolicy, options =>
+    {
+        options.PermitLimit = removeItemPermitLimit;
+        options.Window = TimeSpan.FromSeconds(removeItemWindowSeconds);
+        options.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
+        options.QueueLimit = 0;
+    });
+    
+    // Create partition key based on client IP and endpoint
+    rateLimiterOptions.AddPolicy<string, RateLimitPartitionKeyPolicy>(GetCartPolicy);
+    rateLimiterOptions.AddPolicy<string, RateLimitPartitionKeyPolicy>(AddItemPolicy);
+    rateLimiterOptions.AddPolicy<string, RateLimitPartitionKeyPolicy>(RemoveItemPolicy);
+    
+    // On rejected request, return appropriate gRPC status and log
+    rateLimiterOptions.OnRejected = async (context, cancellationToken) =>
+    {
+        var httpContext = context.HttpContext;
+        var endpoint = httpContext.GetEndpoint();
+        var logger = httpContext.RequestServices.GetRequiredService<ILogger<Program>>();
+        
+        string endpointName = endpoint?.DisplayName ?? "Unknown";
+        var clientIp = httpContext.Connection.RemoteIpAddress?.ToString() ?? "Unknown";
+        var requestId = httpContext.TraceIdentifier;
+        
+        // Get applied limit and window based on policy
+        var policyName = endpoint?.Metadata.GetMetadata<RateLimiterMetadata>()?.PolicyName;
+        int appliedLimit = 100;
+        int appliedWindow = 10;
+        
+        if (policyName == GetCartPolicy)
+        {
+            appliedLimit = getCartPermitLimit;
+            appliedWindow = getCartWindowSeconds;
+        }
+        else if (policyName == AddItemPolicy)
+        {
+            appliedLimit = addItemPermitLimit;
+            appliedWindow = addItemWindowSeconds;
+        }
+        else if (policyName == RemoveItemPolicy)
+        {
+            appliedLimit = removeItemPermitLimit;
+            appliedWindow = removeItemWindowSeconds;
+        }
+        
+        // Log structured rate limit event
+        logger.LogInformation(
+            "RateLimitExceeded: Endpoint={EndpointName}, ClientIp={ClientIpAddress}, RequestId={RequestId}, Limit={AppliedPermitLimit}, Window={AppliedWindowSeconds}s",
+            endpointName, clientIp, requestId, appliedLimit, appliedWindow);
+        
+        // Return gRPC RESOURCE_EXHAUSTED status
+        httpContext.Response.ContentType = "application/grpc";
+        httpContext.Response.Headers["grpc-status"] = ((int)StatusCode.ResourceExhausted).ToString();
+        httpContext.Response.Headers["grpc-message"] = $"Rate limit exceeded for endpoint {endpointName}. Please try again later.";
+        
+        await Task.CompletedTask;
     };
-    options.ClientIdHeader = null;
-    options.RealIpHeader = "X-Forwarded-For";
-    options.IpPolicyPrefix = "cart-ratelimit";
 });
 
-builder.Services.Configure<IpRateLimitPolicies>(options => { });
-
-// Use Redis for distributed rate limiting
-builder.Services.AddSingleton<IIpPolicyStore, DistributedCacheIpPolicyStore>();
-builder.Services.AddSingleton<IRateLimitCounterStore, DistributedCacheRateLimitCounterStore>();
-builder.Services.AddSingleton<IRateLimitConfiguration, RateLimitConfiguration>();
-builder.Services.AddStackExchangeRedisCache(options =>
-{
-    options.Configuration = redisAddress;
-    options.InstanceName = "cart-service-ratelimit:";
-});
-
-// Add rate limiting gRPC interceptor
+// Add HTTP context accessor for IP extraction
 builder.Services.AddHttpContextAccessor();
-builder.Services.AddSingleton<IIpRateLimitProcessor, IpRateLimitProcessor>();
-builder.Services.AddSingleton<RateLimitInterceptor>();
+
+// Custom partition key policy that combines client IP and endpoint
+public class RateLimitPartitionKeyPolicy : IRateLimiterPolicy<string>
+{
+    public Func<OnRejectedContext, CancellationToken, ValueTask>? OnRejected { get; }
+    
+    public RateLimitPartition<string> GetPartition(HttpContext httpContext)
+    {
+        var clientIp = httpContext.Connection.RemoteIpAddress?.ToString() ?? string.Empty;
+        var endpoint = httpContext.GetEndpoint()?.DisplayName ?? string.Empty;
+        var partitionKey = $"{clientIp}_{endpoint}";
+        
+        var policyName = httpContext.GetEndpoint()?.Metadata.GetMetadata<RateLimiterMetadata>()?.PolicyName;
+        
+        // Get the policy options based on policy name
+        return policyName switch
+        {
+            GetCartPolicy => RateLimitPartition.GetFixedWindowLimiter(partitionKey, _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = getCartPermitLimit,
+                Window = TimeSpan.FromSeconds(getCartWindowSeconds),
+                QueueLimit = 0
+            }),
+            AddItemPolicy => RateLimitPartition.GetFixedWindowLimiter(partitionKey, _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = addItemPermitLimit,
+                Window = TimeSpan.FromSeconds(addItemWindowSeconds),
+                QueueLimit = 0
+            }),
+            RemoveItemPolicy => RateLimitPartition.GetFixedWindowLimiter(partitionKey, _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = removeItemPermitLimit,
+                Window = TimeSpan.FromSeconds(removeItemWindowSeconds),
+                QueueLimit = 0
+            }),
+            _ => RateLimitPartition.GetNoLimiter(partitionKey)
+        };
+    }
+}
+
 builder.Services.AddGrpc(options =>
 {
-    options.Interceptors.Add<RateLimitInterceptor>();
     options.EnableDetailedErrors = true;
 })
 .AddFluentValidation();
 
 var app = builder.Build();
+
+// Use rate limiting middleware
+app.UseRateLimiter();
 
 // Register shutdown handlers
 var lifetime = app.Services.GetRequiredService<IHostApplicationLifetime>();

@@ -7,6 +7,7 @@ using Grpc.Core;
 using cart.cartstore;
 using OpenFeature;
 using Oteldemo;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace cart.services;
 
@@ -25,6 +26,7 @@ public class CartService : Oteldemo.CartService.CartServiceBase
         _featureFlagHelper = featureFlagService;
     }
 
+    [EnableRateLimiting("AddItemPolicy")]
     public override async Task<Cart> AddItem(AddItemRequest request, ServerCallContext context)
     {
         var activity = Activity.Current;
@@ -63,6 +65,7 @@ public class CartService : Oteldemo.CartService.CartServiceBase
         }
     }
 
+    [EnableRateLimiting("GetCartPolicy")]
     public override async Task<Cart> GetCart(GetCartRequest request, ServerCallContext context)
     {
         var activity = Activity.Current;
@@ -86,6 +89,36 @@ public class CartService : Oteldemo.CartService.CartServiceBase
             activity?.SetTag("demo.cart.items.count", totalCart);
 
             return cart;
+        }
+        catch (RpcException ex)
+        {
+            activity?.AddException(ex);
+            activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
+            throw;
+        }
+    }
+
+    [EnableRateLimiting("RemoveItemPolicy")]
+    public override async Task<Empty> RemoveItem(RemoveItemRequest request, ServerCallContext context)
+    {
+        var activity = Activity.Current;
+        activity?.SetTag("user.id", request.UserId);
+        activity?.SetTag("demo.product.id", request.ProductId);
+
+        // Validate inputs
+        if (string.IsNullOrWhiteSpace(request.UserId))
+        {
+            throw new RpcException(new Status(StatusCode.InvalidArgument, "User ID must not be empty or contain only whitespace"));
+        }
+        if (string.IsNullOrWhiteSpace(request.ProductId))
+        {
+            throw new RpcException(new Status(StatusCode.InvalidArgument, "Product ID must not be empty or contain only whitespace"));
+        }
+
+        try
+        {
+            await _cartStore.RemoveItemAsync(request.UserId, request.ProductId);
+            return Empty;
         }
         catch (RpcException ex)
         {
