@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: accounting-service
+  labels:
+    app.kubernetes.io/name: accounting-service
+    app.kubernetes.io/component: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: accounting-service
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: accounting-service
+        app.kubernetes.io/component: backend
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        privileged: false
+      containers:
+      - name: accounting-service
+        image: ghcr.io/lgu-se-internal/opentelemetry-demo/accounting-service:latest
+        ports:
+        - containerPort: 8080
+          name: http
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "500m"
+            memory: "256Mi"
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          failureThreshold: 2
+        env:
+        - name: ACCOUNTING_OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://otel-collector:4317"
+        - name: ACCOUNTING_DATABASE_CONNECTION_STRING
+          value: "Server=postgres;Port=5432;Database=accounting;User Id=postgres;Password=;"
+        - name: ACCOUNTING_SERVICE_NAME
+          value: "accounting-service"
+        - name: ACCOUNTING_LOG_LEVEL
+          value: "Information"
