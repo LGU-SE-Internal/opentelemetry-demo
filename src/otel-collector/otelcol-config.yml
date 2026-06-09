@@ -16,9 +16,7 @@ receivers:
       http:
         endpoint: ${env:OTEL_COLLECTOR_HOST}:${env:OTEL_COLLECTOR_PORT_HTTP}
         cors:
-          allowed_origins:
-            - "http://*"
-            - "https://*"
+          allowed_origins: ${env:OTEL_OTLP_HTTP_CORS_ALLOWED_ORIGINS:-*}
   http_check/frontend-proxy:
     targets:
       - endpoint: http://${env:FRONTEND_PROXY_ADDR}
@@ -30,7 +28,7 @@ receivers:
     # https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/44511
     api_version: "1.44"
   redis:
-    endpoint: "valkey-cart:6379"
+    endpoint: ${env:OTEL_REDIS_RECEIVER_ENDPOINT:-valkey-cart:6379}
     username: "valkey"
     collection_interval: 10s
   postgresql:

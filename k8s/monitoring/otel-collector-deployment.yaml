@@ -72,6 +72,10 @@ spec:
         env:
         - name: GOMEMLIMIT
           value: "160MiB"
+        - name: OTEL_REDIS_RECEIVER_ENDPOINT
+          value: ""
+        - name: OTEL_OTLP_HTTP_CORS_ALLOWED_ORIGINS
+          value: ""
       volumes:
       - name: otel-collector-config
         configMap:
