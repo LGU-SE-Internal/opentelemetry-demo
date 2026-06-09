@@ -150,11 +150,6 @@ func (l *perEndpointRateLimiter) updateRPSGauges() {
 
 func RateLimitInterceptor(limiter *perEndpointRateLimiter) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
-		if limiter.defaultLimit == rate.Inf && len(limiter.limiters) == 0 {
-			// No rate limits configured, skip processing
-			return handler(ctx, req)
-		}
-
 		endpoint := info.FullMethod
 		if !limiter.Allow(endpoint) {
 			// Increment exceeded counter
