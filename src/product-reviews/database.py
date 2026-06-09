@@ -134,7 +134,41 @@ def must_map_env(key: str):
     return value
 
 # Retrieve Postgres environment variables
-db_connection_str = must_map_env('DB_CONNECTION_STRING')
+base_db_conn_str = must_map_env('DB_CONNECTION_STRING')
+
+# TLS configuration for PostgreSQL
+db_tls_mode = os.environ.get('PRODUCT_REVIEWS_DB_TLS_MODE', 'disable')
+db_tls_ca_cert = os.environ.get('PRODUCT_REVIEWS_DB_TLS_CA_CERT_PATH')
+db_tls_client_cert = os.environ.get('PRODUCT_REVIEWS_DB_TLS_CLIENT_CERT_PATH')
+db_tls_client_key = os.environ.get('PRODUCT_REVIEWS_DB_TLS_CLIENT_KEY_PATH')
+
+# Build connection string with TLS parameters
+db_connection_str = base_db_conn_str
+tls_params = []
+
+if db_tls_mode != 'disable':
+    tls_params.append(f'sslmode={db_tls_mode}')
+    if db_tls_ca_cert:
+        # Validate CA cert exists and is readable
+        if not os.path.exists(db_tls_ca_cert) or not os.access(db_tls_ca_cert, os.R_OK):
+            raise Exception(f"TLS configuration error: CA certificate file is missing or unreadable (path: {db_tls_ca_cert})")
+        tls_params.append(f'sslrootcert={db_tls_ca_cert}')
+    if db_tls_client_cert and db_tls_client_key:
+        # Validate client cert and key exist and are readable
+        if not os.path.exists(db_tls_client_cert) or not os.access(db_tls_client_cert, os.R_OK):
+            raise Exception(f"TLS configuration error: Client certificate file is missing or unreadable (path: {db_tls_client_cert})")
+        if not os.path.exists(db_tls_client_key) or not os.access(db_tls_client_key, os.R_OK):
+            raise Exception(f"TLS configuration error: Client private key file is missing or unreadable (path: {db_tls_client_key})")
+        tls_params.append(f'sslcert={db_tls_client_cert}')
+        tls_params.append(f'sslkey={db_tls_client_key}')
+    elif db_tls_client_cert or db_tls_client_key:
+        raise Exception("TLS configuration error: Both client certificate and private key must be provided for database mTLS")
+
+if tls_params:
+    if '?' in db_connection_str:
+        db_connection_str += '&' + '&'.join(tls_params)
+    else:
+        db_connection_str += '?' + '&'.join(tls_params)
 
 def fetch_product_reviews(product_id):
     try:
