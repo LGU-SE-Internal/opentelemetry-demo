@@ -127,7 +127,7 @@ func isTransientPostgresError(err error) bool {
 	}
 
 	// Check for context deadline exceeded errors
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, pgconn.ErrTimeout) {
+	if errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
 
@@ -536,7 +536,12 @@ func main() {
 		logger.Error(err.Error())
 	}
 
-	svc := &productCatalog{}
+	// Initialize retry middleware
+	retryMiddleware := NewPostgresRetryMiddleware(nil)
+	
+	svc := &productCatalog{
+		retryMiddleware: retryMiddleware,
+	}
 	var port string
 	mustMapEnv(&port, "PRODUCT_CATALOG_PORT")
 	
@@ -869,7 +874,12 @@ func (p *productCatalog) ListProducts(ctx context.Context, req *pb.ListProductsR
 	}
 	span := trace.SpanFromContext(ctx)
 
-	products, err := loadProductsFromDB(ctx)
+	var products []*pb.Product
+	err := p.retryMiddleware.Execute(ctx, "ListProducts", true, func() error {
+		var innerErr error
+		products, innerErr = loadProductsFromDB(ctx)
+		return innerErr
+	})
 	if err != nil {
 		span.SetStatus(otelcodes.Error, err.Error())
 		return nil, status.Errorf(codes.Internal, "failed to load products: %v", err)
@@ -902,7 +912,12 @@ func (p *productCatalog) GetProduct(ctx context.Context, req *pb.GetProductReque
 		return nil, status.Error(codes.Internal, msg)
 	}
 
-	found, err := getProductFromDB(ctx, req.Id)
+	var found *pb.Product
+	err := p.retryMiddleware.Execute(ctx, "GetProduct", true, func() error {
+		var innerErr error
+		found, innerErr = getProductFromDB(ctx, req.Id)
+		return innerErr
+	})
 	if err != nil {
 		msg := fmt.Sprintf("Product Not Found: %s", req.Id)
 		span.SetStatus(otelcodes.Error, msg)
@@ -934,7 +949,12 @@ func (p *productCatalog) SearchProducts(ctx context.Context, req *pb.SearchProdu
 	}
 	span := trace.SpanFromContext(ctx)
 
-	result, err := searchProductsFromDB(ctx, req.Query)
+	var result []*pb.Product
+	err := p.retryMiddleware.Execute(ctx, "SearchProducts", true, func() error {
+		var innerErr error
+		result, innerErr = searchProductsFromDB(ctx, req.Query)
+		return innerErr
+	})
 	if err != nil {
 		span.SetStatus(otelcodes.Error, err.Error())
 		return nil, status.Errorf(codes.Internal, "failed to search products: %v", err)
