@@ -362,8 +362,6 @@ public final class AdService {
             .clientAuth(ClientAuth.REQUIRE);
         }
         sslContext = sslContextBuilder.build();
-      } catch (FileNotFoundException | CertificateException e) {
-        throw e;
       } catch (Exception e) {
         throw new IllegalArgumentException("Invalid TLS configuration: " + e.getMessage(), e);
       }
@@ -520,8 +518,8 @@ public final class AdService {
         }
 
         List<Ad> allAds = new ArrayList<>();
-        AdRequestType adRequestType;
-        AdResponseType adResponseType;
+        final java.util.concurrent.atomic.AtomicReference<AdRequestType> adRequestType = new java.util.concurrent.atomic.AtomicReference<>();
+        final java.util.concurrent.atomic.AtomicReference<AdResponseType> adResponseType = new java.util.concurrent.atomic.AtomicReference<>();
 
         Baggage baggage = Baggage.fromContextOrNull(Context.current());
         MutableContext evaluationContext = new MutableContext();
@@ -559,18 +557,18 @@ public final class AdService {
                 Collection<Ad> categoryAds = service.getAdsByCategory(req.getContextKeys(i));
                 ads.addAll(categoryAds);
               }
-              adRequestType = AdRequestType.TARGETED;
-              adResponseType = AdResponseType.TARGETED;
+              adRequestType.set(AdRequestType.TARGETED);
+              adResponseType.set(AdResponseType.TARGETED);
             } else {
               logger.info("Non-targeted ad request received, preparing random response.");
               ads = service.getRandomAds();
-              adRequestType = AdRequestType.NOT_TARGETED;
-              adResponseType = AdResponseType.RANDOM;
+              adRequestType.set(AdRequestType.NOT_TARGETED);
+              adResponseType.set(AdResponseType.RANDOM);
             }
             if (ads.isEmpty()) {
               // Serve random ads.
               ads = service.getRandomAds();
-              adResponseType = AdResponseType.RANDOM;
+              adResponseType.set(AdResponseType.RANDOM);
             }
             
             // Throw 1/10 of the time to simulate a failure when the feature flag is enabled
