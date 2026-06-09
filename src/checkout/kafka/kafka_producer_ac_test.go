@@ -5,8 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Shopify/sarama"
+	"github.com/IBM/sarama"
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )
@@ -327,7 +328,12 @@ func getCounterValue(counter prometheus.Counter) float64 {
 	metricChan := make(chan prometheus.Metric, 1)
 	counter.Collect(metricChan)
 	metric := <-metricChan
-	var metricValue float64
-	metric.Write(&prometheus.Metric{}) // Dummy write, replace with actual value extraction
-	return metricValue
+	
+	// Extract the counter value
+	metricDto := &dto.Metric{}
+	err := metric.Write(metricDto)
+	if err != nil {
+		return 0
+	}
+	return metricDto.Counter.GetValue()
 }
