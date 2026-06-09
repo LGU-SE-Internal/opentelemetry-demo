@@ -170,7 +170,10 @@ func runServer(ctx context.Context, port int) error {
 	if err != nil {
 		return fmt.Errorf("invalid TLS configuration: %w", err)
 	}
-	rateLimiter := NewPerEndpointRateLimiter()
+	rateLimiter, err := NewRateLimiterFromEnv()
+	if err != nil {
+		return fmt.Errorf("failed to create rate limiter: %w", err)
+	}
 
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
@@ -385,8 +388,13 @@ func main() {
 		logger.Error(fmt.Sprintf("Invalid TLS configuration: %v", err))
 		os.Exit(1)
 	}
-	rateLimiter := NewPerEndpointRateLimiter()
-	
+	// Load rate limiter configuration from environment variables
+	rateLimiter, err := NewRateLimiterFromEnv()
+	if err != nil {
+		logger.Error(fmt.Sprintf("Failed to initialize rate limiter: %v", err))
+		os.Exit(1)
+	}
+
 	logger.Info(fmt.Sprintf("Product Catalog gRPC server started on port: %s", port))
 
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%s", port))

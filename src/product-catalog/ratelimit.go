@@ -1,6 +1,5 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
-
 package main
 
 import (
@@ -21,21 +20,18 @@ import (
 )
 
 type perEndpointRateLimiter struct {
-	limiters     map[string]*rate.Limiter
 	defaultLimit rate.Limit
+	limiters     map[string]*rate.Limiter
 	mu           sync.RWMutex
-	requestCounts map[string]*count
-	countMu      sync.Mutex
-}
-
-type count struct {
-	value int64
-	lastReset time.Time
+	// For RPS tracking
+	requestCounts map[string]int64
+	countMu       sync.Mutex
+	lastReset     time.Time
 }
 
 var (
 	rateLimitExceededCounter metric.Int64Counter
-	rateLimitCurrentRPSGauge metric.Float64Gauge
+	currentRPSGauge          metric.Float64Gauge
 )
 
 func initMetrics(meter metric.Meter) error {
@@ -48,7 +44,7 @@ func initMetrics(meter metric.Meter) error {
 		return err
 	}
 
-	rateLimitCurrentRPSGauge, err = meter.Float64Gauge(
+	currentRPSGauge, err = meter.Float64Gauge(
 		"product_catalog_rate_limit_current_rps",
 		metric.WithDescription("Current measured requests per second for each endpoint over 10s window"),
 	)
@@ -59,100 +55,139 @@ func initMetrics(meter metric.Meter) error {
 	return nil
 }
 
-func NewPerEndpointRateLimiter() *perEndpointRateLimiter {
-	defaultLimit := rate.Inf
+func NewRateLimiterFromEnv() (*perEndpointRateLimiter, error) {
+	defaultRPS := 0
 	defaultRPSStr := os.Getenv("PRODUCT_CATALOG_RATELIMIT_DEFAULT_RPS")
 	if defaultRPSStr != "" {
-		if rps, err := strconv.Atoi(defaultRPSStr); err == nil && rps > 0 {
-			defaultLimit = rate.Limit(rps)
+		val, err := strconv.Atoi(defaultRPSStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid default rate limit value: %w", err)
 		}
+		defaultRPS = val
 	}
 
 	limiter := &perEndpointRateLimiter{
+		defaultLimit:  rate.Limit(defaultRPS),
 		limiters:      make(map[string]*rate.Limiter),
-		defaultLimit:  defaultLimit,
-		requestCounts: make(map[string]*count),
+		requestCounts: make(map[string]int64),
+		lastReset:     time.Now(),
 	}
 
-	// Start background goroutine to update RPS gauge every second
-	go func() {
-		ticker := time.NewTicker(1 * time.Second)
-		defer ticker.Stop()
-		for range ticker.C {
-			limiter.updateRPSGauges()
+	// Load endpoint-specific limits
+	for _, e := range os.Environ() {
+		pair := strings.SplitN(e, "=", 2)
+		if len(pair) != 2 {
+			continue
 		}
-	}()
+		key := pair[0]
+		value := pair[1]
 
-	return limiter
-}
+		if strings.HasPrefix(key, "PRODUCT_CATALOG_RATELIMIT_") && strings.HasSuffix(key, "_RPS") {
+			if key == "PRODUCT_CATALOG_RATELIMIT_DEFAULT_RPS" {
+				continue
+			}
 
-func (l *perEndpointRateLimiter) getLimiter(endpoint string) *rate.Limiter {
-	l.mu.RLock()
-	lim, exists := l.limiters[endpoint]
-	l.mu.RUnlock()
-	if exists {
-		return lim
-	}
+			endpointName := strings.TrimSuffix(strings.TrimPrefix(key, "PRODUCT_CATALOG_RATELIMIT_"), "_RPS")
+			endpointName = strings.ReplaceAll(endpointName, "_", "/")
 
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if lim, exists := l.limiters[endpoint]; exists {
-		return lim
-	}
+			rps, err := strconv.Atoi(value)
+			if err != nil {
+				return nil, fmt.Errorf("invalid rate limit for endpoint %s: %w", endpointName, err)
+			}
+			if rps <= 0 {
+				continue
+			}
 
-	// Check for endpoint specific env var
-	envKey := fmt.Sprintf("PRODUCT_CATALOG_RATELIMIT_%s_RPS", strings.ToUpper(strings.ReplaceAll(endpoint, "/", "_")))
-	limit := l.defaultLimit
-	if rpsStr := os.Getenv(envKey); rpsStr != "" {
-		if rps, err := strconv.Atoi(rpsStr); err == nil && rps > 0 {
-			limit = rate.Limit(rps)
+			limiter.limiters[endpointName] = rate.NewLimiter(rate.Limit(rps), rps)
 		}
 	}
 
-	lim = rate.NewLimiter(limit, int(limit)) // Burst size equal to RPS
-	l.limiters[endpoint] = lim
-	return lim
+	// Start RPS calculation goroutine
+	go limiter.calculateRPSLoop()
+
+	return limiter, nil
 }
 
 func (l *perEndpointRateLimiter) Allow(endpoint string) bool {
-	lim := l.getLimiter(endpoint)
-	allowed := lim.Allow()
+	l.mu.RLock()
+	lim, ok := l.limiters[endpoint]
+	l.mu.RUnlock()
 
-	// Track request count for RPS calculation
-	l.countMu.Lock()
-	defer l.countMu.Unlock()
-	c, exists := l.requestCounts[endpoint]
-	if !exists {
-		c = &count{lastReset: time.Now()}
-		l.requestCounts[endpoint] = c
+	if !ok {
+		if l.defaultLimit <= 0 {
+			// No limit configured, allow all
+			l.recordRequest(endpoint)
+			return true
+		}
+		// Create new limiter for this endpoint with default limit
+		l.mu.Lock()
+		lim = rate.NewLimiter(l.defaultLimit, int(l.defaultLimit))
+		l.limiters[endpoint] = lim
+		l.mu.Unlock()
 	}
-	c.value++
 
+	allowed := lim.Allow()
+	if allowed {
+		l.recordRequest(endpoint)
+	}
 	return allowed
 }
 
-func (l *perEndpointRateLimiter) updateRPSGauges() {
+func (l *perEndpointRateLimiter) recordRequest(endpoint string) {
 	l.countMu.Lock()
 	defer l.countMu.Unlock()
+	l.requestCounts[endpoint]++
+}
 
-	now := time.Now()
-	for endpoint, c := range l.requestCounts {
-		duration := now.Sub(c.lastReset).Seconds()
-		if duration >= 10 {
-			rps := float64(c.value) / duration
-			rateLimitCurrentRPSGauge.Record(context.Background(), rps, metric.WithAttributes(attribute.String("endpoint", endpoint)))
-			// Reset count
-			c.value = 0
-			c.lastReset = now
+func (l *perEndpointRateLimiter) calculateRPSLoop() {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	window := 10 * time.Second
+	var windows []map[string]int64
+
+	for range ticker.C {
+		l.countMu.Lock()
+		currentCounts := make(map[string]int64, len(l.requestCounts))
+		for k, v := range l.requestCounts {
+			currentCounts[k] = v
+		}
+		l.requestCounts = make(map[string]int64)
+		l.countMu.Unlock()
+
+		// Add current window
+		windows = append(windows, currentCounts)
+		// Keep only last 10 windows
+		if len(windows) > 10 {
+			windows = windows[1:]
+		}
+
+		// Calculate total over window
+		totals := make(map[string]int64)
+		for _, w := range windows {
+			for k, v := range w {
+				totals[k] += v
+			}
+		}
+
+		// Update gauge
+		for endpoint, total := range totals {
+			rps := float64(total) / window.Seconds()
+			currentRPSGauge.Record(context.Background(), rps, metric.WithAttributes(attribute.String("endpoint", endpoint)))
 		}
 	}
 }
 
 func RateLimitInterceptor(limiter *perEndpointRateLimiter) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+		if limiter == nil {
+			// No limiter configured, pass through
+			return handler(ctx, req)
+		}
+
 		endpoint := info.FullMethod
 		if !limiter.Allow(endpoint) {
-			// Increment exceeded counter
+			// Increment counter
 			rateLimitExceededCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("endpoint", endpoint)))
 			return nil, status.Errorf(codes.ResourceExhausted, "rate limit exceeded for endpoint %s", endpoint)
 		}
