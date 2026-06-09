@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "NODE_OPTIONS='--require ./utils/telemetry/Instrumentation.js' next dev",
     "build": "next build",
-    "start": "node --require ./Instrumentation.js server.js",
+    "start": "ts-node --require ./Instrumentation.js server.ts",
     "lint": "next lint",
     "test": "jest",
     "cy:open": "cypress open",
@@ -72,6 +72,7 @@
     "jest": "^30.4.2",
     "supertest": "^7.2.2",
     "ts-jest": "^29.4.11",
+    "ts-node": "^10.9.2",
     "ts-proto": "2.11.8",
     "typescript": "^6.0.3"
   },
