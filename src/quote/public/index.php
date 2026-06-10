@@ -102,6 +102,38 @@ $app = Bridge::create($container);
 $routes = require __DIR__ . '/../app/routes.php';
 $routes($app);
 
+// Track HTTP request metrics globally
+global $httpRequestMetrics;
+$httpRequestMetrics = [];
+
+// Middleware to track HTTP request metrics
+$app->add(function (ServerRequestInterface $request, Psr\Http\Server\RequestHandlerInterface $handler) {
+    global $httpRequestMetrics;
+    
+    $response = $handler->handle($request);
+    $statusCode = $response->getStatusCode();
+    $method = $request->getMethod();
+    $route = $request->getUri()->getPath();
+    
+    // Create metric key
+    $key = md5($method . '|' . $route . '|' . $statusCode);
+    
+    if (!isset($httpRequestMetrics[$key])) {
+        $httpRequestMetrics[$key] = [
+            'labels' => [
+                'http_method' => $method,
+                'http_route' => $route,
+                'http_status_code' => (string)$statusCode
+            ],
+            'value' => 0
+        ];
+    }
+    
+    $httpRequestMetrics[$key]['value']++;
+    
+    return $response;
+});
+
 // Register middleware
 $app->addRoutingMiddleware();
 
