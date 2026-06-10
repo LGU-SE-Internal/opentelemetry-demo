@@ -4,6 +4,9 @@ go 1.25.0
 
 require (
 	github.com/IBM/sarama v1.42.1
+	github.com/afex/hystrix-go v0.0.0-20180502004556-fa1af6a1f4f5
+	github.com/caarlos0/env/v10 v10.0.0
+	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/prometheus/client_golang v1.19.1
 	github.com/stretchr/testify v1.11.1
 	go.opentelemetry.io/otel/trace v1.44.0
@@ -33,6 +36,7 @@ require (
 	github.com/prometheus/common v0.48.0 // indirect
 	github.com/prometheus/procfs v0.12.0 // indirect
 	github.com/rcrowley/go-metrics v0.0.0-20201227073835-cf1acfcdf475 // indirect
+	github.com/smartystreets/goconvey v1.8.1 // indirect
 	github.com/stretchr/objx v0.5.2 // indirect
 	go.opentelemetry.io/otel v1.44.0 // indirect
 	go.uber.org/multierr v1.10.0 // indirect
