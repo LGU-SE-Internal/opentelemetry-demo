@@ -119,6 +119,120 @@ namespace
   nostd::unique_ptr<metrics_api::Counter<uint64_t>> currency_counter;
   nostd::shared_ptr<opentelemetry::logs::Logger> logger;
 
+  // Rate limiting configuration
+  int g_rate_limit_rps = 0;
+  nostd::unique_ptr<metrics_api::Counter<uint64_t>> g_rate_limited_counter;
+
+  // Thread-safe token bucket rate limiter
+  class TokenBucket {
+  public:
+    explicit TokenBucket(int max_tokens) : max_tokens_(max_tokens), tokens_(max_tokens), last_refill_(std::chrono::steady_clock::now()) {}
+
+    bool try_consume() {
+      std::lock_guard<std::mutex> lock(mutex_);
+      refill_tokens();
+      if (tokens_ >= 1) {
+        tokens_--;
+        return true;
+      }
+      return false;
+    }
+
+  private:
+    void refill_tokens() {
+      auto now = std::chrono::steady_clock::now();
+      auto duration = std::chrono::duration_cast<std::chrono::seconds>(now - last_refill_);
+      if (duration.count() >= 1) {
+        tokens_ = max_tokens_;
+        last_refill_ = now;
+      }
+    }
+
+    int max_tokens_;
+    int tokens_;
+    std::chrono::steady_clock::time_point last_refill_;
+    std::mutex mutex_;
+  };
+
+  std::unordered_map<std::string, std::unique_ptr<TokenBucket>> g_rate_limiters;
+  std::shared_mutex g_rate_limiters_mutex;
+
+  // Extract client IP from gRPC peer string
+  std::string extract_client_ip(const std::string& peer) {
+    size_t ipv4_pos = peer.find("ipv4:");
+    if (ipv4_pos != std::string::npos) {
+      size_t ip_end = peer.find(':', ipv4_pos + 5);
+      if (ip_end != std::string::npos) {
+        return peer.substr(ipv4_pos + 5, ip_end - (ipv4_pos + 5));
+      }
+    }
+    size_t ipv6_pos = peer.find("ipv6:");
+    if (ipv6_pos != std::string::npos) {
+      size_t ip_end = peer.find(']', ipv6_pos + 5);
+      if (ip_end != std::string::npos) {
+        return peer.substr(ipv6_pos + 5, ip_end - (ipv6_pos + 5));
+      }
+    }
+    return peer; // Fallback to full peer string if parsing fails
+  }
+
+  // Rate limiting gRPC interceptor
+  class RateLimitInterceptor : public grpc::experimental::Interceptor {
+  public:
+    void Intercept(grpc::experimental::InterceptorBatchMethods* methods) override {
+      if (methods->QueryInterceptionHookPoint(grpc::experimental::InterceptionHookPoints::PRE_SEND_INITIAL_METADATA)) {
+        auto* context = methods->GetServerContext();
+        std::string peer = context->peer();
+        std::string client_ip = extract_client_ip(peer);
+        std::string method_name = context->method();
+
+        // Skip rate limiting if disabled
+        if (g_rate_limit_rps <= 0) {
+          methods->Proceed();
+          return;
+        }
+
+        // Get or create rate limiter for this IP
+        std::shared_lock<std::shared_mutex> read_lock(g_rate_limiters_mutex);
+        auto it = g_rate_limiters.find(client_ip);
+        if (it == g_rate_limiters.end()) {
+          read_lock.unlock();
+          std::unique_lock<std::shared_mutex> write_lock(g_rate_limiters_mutex);
+          // Check again after acquiring write lock to avoid race
+          it = g_rate_limiters.find(client_ip);
+          if (it == g_rate_limiters.end()) {
+            it = g_rate_limiters.emplace(client_ip, std::make_unique<TokenBucket>(g_rate_limit_rps)).first;
+          }
+        }
+
+        if (!it->second->try_consume()) {
+          // Rate limit exceeded
+          std::string error_msg = "Rate limit exceeded: maximum " + std::to_string(g_rate_limit_rps) + " requests per second per IP address";
+          methods->ModifySendStatus(grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, error_msg));
+          
+          // Increment metric
+          std::map<std::string, std::string> labels = {
+            {"ip_address", client_ip},
+            {"endpoint", method_name}
+          };
+          g_rate_limited_counter->Add(1, labels);
+          return;
+        }
+
+        methods->Proceed();
+      } else {
+        methods->Proceed();
+      }
+    }
+  };
+
+  class RateLimitInterceptorFactory : public grpc::experimental::ServerInterceptorFactoryInterface {
+  public:
+    grpc::experimental::Interceptor* CreateServerInterceptor(grpc::experimental::ServerRpcInfo* info) override {
+      return new RateLimitInterceptor();
+    }
+  };
+
   // Public interface function implementations
   std::unordered_map<std::string, double> get_current_rates() {
     std::shared_lock<std::shared_mutex> lock(rates_mutex);
@@ -690,6 +804,11 @@ void RunServer(uint16_t port)
   builder.RegisterService(&healthService);
   builder.AddListeningPort(address, server_creds);
 
+  // Register rate limiting interceptor
+  std::vector<std::unique_ptr<grpc::experimental::ServerInterceptorFactoryInterface>> interceptors;
+  interceptors.push_back(std::make_unique<RateLimitInterceptorFactory>());
+  builder.experimental().SetInterceptorCreators(std::move(interceptors));
+
   g_server = std::shared_ptr<Server>(builder.BuildAndStart());
   logger->Info("Currency Server listening on port: " + address);
   
@@ -739,6 +858,7 @@ int main(int argc, char **argv) {
   initMeter();
   initLogger();
   currency_counter = initIntCounter("demo.exchange.conversions", version);
+  g_rate_limited_counter = initIntCounter("currency_service_rate_limited_requests_total", version);
   logger = getLogger(name);
 
   // Load initial rates configuration
@@ -787,6 +907,27 @@ int main(int argc, char **argv) {
     } catch (const std::exception& e) {
       logger->Warning("Invalid CURRENCY_SERVICE_SHUTDOWN_TIMEOUT_SEC value: " + std::string(shutdown_timeout_env) + " is not a valid integer, using default 10s");
     }
+  }
+
+  // Parse rate limit configuration
+  const char* rate_limit_env = std::getenv("CURRENCY_SERVICE_RATE_LIMIT_RPS");
+  if (rate_limit_env != nullptr && strlen(rate_limit_env) > 0) {
+    try {
+      int rate_limit_val = std::stoi(rate_limit_env);
+      if (rate_limit_val > 0) {
+        g_rate_limit_rps = rate_limit_val;
+        logger->Info("Using configured per-IP rate limit: " + std::to_string(rate_limit_val) + " requests per second");
+      } else {
+        g_rate_limit_rps = 0;
+        logger->Info("Rate limiting disabled (configured value <= 0)");
+      }
+    } catch (const std::exception& e) {
+      logger->Warning("Invalid CURRENCY_SERVICE_RATE_LIMIT_RPS value: " + std::string(rate_limit_env) + " is not a valid integer, rate limiting disabled");
+      g_rate_limit_rps = 0;
+    }
+  } else {
+    g_rate_limit_rps = 0;
+    logger->Info("Rate limiting disabled (environment variable not set)");
   }
 
   RunServer(port);
