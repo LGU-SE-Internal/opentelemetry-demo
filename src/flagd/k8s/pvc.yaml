@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: flagd-custom-config
+  labels:
+    app.kubernetes.io/name: flagd
+    app.kubernetes.io/component: feature-flags
+    app.kubernetes.io/part-of: opentelemetry-demo
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
