@@ -7,8 +7,18 @@ metadata:
 spec:
   type: ClusterIP
   ports:
-  - port: 8080
-    targetPort: 8080
-    name: http-metrics
+  - port: 4317
+    name: otlp-grpc
+    targetPort: otlp-grpc
+  - port: 4318
+    name: otlp-http
+    targetPort: otlp-http
+  - port: 8888
+    name: metrics
+    targetPort: metrics
+  - port: 13133
+    name: health
+    targetPort: health
   selector:
     app: kafka-collector
+

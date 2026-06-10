@@ -19,34 +19,44 @@ spec:
       labels:
         app: kafka-collector
     spec:
+      serviceAccountName: kafka-collector
       securityContext:
         runAsNonRoot: true
-        runAsUser: 1000
+        runAsUser: 10001
         readOnlyRootFilesystem: true
         allowPrivilegeEscalation: false
       containers:
       - name: kafka-collector
         image: otel/demo-kafka-collector:latest
+        args: ["--config", "/etc/otel/config.yaml"]
         ports:
-        - containerPort: 8080
-          name: http-metrics
+        - containerPort: 4317
+          name: otlp-grpc
+        - containerPort: 4318
+          name: otlp-http
+        - containerPort: 8888
+          name: metrics
+        - containerPort: 13133
+          name: health
         securityContext:
           capabilities:
             drop:
             - ALL
         livenessProbe:
           httpGet:
-            path: /health/live
-            port: 8080
+            path: /health
+            port: 13133
           initialDelaySeconds: 10
           periodSeconds: 30
+          timeoutSeconds: 5
           failureThreshold: 3
         readinessProbe:
           httpGet:
-            path: /health/ready
-            port: 8080
+            path: /health
+            port: 13133
           initialDelaySeconds: 5
           periodSeconds: 10
+          timeoutSeconds: 3
           failureThreshold: 3
         resources:
           requests:
@@ -62,3 +72,11 @@ spec:
           value: "${KAFKA_TOPICS}"
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
           value: "${OTEL_EXPORTER_OTLP_ENDPOINT}"
+        volumeMounts:
+        - name: config
+          mountPath: /etc/otel
+      volumes:
+      - name: config
+        configMap:
+          name: kafka-collector-config
+
