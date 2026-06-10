@@ -105,10 +105,20 @@ can drag and drop this file onto the emulator's window in order to install it.
 
 ## Pointing to another demo environment
 
-By default, the app will point to `EXPO_PUBLIC_FRONTEND_PROXY_PORT` on
-localhost to interact with the demo APIs. This can be changed in the Settings
-tab when running the app to point to a demo environment running on a
-different server.
+By default, the app will point to `http://localhost:8080` to interact with the demo APIs. You can configure the backend URL at build time using the environment variable below, or change it in the Settings tab when running the app to point to a demo environment running on a different server.
+
+### Environment Variable Configuration
+
+| Variable Name | Purpose | Example Value | Notes |
+|---------------|---------|---------------|-------|
+| `EXPO_PUBLIC_OTEL_DEMO_BACKEND_BASE_URL` | Sets the base URL for backend API calls | `https://demo.opentelemetry.io` | Must start with `http://` or `https://`, no trailing slash recommended. Defaults to `http://localhost:8080` if not set. |
+
+To use this variable, set it before building/running the app:
+```bash
+EXPO_PUBLIC_OTEL_DEMO_BACKEND_BASE_URL=https://demo.opentelemetry.io npm run android
+# or
+EXPO_PUBLIC_OTEL_DEMO_BACKEND_BASE_URL=https://demo.opentelemetry.io npm run ios
+```
 
 ## Troubleshooting
 

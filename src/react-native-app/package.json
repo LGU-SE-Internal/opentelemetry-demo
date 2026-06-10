@@ -47,11 +47,14 @@
     "uuid": "^14.0.0"
   },
   "devDependencies": {
+    "@types/jest": "^30.0.0",
     "@types/react": "~19.2.10",
     "@types/react-native-get-random-values": "^1.8.2",
     "@types/uuid": "^10.0.0",
     "eslint": "^9.0.0",
     "eslint-config-expo": "~55.0.0",
+    "jest": "^30.4.2",
+    "ts-jest": "^29.4.11",
     "ts-proto": "^2.11.6",
     "typescript": "~5.9.2"
   },
