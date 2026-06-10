@@ -17,6 +17,10 @@ spec:
         app.kubernetes.io/name: otel-collector
         app.kubernetes.io/component: otel-collector
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
       containers:
       - name: otel-collector
         image: ${COLLECTOR_CONTRIB_IMAGE:-otel/opentelemetry-collector-contrib:latest}
@@ -40,21 +44,21 @@ spec:
             path: /
           failureThreshold: 3
           periodSeconds: 10
-          initialDelaySeconds: 5
+          initialDelaySeconds: 30
         readinessProbe:
           httpGet:
             port: 13133
             path: /
           failureThreshold: 3
-          periodSeconds: 10
-          initialDelaySeconds: 2
+          periodSeconds: 5
+          initialDelaySeconds: 5
         resources:
           requests:
-            cpu: "100m"
-            memory: "256Mi"
+            cpu: "200m"
+            memory: "512Mi"
           limits:
-            cpu: "500m"
-            memory: "1Gi"
+            cpu: "2000m"
+            memory: "4Gi"
         securityContext:
           runAsNonRoot: true
           runAsUser: 10001
@@ -69,6 +73,8 @@ spec:
         - name: otel-collector-config-extras
           mountPath: /etc/otelcol-config-extras.yml
           subPath: otelcol-config-extras.yml
+        - name: otel-collector-buffer
+          mountPath: /var/lib/otelcol/buffer
         env:
         - name: GOMEMLIMIT
           value: "160MiB"
@@ -83,6 +89,37 @@ spec:
       - name: otel-collector-config-extras
         configMap:
           name: otel-collector-config-extras
+      - name: otel-collector-buffer
+        persistentVolumeClaim:
+          claimName: otel-collector-buffer
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: otel-collector-buffer
+  labels:
+    app.kubernetes.io/name: otel-collector
+    app.kubernetes.io/component: otel-collector
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: otel-collector-pdb
+  labels:
+    app.kubernetes.io/name: otel-collector
+    app.kubernetes.io/component: otel-collector
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: otel-collector
+      app.kubernetes.io/component: otel-collector
 ---
 apiVersion: v1
 kind: Service
