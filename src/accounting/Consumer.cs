@@ -162,24 +162,32 @@ internal class Consumer : IAsyncDisposable, IDisposable
 
         // Initialize circuit breaker policy
         _circuitBreakerPolicy = Policy
-            .Handle<Exception>()
+            .Handle<NpgsqlException>()
+            .Or<DbUpdateException>()
+            .Or<OperationCanceledException>()
+            .Or<InvalidOperationException>()
             .CircuitBreakerAsync(
-                exceptionsAllowedBeforeBreaking: 10,
+                exceptionsAllowedBeforeBreaking: 5,
                 durationOfBreak: TimeSpan.FromSeconds(30),
                 onBreak: (ex, breakDelay) =>
                 {
-                    _logger.LogWarning("Circuit breaker opened after {FailureCount} consecutive failures, will remain open for {BreakDuration}s", 
-                        10, breakDelay.TotalSeconds);
+                    _logger.LogWarning(
+                        "Circuit breaker state changed: {previous_state} -> {circuit_state}, failure_count: {failure_count}, remaining_break_duration: {remaining_break_duration}s, timestamp: {timestamp}",
+                        _currentCircuitState, "open", 5, breakDelay.TotalSeconds, DateTimeOffset.UtcNow);
                     _currentCircuitState = "open";
                 },
                 onReset: () =>
                 {
-                    _logger.LogInformation("Circuit breaker reset to closed state after successful operation");
+                    _logger.LogInformation(
+                        "Circuit breaker state changed: {previous_state} -> {circuit_state}, failure_count: {failure_count}, remaining_break_duration: {remaining_break_duration}s, timestamp: {timestamp}",
+                        _currentCircuitState, "closed", 0, 0, DateTimeOffset.UtcNow);
                     _currentCircuitState = "closed";
                 },
                 onHalfOpen: () =>
                 {
-                    _logger.LogInformation("Circuit breaker entering half-open state, testing next message");
+                    _logger.LogInformation(
+                        "Circuit breaker state changed: {previous_state} -> {circuit_state}, failure_count: {failure_count}, remaining_break_duration: {remaining_break_duration}s, timestamp: {timestamp}",
+                        _currentCircuitState, "half_open", 0, 0, DateTimeOffset.UtcNow);
                     _currentCircuitState = "half_open";
                 });
 
@@ -472,21 +480,29 @@ internal class Consumer : IAsyncDisposable, IDisposable
                     OrderId = order.OrderId
                 };
                 dbContext.Add(shipping);
-                dbContext.SaveChanges();
-                transaction.Commit();
+                await _circuitBreakerPolicy.ExecuteAsync(() => dbContext.SaveChangesAsync(cancellationToken), cancellationToken);
+                await transaction.CommitAsync(cancellationToken);
                 _logger.LogInformation("Successfully processed order {OrderId}", order.OrderId);
                 return true;
             }
+            catch (CircuitBreakerOpenException ex)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                _logger.LogWarning(ex, "Circuit breaker is open, failing fast for order {OrderId}", order.OrderId);
+                // Produce to DLQ
+                await _invalidOrderDlqProducer.ProduceAsync(order, "Database circuit breaker open", cancellationToken);
+                // Return 503 Service Unavailable (handled by caller)
+                return false;
+            }
             catch (DbUpdateException ex) when (ex.InnerException is Npgsql.PostgresException pgEx && pgEx.SqlState == "23505")
             {
-                // Unique constraint violation, duplicate order id
-                transaction.Rollback();
+                await transaction.RollbackAsync(cancellationToken);
                 _logger.LogInformation("Duplicate order {OrderId} received, skipping processing", order.OrderId);
                 return true;
             }
             catch (Exception ex)
             {
-                transaction.Rollback();
+                await transaction.RollbackAsync(cancellationToken);
                 _logger.LogError(ex, "Failed to process order {OrderId}", order.OrderId);
                 return false;
             }
