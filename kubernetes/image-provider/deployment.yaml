@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: image-provider
+  labels:
+    app: image-provider
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: image-provider
+  template:
+    metadata:
+      labels:
+        app: image-provider
+    spec:
+      serviceAccountName: image-provider
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+      containers:
+      - name: image-provider
+        image: ghcr.io/lgu-se-internal/opentelemetry-demo/image-provider:latest
+        ports:
+        - containerPort: 8080
+          name: http
+        env:
+        - name: NGINX_PORT
+          value: "8080"
+        - name: NGINX_CLIENT_MAX_BODY_SIZE
+          value: "1M"
+        - name: NGINX_GZIP_ENABLE
+          value: "on"
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          failureThreshold: 3
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        securityContext:
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
