@@ -11,6 +11,10 @@ using System.Diagnostics.Metrics;
 using System.Diagnostics;
 using Polly;
 using Polly.CircuitBreaker;
+using Microsoft.Extensions.Configuration;
+using System.Configuration;
+using System.IO;
+using System.Security.Cryptography.X509Certificates;
 
 namespace cart.cartstore;
 
@@ -19,6 +23,11 @@ public class ValkeyCartStore : ICartStore
     private readonly ILogger _logger;
     private const string CartFieldName = "cart";
     private const int RedisRetryNumber = 30;
+    
+    private const string TlsEnabledEnvVar = "CART_SERVICE_VALKEY_TLS_ENABLED";
+    private const string CaCertPathEnvVar = "CART_SERVICE_VALKEY_CA_CERT_PATH";
+    private const string ClientCertPathEnvVar = "CART_SERVICE_VALKEY_CLIENT_CERT_PATH";
+    private const string ClientKeyPathEnvVar = "CART_SERVICE_VALKEY_CLIENT_KEY_PATH";
 
     private volatile ConnectionMultiplexer _redis;
     private volatile bool _isRedisConnectionOpened;
@@ -60,15 +69,83 @@ public class ValkeyCartStore : ICartStore
     private readonly AsyncCircuitBreakerPolicy _circuitBreakerPolicy;
     public AsyncCircuitBreakerPolicy CircuitBreaker => _circuitBreakerPolicy;
 
-    public ValkeyCartStore(ILogger<ValkeyCartStore> logger, string valkeyAddress)
+    public ValkeyCartStore(ILogger<ValkeyCartStore> logger, IConfiguration configuration)
     {
         _logger = logger;
         // Serialize empty cart into byte array.
         var cart = new Oteldemo.Cart();
         _emptyCartBytes = cart.ToByteArray();
-        _connectionString = $"{valkeyAddress},ssl=false,allowAdmin=true,abortConnect=false";
+        
+        var valkeyAddress = configuration["ValkeyAddress"] ?? "valkey:6379";
+        bool tlsEnabled = configuration.GetValue<bool>(TlsEnabledEnvVar, false);
+        string caCertPath = configuration.GetValue<string>(CaCertPathEnvVar, string.Empty);
+        string clientCertPath = configuration.GetValue<string>(ClientCertPathEnvVar, string.Empty);
+        string clientKeyPath = configuration.GetValue<string>(ClientKeyPathEnvVar, string.Empty);
 
+        // Validate configuration
+        if (tlsEnabled)
+        {
+            // Validate client cert/key pair
+            if (!string.IsNullOrEmpty(clientCertPath) && string.IsNullOrEmpty(clientKeyPath))
+            {
+                throw new ConfigurationException($"Client certificate path provided but no corresponding client key path. Please set {ClientKeyPathEnvVar}");
+            }
+            
+            if (!string.IsNullOrEmpty(clientKeyPath) && string.IsNullOrEmpty(clientCertPath))
+            {
+                throw new ConfigurationException($"Client key path provided but no corresponding client certificate path. Please set {ClientCertPathEnvVar}");
+            }
+            
+            // Validate CA cert path exists if provided
+            if (!string.IsNullOrEmpty(caCertPath) && !File.Exists(caCertPath))
+            {
+                throw new ConfigurationException($"CA certificate file not found at path: {caCertPath}");
+            }
+            
+            // Validate client cert and key paths exist if provided
+            if (!string.IsNullOrEmpty(clientCertPath) && !File.Exists(clientCertPath))
+            {
+                throw new ConfigurationException($"Client certificate file not found at path: {clientCertPath}");
+            }
+            
+            if (!string.IsNullOrEmpty(clientKeyPath) && !File.Exists(clientKeyPath))
+            {
+                throw new ConfigurationException($"Client key file not found at path: {clientKeyPath}");
+            }
+        }
+
+        // Build connection string base
+        _connectionString = $"{valkeyAddress},ssl={tlsEnabled.ToString().ToLower()},allowAdmin=true,abortConnect=false";
+        
         _redisConnectionOptions = ConfigurationOptions.Parse(_connectionString);
+        
+        if (tlsEnabled)
+        {
+            // Enforce minimum TLS version 1.2
+            _redisConnectionOptions.SslProtocols = System.Security.Authentication.SslProtocols.Tls12 | System.Security.Authentication.SslProtocols.Tls13;
+            
+            // Add custom CA certificate if provided
+            if (!string.IsNullOrEmpty(caCertPath))
+            {
+                var caCert = new X509Certificate2(caCertPath);
+                _redisConnectionOptions.CertificateValidation += (sender, cert, chain, sslPolicyErrors) =>
+                {
+                    if (sslPolicyErrors == System.Net.Security.SslPolicyErrors.None)
+                        return true;
+                    
+                    chain.ChainPolicy.ExtraStore.Add(caCert);
+                    chain.ChainPolicy.VerificationFlags = X509VerificationFlags.AllowUnknownCertificateAuthority;
+                    return chain.Build((X509Certificate2)cert);
+                };
+            }
+            
+            // Add client certificate for mTLS if provided
+            if (!string.IsNullOrEmpty(clientCertPath) && !string.IsNullOrEmpty(clientKeyPath))
+            {
+                var clientCert = X509Certificate2.CreateFromPemFile(clientCertPath, clientKeyPath);
+                _redisConnectionOptions.Certificates.Add(clientCert);
+            }
+        }
 
         // Try to reconnect multiple times if the first retry fails.
         _redisConnectionOptions.ConnectRetry = RedisRetryNumber;
@@ -116,6 +193,11 @@ public class ValkeyCartStore : ICartStore
                         new KeyValuePair<string, object>("resilience.circuit_breaker.state.from", "OPEN"),
                         new KeyValuePair<string, object>("resilience.circuit_breaker.state.to", "HALF_OPEN"));
                 });
+    }
+
+    public ValkeyCartStore(ILogger<ValkeyCartStore> logger, string valkeyAddress)
+        : this(logger, new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string> { { "ValkeyAddress", valkeyAddress } }).Build())
+    {
     }
 
     public ConnectionMultiplexer GetConnection()
