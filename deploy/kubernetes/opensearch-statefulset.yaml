@@ -44,12 +44,49 @@ spec:
         - name: DISABLE_INSTALL_DEMO_CONFIG
           value: "true"
         - name: DISABLE_SECURITY_PLUGIN
+          value: "$(OPENSEARCH_HTTP_TLS_ENABLED:false)"
+        - name: OPENSEARCH_HTTP_TLS_ENABLED
+          value: "false"
+        - name: OPENSEARCH_TRANSPORT_TLS_ENABLED
+          value: "false"
+        - name: OPENSEARCH_HTTP_MTLS_ENABLED
+          value: "false"
+        - name: OPENSEARCH_TRANSPORT_MTLS_ENABLED
           value: "true"
+        - name: OPENSEARCH_TLS_CERT_PATH
+          value: "/usr/share/opensearch/config/certs/tls.crt"
+        - name: OPENSEARCH_TLS_KEY_PATH
+          value: "/usr/share/opensearch/config/certs/tls.key"
+        - name: OPENSEARCH_TLS_CA_PATH
+          value: "/usr/share/opensearch/config/certs/ca.crt"
+        - name: plugins.security.ssl.http.enabled
+          value: "$(OPENSEARCH_HTTP_TLS_ENABLED)"
+        - name: plugins.security.ssl.http.pemcert_filepath
+          value: "$(OPENSEARCH_TLS_CERT_PATH)"
+        - name: plugins.security.ssl.http.pemkey_filepath
+          value: "$(OPENSEARCH_TLS_KEY_PATH)"
+        - name: plugins.security.ssl.http.pemtrustedcas_filepath
+          value: "$(OPENSEARCH_TLS_CA_PATH)"
+        - name: plugins.security.ssl.http.clientauth_mode
+          value: "$(OPENSEARCH_HTTP_MTLS_ENABLED:REQUIRE:OPTIONAL)"
+        - name: plugins.security.ssl.transport.enabled
+          value: "$(OPENSEARCH_TRANSPORT_TLS_ENABLED)"
+        - name: plugins.security.ssl.transport.pemcert_filepath
+          value: "$(OPENSEARCH_TLS_CERT_PATH)"
+        - name: plugins.security.ssl.transport.pemkey_filepath
+          value: "$(OPENSEARCH_TLS_KEY_PATH)"
+        - name: plugins.security.ssl.transport.pemtrustedcas_filepath
+          value: "$(OPENSEARCH_TLS_CA_PATH)"
+        - name: plugins.security.ssl.transport.clientauth_mode
+          value: "$(OPENSEARCH_TRANSPORT_MTLS_ENABLED:REQUIRE:OPTIONAL)"
+        - name: plugins.security.ssl.http.enabled_protocols
+          value: "TLSv1.2,TLSv1.3"
         livenessProbe:
           httpGet:
             path: /
             port: 9200
-            scheme: HTTP
+            scheme: HTTPS
+            caFile: /usr/share/opensearch/config/certs/ca.crt
           initialDelaySeconds: 30
           periodSeconds: 10
           failureThreshold: 3
@@ -57,7 +94,8 @@ spec:
           httpGet:
             path: /_cluster/health?local=true
             port: 9200
-            scheme: HTTP
+            scheme: HTTPS
+            caFile: /usr/share/opensearch/config/certs/ca.crt
           initialDelaySeconds: 10
           periodSeconds: 5
           successThreshold: 2
@@ -84,6 +122,9 @@ spec:
           mountPath: /tmp
         - name: logs-volume
           mountPath: /usr/share/opensearch/logs
+        - name: opensearch-tls
+          mountPath: /usr/share/opensearch/config/certs
+          readOnly: true
         ulimits:
           memlock:
             soft: -1
@@ -96,6 +137,10 @@ spec:
         emptyDir: {}
       - name: logs-volume
         emptyDir: {}
+      - name: opensearch-tls
+        secret:
+          secretName: opensearch-tls
+          optional: true
   volumeClaimTemplates:
   - metadata:
       name: opensearch-data
