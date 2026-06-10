@@ -37,3 +37,8 @@ target_link_libraries(
     test_currency_graceful_shutdown demo-proto protobuf::libprotobuf
     ${OPENTELEMETRY_CPP_LIBRARIES} gRPC::grpc++ nlohmann_json::nlohmann_json GTest::GTest GTest::Main)
 
+add_executable(convert_validation_test test/convert_validation_test.cpp src/server.cpp)
+add_dependencies(convert_validation_test demo-proto)
+target_link_libraries(
+    convert_validation_test demo-proto protobuf::libprotobuf
+    ${OPENTELEMETRY_CPP_LIBRARIES} gRPC::grpc++ nlohmann_json::nlohmann_json GTest::GTest GTest::Main)
