@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -30,6 +31,7 @@ import (
 	"github.com/cenkalti/backoff/v4"
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/lib/pq"
+	"github.com/sony/gobreaker"
 	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/contrib/instrumentation/runtime"
@@ -156,6 +158,224 @@ func isTransientPostgresError(err error) bool {
 	}
 
 	return false
+}
+
+// CircuitBreakerConfig defines configuration for circuit breaker behavior
+type CircuitBreakerConfig struct {
+	FailureThreshold     float64       // default: 0.5 (50%)
+	Interval             time.Duration // default: 10s
+	Timeout              time.Duration // default: 30s
+	HalfOpenMaxRequests  uint32        // default: 1
+}
+
+// DBCircuitBreaker wraps sql.DB with circuit breaker functionality
+type DBCircuitBreaker struct {
+	db                   *sql.DB
+	cb                   *gobreaker.CircuitBreaker
+	meter                metric.Meter
+	retryMiddleware      PostgresRetryMiddleware
+	stateTransitionCount metric.Int64Counter
+	operationCount       metric.Int64Counter
+}
+// NewDBCircuitBreaker initializes a new circuit breaker wrapped DB instance
+func NewDBCircuitBreaker(db *sql.DB, meter metric.Meter) (*DBCircuitBreaker, error) {
+	// Load config from environment variables
+	cfg := CircuitBreakerConfig{
+		FailureThreshold:    0.5,
+		Interval:            10 * time.Second,
+		Timeout:             30 * time.Second,
+		HalfOpenMaxRequests: 1,
+	}
+
+	if val := os.Getenv("PRODUCT_CATALOG_CB_FAILURE_THRESHOLD"); val != "" {
+		if f, err := strconv.ParseFloat(val, 64); err == nil && f >= 0.0 && f <= 1.0 {
+			cfg.FailureThreshold = f
+		}
+	}
+	if val := os.Getenv("PRODUCT_CATALOG_CB_INTERVAL"); val != "" {
+		if d, err := time.ParseDuration(val); err == nil && d > 0 {
+			cfg.Interval = d
+		}
+	}
+	if val := os.Getenv("PRODUCT_CATALOG_CB_TIMEOUT"); val != "" {
+		if d, err := time.ParseDuration(val); err == nil && d > 0 {
+			cfg.Timeout = d
+		}
+	}
+	if val := os.Getenv("PRODUCT_CATALOG_CB_HALF_OPEN_MAX_REQUESTS"); val != "" {
+		if i, err := strconv.Atoi(val); err == nil && i > 0 {
+			cfg.HalfOpenMaxRequests = uint32(i)
+		}
+	}
+
+	// Create metrics
+	stateTransitionCount, err := meter.Int64Counter(
+		"productcatalog.circuit_breaker.state_transitions_total",
+		metric.WithDescription("Number of circuit breaker state transitions"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create state transition counter: %w", err)
+	}
+
+	operationCount, err := meter.Int64Counter(
+		"productcatalog.circuit_breaker.operations_total",
+		metric.WithDescription("Number of database operations processed by the circuit breaker"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create operation counter: %w", err)
+	}
+
+	// Create gobreaker settings
+	settings := gobreaker.Settings{
+		Name:        "product-catalog-postgres",
+		MaxRequests: cfg.HalfOpenMaxRequests,
+		Interval:    cfg.Interval,
+		Timeout:     cfg.Timeout,
+		ReadyToTrip: func(counts gobreaker.Counts) bool {
+			failureRatio := float64(counts.TotalFailures) / float64(counts.Requests)
+			return counts.Requests >= 1 && failureRatio >= cfg.FailureThreshold
+		},
+		OnStateChange: func(name string, from gobreaker.State, to gobreaker.State) {
+			// Emit state transition metric
+			stateTransitionCount.Add(context.Background(), 1,
+				metric.WithAttributes(attribute.String("state", to.String())),
+			)
+		},
+	}
+
+	cb := gobreaker.NewCircuitBreaker(settings)
+
+	// Initialize default retry middleware
+	retryMiddleware := NewPostgresRetryMiddleware(nil)
+
+	return &DBCircuitBreaker{
+		db:                   db,
+		cb:                   cb,
+		meter:                meter,
+		retryMiddleware:      retryMiddleware,
+		stateTransitionCount: stateTransitionCount,
+		operationCount:       operationCount,
+	}, nil
+}
+
+// execute runs a database operation through the circuit breaker
+func (d *DBCircuitBreaker) execute(ctx context.Context, operationName string, isIdempotent bool, op func() error) error {
+	state := d.cb.State().String()
+
+	result, err := d.cb.Execute(func() (interface{}, error) {
+		// Run the operation with existing retry logic
+		err := d.retryMiddleware.Execute(ctx, operationName, isIdempotent, op)
+		return nil, err
+	})
+
+	// Count operation result
+	statusAttr := attribute.String("status", "success")
+	if err != nil {
+		statusAttr = attribute.String("status", "failure")
+		// If circuit is open, return Unavailable error
+		if errors.Is(err, gobreaker.ErrOpenState) {
+			err = status.Errorf(codes.Unavailable, "product catalog database is temporarily unavailable: %w", err)
+		}
+	}
+
+	d.operationCount.Add(ctx, 1,
+		metric.WithAttributes(statusAttr),
+		metric.WithAttributes(attribute.String("state", state)),
+	)
+
+	if result != nil {
+		return nil
+	}
+	return err
+}
+
+// ListProducts returns all products from the database
+func (d *DBCircuitBreaker) ListProducts(ctx context.Context) ([]*pb.Product, error) {
+	var products []*pb.Product
+	err := d.execute(ctx, "ListProducts", true, func() error {
+		rows, err := d.db.QueryContext(ctx, "SELECT id, name, description, picture, price_usd, categories FROM products")
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		products = nil
+		for rows.Next() {
+			var p pb.Product
+			var priceUsd float64
+			err := rows.Scan(&p.Id, &p.Name, &p.Description, &p.Picture, &priceUsd, &p.Categories)
+			if err != nil {
+				return err
+			}
+			p.PriceUsd = &pb.Money{
+				CurrencyCode: "USD",
+				Units:        int64(priceUsd),
+				Nanos:        int32((priceUsd - float64(int64(priceUsd))) * 1e9),
+			}
+			products = append(products, &p)
+		}
+		return rows.Err()
+	})
+	return products, err
+}
+
+// GetProduct returns a single product from the database by ID
+func (d *DBCircuitBreaker) GetProduct(ctx context.Context, id string) (*pb.Product, error) {
+	var p *pb.Product
+	err := d.execute(ctx, "GetProduct", true, func() error {
+		var product pb.Product
+		var priceUsd float64
+		err := d.db.QueryRowContext(ctx, "SELECT id, name, description, picture, price_usd, categories FROM products WHERE id = $1", id).
+			Scan(&product.Id, &product.Name, &product.Description, &product.Picture, &priceUsd, &product.Categories)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return status.Errorf(codes.NotFound, "product with id %q not found", id)
+			}
+			return err
+		}
+		product.PriceUsd = &pb.Money{
+			CurrencyCode: "USD",
+			Units:        int64(priceUsd),
+			Nanos:        int32((priceUsd - float64(int64(priceUsd))) * 1e9),
+		}
+		p = &product
+		return nil
+	})
+	return p, err
+}
+
+// SearchProducts returns products matching the given query string
+func (d *DBCircuitBreaker) SearchProducts(ctx context.Context, query string) ([]*pb.Product, error) {
+	var products []*pb.Product
+	err := d.execute(ctx, "SearchProducts", true, func() error {
+		rows, err := d.db.QueryContext(ctx, `
+			SELECT id, name, description, picture, price_usd, categories 
+			FROM products 
+			WHERE name ILIKE '%' || $1 || '%' OR description ILIKE '%' || $1 || '%'
+		`, query)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		products = nil
+		for rows.Next() {
+			var p pb.Product
+			var priceUsd float64
+			err := rows.Scan(&p.Id, &p.Name, &p.Description, &p.Picture, &priceUsd, &p.Categories)
+			if err != nil {
+				return err
+			}
+			p.PriceUsd = &pb.Money{
+				CurrencyCode: "USD",
+				Units:        int64(priceUsd),
+				Nanos:        int32((priceUsd - float64(int64(priceUsd))) * 1e9),
+			}
+			products = append(products, &p)
+		}
+		return rows.Err()
+	})
+	return products, err
 }
 
 func (m *postgresRetryMiddleware) Execute(ctx context.Context, operationName string, isIdempotent bool, op func() error) error {
@@ -430,6 +650,7 @@ func validateSearchProductsRequest(req *pb.SearchProductsRequest) error {
 type productCatalog struct {
 	pb.UnimplementedProductCatalogServiceServer
 	retryMiddleware PostgresRetryMiddleware
+	dbCircuitBreaker *DBCircuitBreaker
 }
 
 func init() {
@@ -529,8 +750,6 @@ func main() {
 	if err != nil {
 		logger.Error("Failed to set flagd as the provider", slog.Any("error", err))
 	}
-	defer openfeature.Shutdown()
-
 	err = runtime.Start(runtime.WithMinimumReadMemStatsInterval(time.Second))
 	if err != nil {
 		logger.Error(err.Error())
@@ -538,9 +757,17 @@ func main() {
 
 	// Initialize retry middleware
 	retryMiddleware := NewPostgresRetryMiddleware(nil)
-	
+
+	// Initialize circuit breaker
+	meter := otel.Meter("product-catalog")
+	dbCircuitBreaker, err := NewDBCircuitBreaker(db, meter)
+	if err != nil {
+		logger.Error(fmt.Sprintf("Failed to initialize database circuit breaker: %v", err))
+		os.Exit(1)
+	}
 	svc := &productCatalog{
 		retryMiddleware: retryMiddleware,
+		dbCircuitBreaker: dbCircuitBreaker,
 	}
 	var port string
 	mustMapEnv(&port, "PRODUCT_CATALOG_PORT")
@@ -874,14 +1101,13 @@ func (p *productCatalog) ListProducts(ctx context.Context, req *pb.ListProductsR
 	}
 	span := trace.SpanFromContext(ctx)
 
-	var products []*pb.Product
-	err := p.retryMiddleware.Execute(ctx, "ListProducts", true, func() error {
-		var innerErr error
-		products, innerErr = loadProductsFromDB(ctx)
-		return innerErr
-	})
+	products, err := p.dbCircuitBreaker.ListProducts(ctx)
 	if err != nil {
 		span.SetStatus(otelcodes.Error, err.Error())
+		// If error is already a gRPC status error, return it directly
+		if _, ok := status.FromError(err); ok {
+			return nil, err
+		}
 		return nil, status.Errorf(codes.Internal, "failed to load products: %v", err)
 	}
 
@@ -912,13 +1138,13 @@ func (p *productCatalog) GetProduct(ctx context.Context, req *pb.GetProductReque
 		return nil, status.Error(codes.Internal, msg)
 	}
 
-	var found *pb.Product
-	err := p.retryMiddleware.Execute(ctx, "GetProduct", true, func() error {
-		var innerErr error
-		found, innerErr = getProductFromDB(ctx, req.Id)
-		return innerErr
-	})
+	found, err := p.dbCircuitBreaker.GetProduct(ctx, req.Id)
 	if err != nil {
+		// If error is already a gRPC status error, return it directly
+		if st, ok := status.FromError(err); ok {
+			span.SetStatus(otelcodes.Error, st.Message())
+			return nil, err
+		}
 		msg := fmt.Sprintf("Product Not Found: %s", req.Id)
 		span.SetStatus(otelcodes.Error, msg)
 		span.AddEvent(msg)
@@ -949,14 +1175,13 @@ func (p *productCatalog) SearchProducts(ctx context.Context, req *pb.SearchProdu
 	}
 	span := trace.SpanFromContext(ctx)
 
-	var result []*pb.Product
-	err := p.retryMiddleware.Execute(ctx, "SearchProducts", true, func() error {
-		var innerErr error
-		result, innerErr = searchProductsFromDB(ctx, req.Query)
-		return innerErr
-	})
+	result, err := p.dbCircuitBreaker.SearchProducts(ctx, req.Query)
 	if err != nil {
 		span.SetStatus(otelcodes.Error, err.Error())
+		// If error is already a gRPC status error, return it directly
+		if _, ok := status.FromError(err); ok {
+			return nil, err
+		}
 		return nil, status.Errorf(codes.Internal, "failed to search products: %v", err)
 	}
 
