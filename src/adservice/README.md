@@ -14,6 +14,10 @@ The service is configured via the following environment variables:
 | `AD_DB_USER` | string | `postgres` | No | Database authentication username |
 | `AD_DB_PASSWORD` | string | `postgres` | No | Database authentication password |
 | `AD_DB_NAME` | string | `ads` | No | Database name to connect to |
+| `POSTGRES_SSLMODE` | string | `disable` | No | PostgreSQL TLS connection mode. Allowed values: `disable`, `allow`, `prefer`, `require`, `verify-ca`, `verify-full` |
+| `POSTGRES_SSLROOTCERT` | string | `` | No | Filesystem path to root CA certificate file. Required when `POSTGRES_SSLMODE` is set to `verify-ca` or `verify-full` |
+| `POSTGRES_SSLCERT` | string | `` | No | Filesystem path to client TLS certificate file, used for mTLS authentication |
+| `POSTGRES_SSLKEY` | string | `` | No | Filesystem path to client private key file. Required if `POSTGRES_SSLCERT` is provided |
 
 ## Database Requirements
 
