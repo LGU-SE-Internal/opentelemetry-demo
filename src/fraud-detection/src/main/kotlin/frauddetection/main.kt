@@ -116,6 +116,63 @@ fun validateCheckFraudRequest(request: CheckTransactionRequest): Unit {
 
 val isShuttingDown = AtomicBoolean(false)
 val kafkaConnected = AtomicBoolean(false)
+val inFlightRequests = AtomicLong(0)
+const val SHUTDOWN_TIMEOUT_SECONDS = 30L
+
+interface ShutdownHandler {
+    fun performGracefulShutdown(): Boolean
+}
+
+class DefaultShutdownHandler(
+    private val server: Server,
+    private val healthStatusManager: HealthStatusManager,
+    private val kafkaConsumer: KafkaConsumer<String, ByteArray>? = null
+) : ShutdownHandler {
+    private val logger: Logger = LogManager.getLogger(DefaultShutdownHandler::class.java)
+
+    override fun performGracefulShutdown(): Boolean {
+        if (isShuttingDown.compareAndSet(false, true)) {
+            logger.info("Shutdown signal received, initiating graceful shutdown")
+
+            // Mark service as unhealthy, stop accepting new requests
+            healthStatusManager.setStatus(
+                HealthStatusManager.SERVICE_NAME_ALL_SERVICES,
+                ServingStatus.NOT_SERVING
+            )
+
+            var remainingSeconds = SHUTDOWN_TIMEOUT_SECONDS
+            while (remainingSeconds > 0 && inFlightRequests.get() > 0) {
+                if (remainingSeconds % 5 == 0L) {
+                    logger.info("Draining in-flight requests, count: ${inFlightRequests.get()}")
+                }
+                Thread.sleep(1000)
+                remainingSeconds--
+            }
+
+            val graceful = if (inFlightRequests.get() == 0L) {
+                logger.info("All in-flight requests completed, starting resource cleanup")
+                true
+            } else {
+                logger.error("Forcing shutdown after 30s timeout, remaining in-flight requests: ${inFlightRequests.get()}")
+                // TODO: Log each interrupted request details when we have request tracking
+                false
+            }
+
+            // Clean up resources
+            server.shutdown()
+            server.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)
+            kafkaConsumer?.wakeup()
+            kafkaConsumer?.close(Duration.ofMillis(5000))
+
+            if (graceful) {
+                logger.info("Graceful shutdown completed successfully")
+            }
+
+            return graceful
+        }
+        return false
+    }
+}
 
 class HealthCheckHandler : ChannelInboundHandlerAdapter() {
     override fun channelRead(ctx: ChannelHandlerContext, msg: Any) {
@@ -135,46 +192,30 @@ class HealthCheckHandler : ChannelInboundHandlerAdapter() {
 
     private fun handleLiveness(ctx: ChannelHandlerContext) {
         val status = if (isShuttingDown.get()) HttpResponseStatus.SERVICE_UNAVAILABLE else HttpResponseStatus.OK
-        val responseBody = if (isShuttingDown.get()) """{"status":"DOWN","error":"Service is shutting down"}""" else """{"status":"UP"}"""
-        sendJsonResponse(ctx, status, responseBody)
+        val responseBody = if (isShuttingDown.get()) """{"status":"shutdown_in_progress"}""" else """{"status":"UP"}"""
+        val response = DefaultFullHttpResponse(
+            HttpVersion.HTTP_1_1,
+            status,
+            Unpooled.copiedBuffer(responseBody, CharsetUtil.UTF_8)
+        )
+        response.headers().set(HttpHeaderNames.CONTENT_TYPE, "application/json")
+        response.headers().set(HttpHeaderNames.CONTENT_LENGTH, response.content().readableBytes())
+        ctx.writeAndFlush(response)
     }
 
     private fun handleReadiness(ctx: ChannelHandlerContext) {
-        if (isShuttingDown.get()) {
-            val status = HttpResponseStatus.SERVICE_UNAVAILABLE
-            val responseBody = """{"status":"DOWN","error":"Service is shutting down"}"""
-            sendJsonResponse(ctx, status, responseBody)
-            return
-        }
-
-        val readinessCheck = ServiceReadinessCheck()
-        val result = readinessCheck.call()
-        val status = if (result.status == org.eclipse.microprofile.health.HealthCheckResponse.Status.UP) {
-            HttpResponseStatus.OK
-        } else {
-            HttpResponseStatus.SERVICE_UNAVAILABLE
-        }
-
-        val dependencies = result.data.mapValues { entry ->
-            entry.value.toString()
-        }
-
-        val responseBody = buildString {
-            append("{")
-            append("\"status\":\"${if (result.status == org.eclipse.microprofile.health.HealthCheckResponse.Status.UP) "UP" else "DOWN"}\"")
-            if (dependencies.isNotEmpty()) {
-                append(",\"dependencies\":{")
-                append(dependencies.map { (key, value) -> "\"$key\":\"$value\"" }.joinToString(","))
-                append("}")
-            }
-            if (result.status == org.eclipse.microprofile.health.HealthCheckResponse.Status.DOWN) {
-                append(",\"error\":\"One or more dependencies are unavailable\"")
-            }
-            append("}")
-        }
-        sendJsonResponse(ctx, status, responseBody)
-    }
-
+        val status = if (isShuttingDown.get() || !kafkaConnected.get()) HttpResponseStatus.SERVICE_UNAVAILABLE else HttpResponseStatus.OK
+        val responseBody = if (isShuttingDown.get()) """{"status":"shutdown_in_progress"}""" 
+        else if (!kafkaConnected.get()) """{"status":"DOWN","reason":"Kafka not connected"}"""
+        else """{"status":"UP"}"""
+        val response = DefaultFullHttpResponse(
+            HttpVersion.HTTP_1_1,
+            status,
+            Unpooled.copiedBuffer(responseBody, CharsetUtil.UTF_8)
+        )
+        response.headers().set(HttpHeaderNames.CONTENT_TYPE, "application/json")
+        response.headers().set(HttpHeaderNames.CONTENT_LENGTH, response.content().readableBytes())
+        ctx.writeAndFlush(response)
     private fun sendJsonResponse(ctx: ChannelHandlerContext, status: HttpResponseStatus, body: String) {
         val response = DefaultFullHttpResponse(
             HttpVersion.HTTP_1_1,
@@ -793,18 +834,14 @@ fun main() {
         .channel()
     logger.info("HTTP health check endpoints available on port $healthCheckPort")
 
-    // Initialize graceful shutdown manager
-    val shutdownManager = GracefulShutdownManagerImpl()
-    shutdownManager.registerResources(servers.first(), consumer, httpServer) // TODO: handle multiple servers if needed
+    // Initialize graceful shutdown handler
+    val shutdownHandler = DefaultShutdownHandler(servers.first(), healthStatusManager, consumer)
+
     // Register signal handlers for SIGINT (2) and SIGTERM (15)
     val signalHandler = SignalHandler { signal ->
-        isShuttingDown.set(true)
-        val shutdownResult = shutdownManager.shutdown()
-        val exitCode = if (shutdownResult.shutdownSuccess) {
-            0
-        } else {
-            if (signal.number == 2) 130 else 143
-        }
+        logger.info("Shutdown signal received: ${signal.name}, initiating graceful shutdown")
+        val shutdownSuccess = shutdownHandler.performGracefulShutdown()
+        val exitCode = if (shutdownSuccess) 0 else if (signal.number == 2) 130 else 143
         exitProcess(exitCode)
     }
 
@@ -817,10 +854,9 @@ fun main() {
 
     // Add backup shutdown hook
     Runtime.getRuntime().addShutdownHook(thread(start = false) {
-        if (!shutdownInitiated.get()) {
-            isShuttingDown.set(true)
+        if (!isShuttingDown.get()) {
             logger.info("Received shutdown request via JVM shutdown hook, initiating graceful shutdown")
-            shutdownManager.shutdown()
+            shutdownHandler.performGracefulShutdown()
         }
     })
 
@@ -832,31 +868,6 @@ fun main() {
 
             val isHealthy = kafkaConsumerConnected && timeSinceLastPoll < MAX_UNHEALTHY_POLL_INTERVAL_MS
             kafkaConnected.set(isHealthy)
-            val newStatus = if (isHealthy) ServingStatus.SERVING else ServingStatus.NOT_SERVING
-
-            healthStatusManager.setStatus(HealthStatusManager.SERVICE_NAME_ALL_SERVICES, newStatus)
-
-            Thread.sleep(HEALTH_CHECK_INTERVAL_MS)
-        }
-    }
-        logger.warn("Signal handling not supported on this platform, falling back to JVM shutdown hook", e)
-    }
-
-    // Add backup shutdown hook
-    Runtime.getRuntime().addShutdownHook(thread(start = false) {
-        if (!shutdownInitiated.get()) {
-            logger.info("Received shutdown request via JVM shutdown hook, initiating graceful shutdown")
-            shutdownManager.shutdown()
-        }
-    })
-
-    // Background thread to monitor Kafka health
-    thread(start = true, isDaemon = true) {
-        while (true) {
-            val currentTime = System.currentTimeMillis()
-            val timeSinceLastPoll = currentTime - lastSuccessfulPollTime.get()
-
-            val isHealthy = kafkaConsumerConnected && timeSinceLastPoll < MAX_UNHEALTHY_POLL_INTERVAL_MS
             val newStatus = if (isHealthy) ServingStatus.SERVING else ServingStatus.NOT_SERVING
 
             healthStatusManager.setStatus(HealthStatusManager.SERVICE_NAME_ALL_SERVICES, newStatus)
