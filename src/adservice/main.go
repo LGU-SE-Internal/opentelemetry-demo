@@ -3,17 +3,22 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
 
 	_ "github.com/lib/pq"
@@ -23,6 +28,7 @@ import (
 // Config holds all service configuration values
 type Config struct {
 	ServicePort int
+	HealthPort  int
 	DBHost      string
 	DBPort      int
 	DBUser      string
@@ -50,6 +56,7 @@ var allowedSSLMode = map[string]bool{
 func LoadConfig() (Config, error) {
 	cfg := Config{
 		ServicePort: 9555,
+		HealthPort:  8080,
 		DBHost:      "localhost",
 		DBPort:      5432,
 		DBUser:      "postgres",
@@ -68,6 +75,18 @@ func LoadConfig() (Config, error) {
 			return cfg, fmt.Errorf("AD_SERVICE_PORT must be between 1 and 65535, got %d", port)
 		}
 		cfg.ServicePort = port
+	}
+
+	// Read health port from environment
+	if portStr := os.Getenv("AD_SERVICE_HEALTH_PORT"); portStr != "" {
+		port, err := strconv.Atoi(portStr)
+		if err != nil {
+			return cfg, fmt.Errorf("invalid AD_SERVICE_HEALTH_PORT: %w", err)
+		}
+		if port < 1 || port > 65535 {
+			return cfg, fmt.Errorf("AD_SERVICE_HEALTH_PORT must be between 1 and 65535, got %d", port)
+		}
+		cfg.HealthPort = port
 	}
 
 	// Read database host from environment
@@ -158,7 +177,35 @@ const (
 	shutdownWindow = 10 * time.Second
 )
 
-var logger = log.New(os.Stdout, "[adservice] ", log.LstdFlags|log.Lshortfile)
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if isShuttingDown.Load() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{"status": "unavailable"})
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func readinessHandler(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if err := db.PingContext(r.Context()); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{
+				"status":   "not_ready",
+				"database": "disconnected",
+			})
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{
+			"status":   "ready",
+			"database": "connected",
+		})
+	}
+}
 
 func main() {
 	// Load configuration
@@ -205,13 +252,45 @@ func main() {
 	pb.RegisterAdServiceServer(s, &adService{db: dbConn})
 	reflection.Register(s)
 
+	// Register gRPC health check service
+	healthServer := health.NewServer()
+	grpc_health_v1.RegisterHealthServer(s, healthServer)
+	// Set initial serving status
+	healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
+
+	// Set up HTTP health server
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/readiness", readinessHandler(dbConn))
+	httpServer := &http.Server{
+		Addr:    fmt.Sprintf(":%d", cfg.HealthPort),
+		Handler: mux,
+	}
+
+	// Start HTTP health server in goroutine
+	go func() {
+		logger.Printf("Health endpoints starting on :%d", cfg.HealthPort)
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Fatalf("Failed to start health server: %v", err)
+		}
+	}()
+
 	// Set up signal handler for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
 		<-sigChan
+		isShuttingDown.Store(true)
+		// Update health status to not serving
+		healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
 		logger.Println("INFO: Starting graceful shutdown, waiting up to 10s for in-flight requests to complete")
+		// Shutdown HTTP server
+		httpCtx, httpCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer httpCancel()
+		if err := httpServer.Shutdown(httpCtx); err != nil {
+			logger.Printf("WARN: HTTP server shutdown failed: %v", err)
+		}
 		err := GracefulShutdown(s, dbConn, shutdownWindow)
 		if err != nil {
 			if err == context.DeadlineExceeded {
