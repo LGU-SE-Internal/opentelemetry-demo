@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Shopify/sarama"
+	"github.com/IBM/sarama"
 	"github.com/cenkalti/backoff/v4"
 	"github.com/sony/gobreaker"
 	"github.com/stretchr/testify/assert"
