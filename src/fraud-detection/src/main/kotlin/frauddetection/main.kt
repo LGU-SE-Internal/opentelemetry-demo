@@ -26,12 +26,15 @@ import dev.openfeature.sdk.Value
 import dev.openfeature.sdk.OpenFeatureAPI
 import io.grpc.Server
 import io.grpc.ServerBuilder
+import io.grpc.netty.NettyServerBuilder
 import io.grpc.Status
 import io.grpc.StatusRuntimeException
 import io.grpc.Context
 import io.grpc.protobuf.services.HealthStatusManager
 import io.grpc.health.v1.HealthCheckResponse.ServingStatus
 import io.grpc.netty.shaded.io.netty.handler.ssl.SslContext
+import io.grpc.netty.shaded.io.netty.handler.ssl.ClientAuth
+import io.grpc.GrpcSslContexts
 import io.grpc.netty.shaded.io.netty.channel.ChannelHandlerContext
 import io.grpc.netty.shaded.io.netty.channel.ChannelInboundHandlerAdapter
 import io.grpc.netty.shaded.io.netty.handler.codec.http.DefaultFullHttpResponse
@@ -507,11 +510,11 @@ data class GrpcTlsConfig(
     companion object {
         fun load(): GrpcTlsConfig {
             return GrpcTlsConfig(
-                enabled = System.getenv("GRPC_TLS_ENABLED")?.toBoolean() ?: false,
-                certPath = System.getenv("GRPC_TLS_CERT_PATH") ?: "",
-                keyPath = System.getenv("GRPC_TLS_KEY_PATH") ?: "",
-                clientCaPath = System.getenv("GRPC_TLS_CLIENT_CA_PATH") ?: "",
-                plaintextEnabled = System.getenv("GRPC_PLAINTEXT_ENABLED")?.toBoolean() ?: true
+                enabled = System.getenv("FRD_GRPC_TLS_ENABLED")?.toBoolean() ?: false,
+                certPath = System.getenv("FRD_GRPC_TLS_CERT_PATH") ?: "",
+                keyPath = System.getenv("FRD_GRPC_TLS_KEY_PATH") ?: "",
+                clientCaPath = System.getenv("FRD_GRPC_TLS_CA_CERT_PATH") ?: "",
+                plaintextEnabled = System.getenv("FRD_GRPC_PLAINTEXT_ENABLED")?.toBoolean() ?: true
             )
         }
 
@@ -519,26 +522,30 @@ data class GrpcTlsConfig(
             if (!config.enabled) return
 
             if (config.certPath.isBlank()) {
-                throw IllegalArgumentException("GRPC_TLS_CERT_PATH must be set when GRPC_TLS_ENABLED is true")
+                throw IllegalArgumentException("TLS is enabled but FRD_GRPC_TLS_CERT_PATH environment variable is missing")
             }
             if (config.keyPath.isBlank()) {
-                throw IllegalArgumentException("GRPC_TLS_KEY_PATH must be set when GRPC_TLS_ENABLED is true")
+                throw IllegalArgumentException("TLS is enabled but FRD_GRPC_TLS_KEY_PATH environment variable is missing")
             }
 
             val certFile = File(config.certPath)
             if (!certFile.exists() || !certFile.isFile || !certFile.canRead()) {
-                throw IllegalArgumentException("GRPC_TLS_CERT_PATH points to non-existent, unreadable, or non-file path: ${config.certPath}")
+                throw IllegalArgumentException("Failed to read TLS certificate file at ${config.certPath}: File does not exist or is unreadable")
             }
 
             val keyFile = File(config.keyPath)
             if (!keyFile.exists() || !keyFile.isFile || !keyFile.canRead()) {
-                throw IllegalArgumentException("GRPC_TLS_KEY_PATH points to non-existent, unreadable, or non-file path: ${config.keyPath}")
+                throw IllegalArgumentException("Failed to read TLS private key file at ${config.keyPath}: File does not exist or is unreadable")
             }
 
-            if (config.clientCaPath.isNotBlank()) {
+            val mtlsEnabled = System.getenv("FRD_GRPC_MTLS_ENABLED")?.toBoolean() ?: false
+            if (mtlsEnabled) {
+                if (config.clientCaPath.isBlank()) {
+                    throw IllegalArgumentException("mTLS is enabled but FRD_GRPC_TLS_CA_CERT_PATH environment variable is missing")
+                }
                 val caFile = File(config.clientCaPath)
                 if (!caFile.exists() || !caFile.isFile || !caFile.canRead()) {
-                    throw IllegalArgumentException("GRPC_TLS_CLIENT_CA_PATH points to non-existent, unreadable, or non-file path: ${config.clientCaPath}")
+                    throw IllegalArgumentException("Failed to read CA certificate file at ${config.clientCaPath}: File does not exist or is unreadable")
                 }
             }
         }
@@ -598,14 +605,19 @@ data class KafkaTlsConfig(
 fun buildGrpcSslContext(config: GrpcTlsConfig): SslContext {
     val sslContextBuilder = GrpcSslContexts.forServer(File(config.certPath), File(config.keyPath))
 
-    if (config.clientCaPath.isNotBlank()) {
+    val mtlsEnabled = System.getenv("FRD_GRPC_MTLS_ENABLED")?.toBoolean() ?: false
+    if (mtlsEnabled && config.clientCaPath.isNotBlank()) {
         sslContextBuilder.trustManager(File(config.clientCaPath))
         sslContextBuilder.clientAuth(ClientAuth.REQUIRE)
     } else {
         sslContextBuilder.clientAuth(ClientAuth.NONE)
     }
 
-    return sslContextBuilder.build()
+    try {
+        return sslContextBuilder.build()
+    } catch (e: Exception) {
+        throw IllegalArgumentException("Invalid TLS certificate/key pair: ${e.message}")
+    }
 }
 
 fun buildKafkaSslProperties(props: Properties, config: KafkaTlsConfig) {
