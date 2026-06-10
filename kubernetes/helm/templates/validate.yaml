@@ -1,0 +1,3 @@
+{{- if lt (trimSuffix "Gi" .Values.jaeger.pvc.storageSize | int) 10 }}
+{{ fail "Jaeger PVC storage size must be at least 10Gi to prevent out-of-disk errors for trace retention" }}
+{{- end }}
