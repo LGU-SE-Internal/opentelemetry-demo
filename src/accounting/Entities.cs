@@ -1,10 +1,18 @@
-// Copyright The OpenTelemetry Authors
-// SPDX-License-Identifier: Apache-2.0
-
 using Microsoft.EntityFrameworkCore;
 using System.ComponentModel.DataAnnotations.Schema;
+using Accounting.Service;
 
 namespace Accounting;
+
+public class AccountingDbContext : DbContext
+{
+    public AccountingDbContext(DbContextOptions<AccountingDbContext> options) : base(options) { }
+    
+    public DbSet<ShippingEntity> Shipping { get; set; }
+    public DbSet<OrderItemEntity> OrderItems { get; set; }
+    public DbSet<OrderEntity> Orders { get; set; }
+    public DbSet<ProcessedOrder> ProcessedOrders { get; set; }
+}
 
 [Table("shipping", Schema = "accounting")]
 [PrimaryKey(nameof(ShippingTrackingId))]

@@ -153,6 +153,10 @@ builder.Services.AddHealthChecks()
 builder.Services.AddSingleton<Consumer>(sp => new Consumer(sp.GetRequiredService<ILogger<Consumer>>(), sp.GetRequiredService<IConfiguration>()));
 // Add graceful shutdown service
 builder.Services.AddSingleton<IGracefulShutdownService, GracefulShutdownService>();
+// Add Kafka retry policy provider
+builder.Services.AddSingleton<IKafkaRetryPolicyProvider, KafkaRetryPolicyProvider>();
+// Add idempotency service
+builder.Services.AddScoped<IOrderConsumptionIdempotencyService, OrderConsumptionIdempotencyService>();
 
 var app = builder.Build();
 
