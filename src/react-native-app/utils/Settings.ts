@@ -1,7 +1,7 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import getLocalhost from "@/utils/Localhost";
+import { BACKEND_BASE_URL } from '@/config/api';
 
 const FRONTEND_PROXY_URL_SETTING = 'frontend_proxy_url';
 
@@ -10,8 +10,7 @@ export const getFrontendProxyURL = async (): Promise<string> => {
   if (proxyURL) {
     return proxyURL
   } else {
-    const localhost = await getLocalhost();
-    return `http://${localhost}:${process.env.EXPO_PUBLIC_FRONTEND_PROXY_PORT}`;
+    return BACKEND_BASE_URL;
   }
 };
 
