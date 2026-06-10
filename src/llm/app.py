@@ -385,6 +385,34 @@ def list_models():
         ]
     })
 
+def llm_backend_connected() -> bool:
+    """Check if LLM backend is connected (product summaries loaded)"""
+    global product_review_summaries
+    return product_review_summaries is not None
+
+
+@app.route('/healthz', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'HEAD'])
+def healthz():
+    """Liveness check endpoint: returns 200 OK for GET only, 405 for all other methods"""
+    if request.method != 'GET':
+        return Response(status=405)
+    return Response(status=200)
+
+
+@app.route('/readyz', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'HEAD'])
+def readyz():
+    """Readiness check endpoint: returns 200 OK for GET only if LLM backend is connected, 405 for all other methods"""
+    if request.method != 'GET':
+        return Response(status=405)
+    if llm_backend_connected():
+        return Response(status=200)
+    return Response(
+        response='LLM backend connection not established',
+        status=503,
+        content_type='text/plain; charset=utf-8'
+    )
+
+
 @app.route('/health', methods=['GET'])
 def health_check():
     """Liveness check endpoint"""
