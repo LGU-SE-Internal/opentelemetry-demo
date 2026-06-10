@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: currencyservice
+  labels:
+    app: currencyservice
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8080
+    targetPort: grpc
+    protocol: TCP
+    name: grpc
+  selector:
+    app: currencyservice
