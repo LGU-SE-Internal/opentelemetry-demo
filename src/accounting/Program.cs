@@ -11,26 +11,48 @@ using System.Net;
 using System.Security.Cryptography.X509Certificates;
 using Microsoft.AspNetCore.Authentication.Certificate;
 
-Console.WriteLine("Accounting service started");
+var builder = WebApplication.CreateBuilder(args);
+
+// Add logging with OpenTelemetry integration
+builder.Logging.AddOpenTelemetry(options =>
+{
+    options.SetResourceBuilder(OpenTelemetry.Resources.ResourceBuilder.CreateDefault()
+        .AddService("accounting-service"));
+});
+
+// Create early logger for startup logs
+var loggerFactory = LoggerFactory.Create(b =>
+{
+    b.AddConfiguration(builder.Configuration);
+    b.AddConsole();
+    b.AddOpenTelemetry(options =>
+    {
+        options.SetResourceBuilder(OpenTelemetry.Resources.ResourceBuilder.CreateDefault()
+            .AddService("accounting-service"));
+    });
+});
+var logger = loggerFactory.CreateLogger("Program");
+
+logger.LogInformation("Accounting service started");
 
 Environment.GetEnvironmentVariables()
     .FilterRelevant()
-    .OutputInOrder();
-
-var builder = WebApplication.CreateBuilder(args);
+    .OutputInOrder(logger);
 
 // Load TLS configuration
-var (tlsEnabled, mtlsEnabled, certPath, keyPath, caCertPath) = TlsConfiguration.GetHttpServerTlsConfig();
+var (tlsEnabled, mtlsEnabled, certPath, keyPath, caCertPath) = TlsConfiguration.GetHttpServerTlsConfig(logger);
 
 // Log TLS configuration status
-Console.WriteLine($"TLS configuration status: TLS {(tlsEnabled ? "ENABLED" : "DISABLED")}, mTLS {(mtlsEnabled ? "ENABLED" : "DISABLED")}");
+logger.LogInformation("TLS configuration status: TLS {TlsStatus}, mTLS {MtlsStatus}", 
+    tlsEnabled ? "ENABLED" : "DISABLED", 
+    mtlsEnabled ? "ENABLED" : "DISABLED");
 if (tlsEnabled)
 {
-    Console.WriteLine($"TLS certificate path: {certPath}");
-    Console.WriteLine($"TLS private key path: {keyPath}");
+    logger.LogInformation("TLS certificate path: {CertPath}", certPath);
+    logger.LogInformation("TLS private key path: {KeyPath}", keyPath);
     if (mtlsEnabled)
     {
-        Console.WriteLine($"mTLS CA certificate path: {caCertPath}");
+        logger.LogInformation("mTLS CA certificate path: {CaCertPath}", caCertPath);
     }
 }
 
