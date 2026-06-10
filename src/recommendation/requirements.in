@@ -8,3 +8,4 @@ python-dotenv==1.2.2
 python-json-logger==4.1.0
 limits==3.13.0
 pybreaker==1.4.1
+tenacity==9.0.0
