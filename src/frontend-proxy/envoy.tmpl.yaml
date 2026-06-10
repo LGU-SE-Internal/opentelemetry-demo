@@ -1,10 +1,21 @@
 # Copyright The OpenTelemetry Authors
 # SPDX-License-Identifier: Apache-2.0
 
+{{ $ingressTlsEnabled := eq (getenv "FRONTEND_PROXY_INGRESS_TLS_ENABLED" "false") "true" }}
+{{ $ingressTlsCertPath := getenv "FRONTEND_PROXY_INGRESS_TLS_CERT_PATH" "" }}
+{{ $ingressTlsKeyPath := getenv "FRONTEND_PROXY_INGRESS_TLS_KEY_PATH" "" }}
+{{ $ingressMtlsEnabled := eq (getenv "FRONTEND_PROXY_INGRESS_MTLS_ENABLED" "false") "true" }}
+{{ $ingressMtlsCaCertPath := getenv "FRONTEND_PROXY_INGRESS_MTLS_CA_CERT_PATH" "" }}
+{{ $ingressTlsMinVersion := "TLSv1_2" }}
+{{ $ingressTlsMaxVersion := "TLSv1_3" }}
+
 {{ $upstreamTlsEnabled := eq (getenv "FRONTEND_PROXY_UPSTREAM_TLS_ENABLED" "false") "true" }}
-{{ $upstreamTlsMinVersion := getenv "FRONTEND_PROXY_UPSTREAM_TLS_MIN_VERSION" "TLSv1_2" }}
-{{ $upstreamTlsMaxVersion := getenv "FRONTEND_PROXY_UPSTREAM_TLS_MAX_VERSION" "TLSv1_3" }}
-{{ $upstreamCaPath := getenv "FRONTEND_PROXY_UPSTREAM_TLS_CA_BUNDLE_PATH" "" }}
+{{ $upstreamTlsMinVersion := "TLSv1_2" }}
+{{ $upstreamTlsMaxVersion := "TLSv1_3" }}
+{{ $upstreamCaCertPath := getenv "FRONTEND_PROXY_UPSTREAM_TLS_CA_CERT_PATH" "" }}
+{{ $upstreamMtlsEnabled := eq (getenv "FRONTEND_PROXY_UPSTREAM_MTLS_ENABLED" "false") "true" }}
+{{ $upstreamTlsCertPath := getenv "FRONTEND_PROXY_UPSTREAM_TLS_CERT_PATH" "" }}
+{{ $upstreamTlsKeyPath := getenv "FRONTEND_PROXY_UPSTREAM_TLS_KEY_PATH" "" }}
 
 {{ $retryMaxAttempts := getenv "ENVOY_RETRY_MAX_ATTEMPTS" "2" | toInt }}
 {{ $retryOn := getenv "ENVOY_RETRY_ON" "5xx,gateway-error,connect-failure,refused-stream" }}
@@ -86,24 +97,24 @@ static_resources:
                         - name: envoy.tracers.opentelemetry.resource_detectors.environment
                           typed_config:
                             "@type": type.googleapis.com/envoy.extensions.tracers.opentelemetry.resource_detectors.v3.EnvironmentResourceDetectorConfig
-{{ if eq (getenv "FRONTEND_PROXY_TLS_ENABLED" "false") "true" }}
+{{ if $ingressTlsEnabled }}
           transport_socket:
             name: envoy.transport_sockets.tls
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
               common_tls_context:
                 tls_params:
-                  tls_minimum_protocol_version: {{ getenv "FRONTEND_PROXY_TLS_MIN_VERSION" "TLSv1_2" }}
-                  tls_maximum_protocol_version: {{ getenv "FRONTEND_PROXY_TLS_MAX_VERSION" "TLSv1_3" }}
+                  tls_minimum_protocol_version: {{ $ingressTlsMinVersion }}
+                  tls_maximum_protocol_version: {{ $ingressTlsMaxVersion }}
                 tls_certificates:
                   - certificate_chain:
-                      filename: {{ getenv "FRONTEND_PROXY_TLS_CERT_PATH" "" }}
+                      filename: {{ $ingressTlsCertPath }}
                     private_key:
-                      filename: {{ getenv "FRONTEND_PROXY_TLS_KEY_PATH" "" }}
-{{ if eq (getenv "FRONTEND_PROXY_MTLS_ENABLED" "false") "true" }}
+                      filename: {{ $ingressTlsKeyPath }}
+{{ if $ingressMtlsEnabled }}
                 validation_context:
                   trusted_ca:
-                    filename: {{ getenv "FRONTEND_PROXY_MTLS_CA_BUNDLE_PATH" "" }}
+                    filename: {{ $ingressMtlsCaCertPath }}
               require_client_certificate: true
 {{ end }}
 {{ end }}
@@ -462,12 +473,6 @@ static_resources:
                             value:
                               string_value: "%ROUTE_NAME%"
   clusters:
-{{ $upstreamTlsEnabled := eq (getenv "FRONTEND_PROXY_UPSTREAM_TLS_ENABLED" "false") "true" }}
-{{ if $upstreamTlsEnabled }}
-{{ $upstreamTlsMinVersion := getenv "FRONTEND_PROXY_UPSTREAM_TLS_MIN_VERSION" "TLSv1_2" }}
-{{ $upstreamTlsMaxVersion := getenv "FRONTEND_PROXY_UPSTREAM_TLS_MAX_VERSION" "TLSv1_3" }}
-{{ $upstreamCaPath := getenv "FRONTEND_PROXY_UPSTREAM_TLS_CA_BUNDLE_PATH" "" }}
-{{ end }}
     - name: opentelemetry_collector_grpc
       type: STRICT_DNS
       lb_policy: ROUND_ROBIN
@@ -486,8 +491,17 @@ static_resources:
               tls_minimum_protocol_version: {{ $upstreamTlsMinVersion }}
               tls_maximum_protocol_version: {{ $upstreamTlsMaxVersion }}
             validation_context:
+              {{ if $upstreamCaCertPath }}
               trusted_ca:
-                filename: {{ $upstreamCaPath }}
+                filename: {{ $upstreamCaCertPath }}
+              {{ end }}
+            {{ if $upstreamMtlsEnabled }}
+            tls_certificates:
+              - certificate_chain:
+                  filename: {{ $upstreamTlsCertPath }}
+                private_key:
+                  filename: {{ $upstreamTlsKeyPath }}
+            {{ end }}
 {{ end }}
       load_assignment:
         cluster_name: opentelemetry_collector_grpc
@@ -511,8 +525,17 @@ static_resources:
               tls_minimum_protocol_version: {{ $upstreamTlsMinVersion }}
               tls_maximum_protocol_version: {{ $upstreamTlsMaxVersion }}
             validation_context:
+              {{ if $upstreamCaCertPath }}
               trusted_ca:
-                filename: {{ $upstreamCaPath }}
+                filename: {{ $upstreamCaCertPath }}
+              {{ end }}
+            {{ if $upstreamMtlsEnabled }}
+            tls_certificates:
+              - certificate_chain:
+                  filename: {{ $upstreamTlsCertPath }}
+                private_key:
+                  filename: {{ $upstreamTlsKeyPath }}
+            {{ end }}
 {{ end }}
       load_assignment:
         cluster_name: opentelemetry_collector_http
@@ -550,8 +573,17 @@ static_resources:
               tls_minimum_protocol_version: {{ $upstreamTlsMinVersion }}
               tls_maximum_protocol_version: {{ $upstreamTlsMaxVersion }}
             validation_context:
+              {{ if $upstreamCaCertPath }}
               trusted_ca:
-                filename: {{ $upstreamCaPath }}
+                filename: {{ $upstreamCaCertPath }}
+              {{ end }}
+            {{ if $upstreamMtlsEnabled }}
+            tls_certificates:
+              - certificate_chain:
+                  filename: {{ $upstreamTlsCertPath }}
+                private_key:
+                  filename: {{ $upstreamTlsKeyPath }}
+            {{ end }}
 {{ end }}
       load_assignment:
         cluster_name: frontend
@@ -589,8 +621,17 @@ static_resources:
               tls_minimum_protocol_version: {{ $upstreamTlsMinVersion }}
               tls_maximum_protocol_version: {{ $upstreamTlsMaxVersion }}
             validation_context:
+              {{ if $upstreamCaCertPath }}
               trusted_ca:
-                filename: {{ $upstreamCaPath }}
+                filename: {{ $upstreamCaCertPath }}
+              {{ end }}
+            {{ if $upstreamMtlsEnabled }}
+            tls_certificates:
+              - certificate_chain:
+                  filename: {{ $upstreamTlsCertPath }}
+                private_key:
+                  filename: {{ $upstreamTlsKeyPath }}
+            {{ end }}
 {{ end }}
       load_assignment:
         cluster_name: image-provider
@@ -614,8 +655,17 @@ static_resources:
               tls_minimum_protocol_version: {{ $upstreamTlsMinVersion }}
               tls_maximum_protocol_version: {{ $upstreamTlsMaxVersion }}
             validation_context:
+              {{ if $upstreamCaCertPath }}
               trusted_ca:
-                filename: {{ $upstreamCaPath }}
+                filename: {{ $upstreamCaCertPath }}
+              {{ end }}
+            {{ if $upstreamMtlsEnabled }}
+            tls_certificates:
+              - certificate_chain:
+                  filename: {{ $upstreamTlsCertPath }}
+                private_key:
+                  filename: {{ $upstreamTlsKeyPath }}
+            {{ end }}
 {{ end }}
       load_assignment:
         cluster_name: flagservice
@@ -639,8 +689,17 @@ static_resources:
               tls_minimum_protocol_version: {{ $upstreamTlsMinVersion }}
               tls_maximum_protocol_version: {{ $upstreamTlsMaxVersion }}
             validation_context:
+              {{ if $upstreamCaCertPath }}
               trusted_ca:
-                filename: {{ $upstreamCaPath }}
+                filename: {{ $upstreamCaCertPath }}
+              {{ end }}
+            {{ if $upstreamMtlsEnabled }}
+            tls_certificates:
+              - certificate_chain:
+                  filename: {{ $upstreamTlsCertPath }}
+                private_key:
+                  filename: {{ $upstreamTlsKeyPath }}
+            {{ end }}
 {{ end }}
       load_assignment:
         cluster_name: flagd-ui
@@ -664,8 +723,17 @@ static_resources:
               tls_minimum_protocol_version: {{ $upstreamTlsMinVersion }}
               tls_maximum_protocol_version: {{ $upstreamTlsMaxVersion }}
             validation_context:
+              {{ if $upstreamCaCertPath }}
               trusted_ca:
-                filename: {{ $upstreamCaPath }}
+                filename: {{ $upstreamCaCertPath }}
+              {{ end }}
+            {{ if $upstreamMtlsEnabled }}
+            tls_certificates:
+              - certificate_chain:
+                  filename: {{ $upstreamTlsCertPath }}
+                private_key:
+                  filename: {{ $upstreamTlsKeyPath }}
+            {{ end }}
 {{ end }}
       load_assignment:
         cluster_name: loadgen
@@ -689,8 +757,17 @@ static_resources:
               tls_minimum_protocol_version: {{ $upstreamTlsMinVersion }}
               tls_maximum_protocol_version: {{ $upstreamTlsMaxVersion }}
             validation_context:
+              {{ if $upstreamCaCertPath }}
               trusted_ca:
-                filename: {{ $upstreamCaPath }}
+                filename: {{ $upstreamCaCertPath }}
+              {{ end }}
+            {{ if $upstreamMtlsEnabled }}
+            tls_certificates:
+              - certificate_chain:
+                  filename: {{ $upstreamTlsCertPath }}
+                private_key:
+                  filename: {{ $upstreamTlsKeyPath }}
+            {{ end }}
 {{ end }}
       load_assignment:
         cluster_name: grafana
@@ -714,8 +791,17 @@ static_resources:
               tls_minimum_protocol_version: {{ $upstreamTlsMinVersion }}
               tls_maximum_protocol_version: {{ $upstreamTlsMaxVersion }}
             validation_context:
+              {{ if $upstreamCaCertPath }}
               trusted_ca:
-                filename: {{ $upstreamCaPath }}
+                filename: {{ $upstreamCaCertPath }}
+              {{ end }}
+            {{ if $upstreamMtlsEnabled }}
+            tls_certificates:
+              - certificate_chain:
+                  filename: {{ $upstreamTlsCertPath }}
+                private_key:
+                  filename: {{ $upstreamTlsKeyPath }}
+            {{ end }}
 {{ end }}
       load_assignment:
         cluster_name: jaeger
@@ -739,8 +825,17 @@ static_resources:
               tls_minimum_protocol_version: {{ $upstreamTlsMinVersion }}
               tls_maximum_protocol_version: {{ $upstreamTlsMaxVersion }}
             validation_context:
+              {{ if $upstreamCaCertPath }}
               trusted_ca:
-                filename: {{ $upstreamCaPath }}
+                filename: {{ $upstreamCaCertPath }}
+              {{ end }}
+            {{ if $upstreamMtlsEnabled }}
+            tls_certificates:
+              - certificate_chain:
+                  filename: {{ $upstreamTlsCertPath }}
+                private_key:
+                  filename: {{ $upstreamTlsKeyPath }}
+            {{ end }}
 {{ end }}
       load_assignment:
         cluster_name: telemetry-docs
@@ -764,8 +859,17 @@ static_resources:
               tls_minimum_protocol_version: {{ $upstreamTlsMinVersion }}
               tls_maximum_protocol_version: {{ $upstreamTlsMaxVersion }}
             validation_context:
+              {{ if $upstreamCaCertPath }}
               trusted_ca:
-                filename: {{ $upstreamCaPath }}
+                filename: {{ $upstreamCaCertPath }}
+              {{ end }}
+            {{ if $upstreamMtlsEnabled }}
+            tls_certificates:
+              - certificate_chain:
+                  filename: {{ $upstreamTlsCertPath }}
+                private_key:
+                  filename: {{ $upstreamTlsKeyPath }}
+            {{ end }}
 {{ end }}
       load_assignment:
         cluster_name: profiles
