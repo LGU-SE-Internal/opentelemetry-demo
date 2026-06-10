@@ -17,7 +17,7 @@ from typing import Optional
 import threading
 from uuid import uuid4
 from datetime import datetime
-from pythonjsonlogger import jsonlogger
+from pythonjsonlogger import json as jsonlogger
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from openfeature import api
@@ -200,15 +200,18 @@ def load_product_review_summaries(file_path):
                         product_review_summaries[product_id] = product.get("product_review_summary")
                 return product_review_summaries
             except json.JSONDecodeError:
-                logger.error("Error: Invalid JSON string provided during initialization.")
+                app.logger.error("Error: Invalid JSON string provided during initialization.")
                 return {}
 
     except FileNotFoundError:
-        app.logger.error(f"Error: The file '{product_review_summaries_file_path}' was not found.")
+        app.logger.error(f"Error: The file '{file_path}' was not found.")
+        return {}
     except json.JSONDecodeError:
-        app.logger.error(f"Error: Failed to decode JSON from the file '{product_review_summaries_file_path}'. Check for malformed JSON.")
+        app.logger.error(f"Error: Failed to decode JSON from the file '{file_path}'. Check for malformed JSON.")
+        return {}
     except Exception as e:
         app.logger.error(f"An unexpected error occurred: {e}")
+        return {}
 
 
 def generate_response(product_id):
