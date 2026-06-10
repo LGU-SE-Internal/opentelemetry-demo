@@ -144,9 +144,7 @@ def track_request_end(exc=None):
 
 # Rate limiting configuration
 def get_rate_limit():
-            except json.JSONDecodeError:
-                logger.error("Error: Invalid JSON string provided during initialization.")
-                return {}
+    return "100 per minute"
 
 # Initialize rate limiter
 limiter = Limiter(
@@ -202,7 +200,7 @@ def load_product_review_summaries(file_path):
                         product_review_summaries[product_id] = product.get("product_review_summary")
                 return product_review_summaries
             except json.JSONDecodeError:
-                print("Error: Invalid JSON string provided during initialization.")
+                logger.error("Error: Invalid JSON string provided during initialization.")
                 return {}
 
     except FileNotFoundError:
