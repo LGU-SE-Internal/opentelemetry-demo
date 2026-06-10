@@ -19,6 +19,8 @@ spec:
         app.kubernetes.io/name: jaeger
         app.kubernetes.io/instance: jaeger
         app.kubernetes.io/version: "2.14.1"
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
       securityContext:
         runAsNonRoot: true
@@ -29,9 +31,8 @@ spec:
         - name: jaeger-config
           configMap:
             name: jaeger-config
-        - name: jaeger-storage
-          persistentVolumeClaim:
-            claimName: jaeger-storage
+        - name: tmp
+          emptyDir: {}
       containers:
         - name: jaeger
           image: quay.io/jaegertracing/jaeger:2.14.1
@@ -39,7 +40,16 @@ spec:
           command:
             - /go/bin/all-in-one-linux
             - --config
-            - /etc/jaeger/jaeger.yaml
+            - /etc/jaeger/config.yml
+          env:
+            - name: COLLECTOR_TLS_ENABLED
+              value: "{{ .Values.collector.tls.enabled | default false }}"
+            - name: COLLECTOR_TLS_CERT_PATH
+              value: "{{ .Values.collector.tls.certPath | default \"\" }}"
+            - name: COLLECTOR_TLS_KEY_PATH
+              value: "{{ .Values.collector.tls.keyPath | default \"\" }}"
+            - name: COLLECTOR_TLS_CLIENT_CA_PATH
+              value: "{{ .Values.collector.tls.clientCAPath | default \"\" }}"
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -50,49 +60,41 @@ spec:
             - name: ui
               containerPort: 16686
               protocol: TCP
-            - name: grpc-model
+            - name: grpc-collector
               containerPort: 14250
               protocol: TCP
-            - name: http-thrift
+            - name: http-collector
               containerPort: 14268
               protocol: TCP
-            - name: otlp-grpc
-              containerPort: 4317
-              protocol: TCP
-            - name: otlp-http
-              containerPort: 4318
-              protocol: TCP
-            - name: admin-health
+            - name: health-check
               containerPort: 14269
               protocol: TCP
           livenessProbe:
             httpGet:
-              path: /
-              port: admin-health
+              path: /livez
+              port: health-check
             initialDelaySeconds: 30
             periodSeconds: 10
             timeoutSeconds: 1
             failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: /
-              port: admin-health
+              path: /readyz
+              port: health-check
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 1
             failureThreshold: 3
           resources:
             requests:
-              cpu: 250m
-              memory: 512Mi
-              ephemeral-storage: 1Gi
+              cpu: 100m
+              memory: 256Mi
             limits:
-              cpu: 1000m
-              memory: 2Gi
-              ephemeral-storage: 2Gi
+              cpu: 500m
+              memory: 1Gi
           volumeMounts:
             - name: jaeger-config
               mountPath: /etc/jaeger
               readOnly: true
-            - name: jaeger-storage
-              mountPath: /badger/data
+            - name: tmp
+              mountPath: /tmp

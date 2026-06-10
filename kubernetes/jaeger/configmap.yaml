@@ -8,10 +8,9 @@ metadata:
     app.kubernetes.io/instance: jaeger
     app.kubernetes.io/version: "2.14.1"
 data:
-  jaeger.yaml: |
+  config.yml: |
     badger:
-      ephemeral: false
-      directory: /badger/data
+      ephemeral: true
     service:
       telemetry:
         health-check-http:
