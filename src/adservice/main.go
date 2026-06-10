@@ -217,6 +217,9 @@ func main() {
 		logger.Fatalf("Failed to load configuration: %v", err)
 	}
 
+	// Create gRPC health server first so we can set status during DB initialization
+	healthServer := health.NewServer()
+
 	// Initialize database connection
 	portStr := strconv.Itoa(cfg.DBPort)
 	connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
@@ -232,20 +235,24 @@ func main() {
 	}
 	dbConn, err := sql.Open("postgres", connStr)
 	if err != nil {
-		logger.Fatalf("Failed to connect to database: %v", err)
+		logger.Fatalf("Failed to initialize database connection: %v", err)
 	}
 	defer dbConn.Close()
 
+	// Attempt initial DB ping but don't fail on error - let readiness check handle it
 	if err := dbConn.Ping(); err != nil {
-		logger.Fatalf("Failed to ping database: %v", err)
+		logger.Printf("Warning: Initial database ping failed: %v", err)
+		healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
+	} else {
+		logger.Println("Successfully connected to database")
+		healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
 	}
-	logger.Println("Successfully connected to database")
 
 	// Create gRPC server
 	listenAddr := fmt.Sprintf(":%d", cfg.ServicePort)
 	lis, err := net.Listen("tcp", listenAddr)
 	if err != nil {
-		logger.Fatalf("Failed to listen on %s: %v", listenAddr, err)
+		logger.Fatalf("Failed to listen on %s: %v", err)
 	}
 
 	s := grpc.NewServer(
@@ -256,10 +263,7 @@ func main() {
 	reflection.Register(s)
 
 	// Register gRPC health check service
-	healthServer := health.NewServer()
 	grpc_health_v1.RegisterHealthServer(s, healthServer)
-	// Set initial serving status
-	healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
 
 	// Set up HTTP health server
 	mux := http.NewServeMux()
@@ -275,6 +279,22 @@ func main() {
 		logger.Printf("Health endpoints starting on :%d", cfg.HealthPort)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Fatalf("Failed to start health server: %v", err)
+		}
+	}()
+
+	// Start background DB health check goroutine
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			if isShuttingDown.Load() {
+				return
+			}
+			if err := dbConn.Ping(); err != nil {
+				healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
+			} else {
+				healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
+			}
 		}
 	}()
 
