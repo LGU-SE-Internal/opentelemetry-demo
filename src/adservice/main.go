@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -16,6 +15,8 @@ import (
 	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/otel/log"
+	"go.opentelemetry.io/otel/log/global"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
@@ -26,7 +27,7 @@ import (
 )
 
 var isShuttingDown atomic.Bool
-var logger = log.Default()
+var otelLogger = global.GetLoggerProvider().Logger("adservice")
 
 // Config holds all service configuration values
 type Config struct {
@@ -211,11 +212,15 @@ func readinessHandler(db *sql.DB) http.HandlerFunc {
 }
 
 func main() {
-	// Load configuration
-	cfg, err := LoadConfig()
-	if err != nil {
-		logger.Fatalf("Failed to load configuration: %v", err)
-	}
+		// Load configuration
+		cfg, err := LoadConfig()
+		if err != nil {
+			otelLogger.Emit(context.Background(), log.Record{
+				Severity: log.SeverityError,
+				Body:     log.StringValue(fmt.Sprintf("Failed to load configuration: %v", err)),
+			})
+			os.Exit(1)
+		}
 
 	// Create gRPC health server first so we can set status during DB initialization
 	healthServer := health.NewServer()
@@ -233,26 +238,40 @@ func main() {
 	if cfg.DBSSLKey != "" {
 		connStr += fmt.Sprintf(" sslkey=%s", cfg.DBSSLKey)
 	}
-	dbConn, err := sql.Open("postgres", connStr)
-	if err != nil {
-		logger.Fatalf("Failed to initialize database connection: %v", err)
-	}
+		dbConn, err := sql.Open("postgres", connStr)
+		if err != nil {
+			otelLogger.Emit(context.Background(), log.Record{
+				Severity: log.SeverityError,
+				Body:     log.StringValue(fmt.Sprintf("Failed to initialize database connection: %v", err)),
+			})
+			os.Exit(1)
+		}
 	defer dbConn.Close()
 
-	// Attempt initial DB ping but don't fail on error - let readiness check handle it
-	if err := dbConn.Ping(); err != nil {
-		logger.Printf("Warning: Initial database ping failed: %v", err)
-		healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
-	} else {
-		logger.Println("Successfully connected to database")
-		healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
-	}
+        // Attempt initial DB ping but don't fail on error - let readiness check handle it
+        if err := dbConn.Ping(); err != nil {
+                otelLogger.Emit(context.Background(), log.Record{
+                        Severity: log.SeverityWarn,
+                        Body:     log.StringValue(fmt.Sprintf("Warning: Initial database ping failed: %v", err)),
+                })
+                healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
+        } else {
+                otelLogger.Emit(context.Background(), log.Record{
+                        Severity: log.SeverityInfo,
+                        Body:     log.StringValue("Successfully connected to database"),
+                })
+                healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
+        }
 
 	// Create gRPC server
 	listenAddr := fmt.Sprintf(":%d", cfg.ServicePort)
 	lis, err := net.Listen("tcp", listenAddr)
 	if err != nil {
-		logger.Fatalf("Failed to listen on %s: %v", err)
+		otelLogger.Emit(context.Background(), log.Record{
+			Severity: log.SeverityError,
+			Body:     log.StringValue(fmt.Sprintf("Failed to listen on %s: %v", listenAddr, err)),
+		})
+		os.Exit(1)
 	}
 
 	s := grpc.NewServer(
@@ -276,9 +295,16 @@ func main() {
 
 	// Start HTTP health server in goroutine
 	go func() {
-		logger.Printf("Health endpoints starting on :%d", cfg.HealthPort)
+		otelLogger.Emit(context.Background(), log.Record{
+			Severity: log.SeverityInfo,
+			Body:     log.StringValue(fmt.Sprintf("Health endpoints starting on :%d", cfg.HealthPort)),
+		})
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Fatalf("Failed to start health server: %v", err)
+			otelLogger.Emit(context.Background(), log.Record{
+				Severity: log.SeverityError,
+				Body:     log.StringValue(fmt.Sprintf("Failed to start health server: %v", err)),
+			})
+			os.Exit(1)
 		}
 	}()
 
@@ -307,29 +333,51 @@ func main() {
 		isShuttingDown.Store(true)
 		// Update health status to not serving
 		healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
-		logger.Println("INFO: Starting graceful shutdown, waiting up to 10s for in-flight requests to complete")
+		otelLogger.Emit(context.Background(), log.Record{
+			Severity: log.SeverityInfo,
+			Body:     log.StringValue("INFO: Starting graceful shutdown, waiting up to 10s for in-flight requests to complete"),
+		})
 		// Shutdown HTTP server
 		httpCtx, httpCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer httpCancel()
 		if err := httpServer.Shutdown(httpCtx); err != nil {
-			logger.Printf("WARN: HTTP server shutdown failed: %v", err)
+			otelLogger.Emit(context.Background(), log.Record{
+				Severity: log.SeverityWarn,
+				Body:     log.StringValue(fmt.Sprintf("WARN: HTTP server shutdown failed: %v", err)),
+			})
 		}
 		err := GracefulShutdown(s, dbConn, shutdownWindow)
 		if err != nil {
 			if err == context.DeadlineExceeded {
-				logger.Println("WARN: Graceful shutdown timed out after 10s, force closing remaining connections")
+				otelLogger.Emit(context.Background(), log.Record{
+					Severity: log.SeverityWarn,
+					Body:     log.StringValue("WARN: Graceful shutdown timed out after 10s, force closing remaining connections"),
+				})
 				os.Exit(1)
 			}
-			logger.Printf("ERROR: Graceful shutdown failed: %v", err)
+			otelLogger.Emit(context.Background(), log.Record{
+				Severity: log.SeverityError,
+				Body:     log.StringValue(fmt.Sprintf("ERROR: Graceful shutdown failed: %v", err)),
+			})
 			os.Exit(1)
 		}
-		logger.Println("INFO: Successfully closed database connection")
+		otelLogger.Emit(context.Background(), log.Record{
+			Severity: log.SeverityInfo,
+			Body:     log.StringValue("INFO: Successfully closed database connection"),
+		})
 		os.Exit(0)
 	}()
 
-	logger.Printf("Ad service starting on %s", listenAddr)
+	otelLogger.Emit(context.Background(), log.Record{
+		Severity: log.SeverityInfo,
+		Body:     log.StringValue(fmt.Sprintf("Ad service starting on %s", listenAddr)),
+	})
 	if err := s.Serve(lis); err != nil && err != grpc.ErrServerStopped {
-		logger.Fatalf("Failed to serve: %v", err)
+		otelLogger.Emit(context.Background(), log.Record{
+			Severity: log.SeverityError,
+			Body:     log.StringValue(fmt.Sprintf("Failed to serve: %v", err)),
+		})
+		os.Exit(1)
 	}
 }
 
