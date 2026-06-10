@@ -60,6 +60,9 @@ internal class Consumer : IAsyncDisposable, IDisposable
     private int _inFlightMessages = 0;
     private readonly object _lockObj = new();
     private readonly AsyncCircuitBreakerPolicy _circuitBreakerPolicy;
+    private readonly DbOperationExecutor _dbOperationExecutor;
+    private readonly int _dbRetryMaxAttempts;
+    private readonly int _dbRetryInitialDelayMs;
     private readonly Meter _meter;
     private string _currentCircuitState = "closed";
 
@@ -191,6 +194,13 @@ internal class Consumer : IAsyncDisposable, IDisposable
                     _currentCircuitState = "half_open";
                 });
 
+        // Load database retry configuration from environment variables
+        _dbRetryMaxAttempts = int.TryParse(Environment.GetEnvironmentVariable("ACCOUNTING_DB_RETRY_MAX_ATTEMPTS"), out int maxAttempts) ? maxAttempts : 3;
+        _dbRetryInitialDelayMs = int.TryParse(Environment.GetEnvironmentVariable("ACCOUNTING_DB_RETRY_INITIAL_DELAY_MS"), out int initialDelay) ? initialDelay : 100;
+        
+        // Initialize database operation executor with combined retry + circuit breaker policy
+        _dbOperationExecutor = new DbOperationExecutor(_circuitBreakerPolicy, _logger, _dbRetryMaxAttempts, _dbRetryInitialDelayMs);
+
         // Initialize metrics
         _meter = new Meter("Accounting.Service");
         _meter.CreateObservableGauge(
@@ -290,7 +300,7 @@ internal class Consumer : IAsyncDisposable, IDisposable
 
         try
         {
-            return await _circuitBreakerPolicy.ExecuteAsync(async () =>
+            return await _dbOperationExecutor.ExecuteAsync(async (ct) =>
             {
                 while (true)
                 {
@@ -480,7 +490,7 @@ internal class Consumer : IAsyncDisposable, IDisposable
                     OrderId = order.OrderId
                 };
                 dbContext.Add(shipping);
-                await _circuitBreakerPolicy.ExecuteAsync(() => dbContext.SaveChangesAsync(cancellationToken), cancellationToken);
+                await _dbOperationExecutor.ExecuteAsync(async (ct) => await dbContext.SaveChangesAsync(ct), cancellationToken);
                 await transaction.CommitAsync(cancellationToken);
                 _logger.LogInformation("Successfully processed order {OrderId}", order.OrderId);
                 return true;
