@@ -134,7 +134,7 @@ builder.Services.AddHealthChecks()
     // Liveness check: always returns healthy when process is running
     .AddCheck("liveness", () => HealthCheckResult.Healthy(), new[] { "health" })
     // Readiness check: check Kafka connection
-    .Add(new HealthCheckRegistration("kafka", sp =>
+    .Add(new HealthCheckRegistration("kafka_consumer", sp =>
     {
         var kafkaAddr = Environment.GetEnvironmentVariable("KAFKA_ADDR")
             ?? throw new InvalidOperationException("KAFKA_ADDR environment variable is not set");
@@ -167,7 +167,7 @@ if (mtlsEnabled)
 var shutdownService = app.Services.GetRequiredService<IGracefulShutdownService>();
 shutdownService.RegisterSignalHandlers();
 
-// Map /health endpoint
+// Map /health endpoint (existing for backward compatibility)
 app.MapGet("/health", async context =>
 {
     context.Response.ContentType = "application/json";
@@ -182,7 +182,7 @@ app.MapGet("/health", async context =>
     await context.Response.WriteAsync(JsonSerializer.Serialize(new { status = "Healthy" }));
 });
 
-// Map /ready endpoint
+// Map /ready endpoint (existing for backward compatibility)
 app.MapGet("/ready", async context =>
 {
     var healthCheckService = context.RequestServices.GetRequiredService<HealthCheckService>();
@@ -190,7 +190,7 @@ app.MapGet("/ready", async context =>
     
     context.Response.ContentType = "application/json";
     
-    var kafkaStatus = result.Entries.TryGetValue("kafka", out var kafkaEntry) 
+    var kafkaStatus = result.Entries.TryGetValue("kafka_consumer", out var kafkaEntry) 
         ? kafkaEntry.Status == HealthStatus.Healthy ? "Healthy" : "Unhealthy" 
         : "Unhealthy";
     
@@ -224,6 +224,68 @@ app.MapGet("/ready", async context =>
             checks = new
             {
                 kafka = kafkaStatus,
+                postgresql = postgresqlStatus
+            }
+        }));
+    }
+});
+
+// New health endpoints as per spec
+// Map GET /health/liveness
+app.MapGet("/health/liveness", async context =>
+{
+    context.Response.ContentType = "application/json";
+    // Return 503 if shutdown has been initiated, else 200
+    if (shutdownService.ShutdownInitiatedToken.IsCancellationRequested)
+    {
+        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+        await context.Response.WriteAsync(JsonSerializer.Serialize(new { status = "Unhealthy" }));
+        return;
+    }
+    context.Response.StatusCode = StatusCodes.Status200OK;
+    await context.Response.WriteAsync(JsonSerializer.Serialize(new { status = "Healthy" }));
+});
+
+// Map GET /health/readiness
+app.MapGet("/health/readiness", async context =>
+{
+    var healthCheckService = context.RequestServices.GetRequiredService<HealthCheckService>();
+    var result = await healthCheckService.CheckHealthAsync(check => check.Tags.Contains("ready"));
+    
+    context.Response.ContentType = "application/json";
+    
+    var kafkaStatus = result.Entries.TryGetValue("kafka_consumer", out var kafkaEntry) 
+        ? kafkaEntry.Status == HealthStatus.Healthy ? "Healthy" : "Unhealthy" 
+        : "Unhealthy";
+    
+    var postgresqlStatus = result.Entries.TryGetValue("postgresql", out var pgEntry) 
+        ? pgEntry.Status == HealthStatus.Healthy ? "Healthy" : "Unhealthy" 
+        : "Unhealthy";
+    
+    var overallStatus = result.Status == HealthStatus.Healthy ? "Healthy" : "Unhealthy";
+    
+    if (result.Status == HealthStatus.Healthy)
+    {
+        context.Response.StatusCode = StatusCodes.Status200OK;
+        await context.Response.WriteAsync(JsonSerializer.Serialize(new 
+        { 
+            status = overallStatus, 
+            checks = new
+            {
+                kafka_consumer = kafkaStatus,
+                postgresql = postgresqlStatus
+            }
+        }));
+    }
+    else
+    {
+        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+        await context.Response.WriteAsync(JsonSerializer.Serialize(new 
+        { 
+            status = overallStatus, 
+            checks = new
+            {
+                kafka_consumer = kafkaStatus,
                 postgresql = postgresqlStatus
             }
         }));
