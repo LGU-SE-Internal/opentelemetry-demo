@@ -4,6 +4,7 @@
 using System.Collections;
 using Confluent.Kafka;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
+using Microsoft.Extensions.Logging;
 
 namespace Accounting
 {
@@ -25,11 +26,11 @@ namespace Accounting
             }
         }
 
-        public static void OutputInOrder(this IEnumerable<DictionaryEntry> envs)
+        public static void OutputInOrder(this IEnumerable<DictionaryEntry> envs, ILogger logger)
         {
             foreach (var env in envs.OrderBy(x => x.Key))
             {
-                Console.WriteLine(env);
+                logger.LogDebug("Environment variable: {EnvKey} = {EnvValue}", env.Key, env.Value);
             }
         }
 

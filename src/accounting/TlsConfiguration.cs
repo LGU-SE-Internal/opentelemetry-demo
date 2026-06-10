@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 using System.Security.Cryptography.X509Certificates;
+using Microsoft.Extensions.Logging;
 
 namespace Accounting;
 
@@ -21,7 +22,7 @@ internal static class TlsConfiguration
     private const string ACCOUNTING_SERVICE_TLS_KEY_PATH = "ACCOUNTING_SERVICE_TLS_KEY_PATH";
     private const string ACCOUNTING_SERVICE_MTLS_CA_CERT_PATH = "ACCOUNTING_SERVICE_MTLS_CA_CERT_PATH";
 
-    public static (bool TlsEnabled, bool MtlsEnabled, string CertPath, string KeyPath, string CaCertPath) GetHttpServerTlsConfig()
+    public static (bool TlsEnabled, bool MtlsEnabled, string CertPath, string KeyPath, string CaCertPath) GetHttpServerTlsConfig(ILogger logger)
     {
         var certPath = Environment.GetEnvironmentVariable(ACCOUNTING_SERVICE_TLS_CERT_PATH) ?? string.Empty;
         var keyPath = Environment.GetEnvironmentVariable(ACCOUNTING_SERVICE_TLS_KEY_PATH) ?? string.Empty;
@@ -40,7 +41,7 @@ internal static class TlsConfiguration
         {
             if (hasCaCert)
             {
-                Console.WriteLine("WARNING: ACCOUNTING_SERVICE_MTLS_CA_CERT_PATH provided without TLS cert/key, mTLS configuration will be ignored");
+                logger.LogWarning("WARNING: ACCOUNTING_SERVICE_MTLS_CA_CERT_PATH provided without TLS cert/key, mTLS configuration will be ignored");
             }
             return (false, false, string.Empty, string.Empty, string.Empty);
         }
