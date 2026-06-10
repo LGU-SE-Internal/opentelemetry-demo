@@ -116,6 +116,64 @@ def load_config() -> dict:
 # Load configuration at module level so it's available to all classes
 CONFIG = load_config()
 
+from pythonjsonlogger import jsonlogger
+
+def setup_logging(service_name: str, environment: str = "production") -> None:
+    """
+    Initializes OpenTelemetry Logging SDK with global log processor
+    Configures JSON formatter for stdout output
+    Sets log level based on environment (INFO for production, DEBUG for development if LOG_LEVEL env var is set)
+    """
+    # Create resource with service name
+    resource = Resource(attributes={
+        "service.name": service_name
+    })
+    
+    # Configure logger provider with the resource
+    logger_provider = LoggerProvider(resource=resource)
+    set_logger_provider(logger_provider)
+    
+    # Determine log level
+    log_level_env = os.environ.get("LOG_LEVEL", "").lower()
+    if environment == "development" or log_level_env == "debug":
+        log_level = logging.DEBUG
+    else:
+        log_level = logging.INFO
+    
+    # Configure JSON formatter for stdout
+    class CustomJsonFormatter(jsonlogger.JsonFormatter):
+        def add_fields(self, log_record, record, message_dict):
+            super().add_fields(log_record, record, message_dict)
+            # Add required fields
+            log_record["timestamp"] = self.formatTime(record, datefmt="%Y-%m-%dT%H:%M:%S.%fZ")
+            log_record["service.name"] = service_name
+            log_record["severity_text"] = record.levelname
+            # Rename message to body
+            if "message" in log_record:
+                log_record["body"] = log_record.pop("message")
+            # Add trace and span IDs if present
+            if hasattr(record, "trace_id"):
+                log_record["trace.id"] = format(record.trace_id, "032x")
+            if hasattr(record, "span_id"):
+                log_record["span.id"] = format(record.span_id, "016x")
+    
+    # Create stdout handler with JSON formatting
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler.setLevel(log_level)
+    formatter = CustomJsonFormatter(
+        "%(asctime)s %(levelname)s %(message)s",
+        rename_fields={"levelname": "severity_text", "message": "body"}
+    )
+    stdout_handler.setFormatter(formatter)
+    
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+    root_logger.addHandler(stdout_handler)
+    
+    # Instrument logging to automatically inject trace context
+    LoggingInstrumentor().instrument(set_logging_format=False)
+
 def initialize_otel_exporters():
     # Read environment variables with defaults
     traces_endpoint = os.environ.get(
@@ -172,34 +230,27 @@ def initialize_otel_exporters():
     }
     
     # Configure tracer provider first (needed for trace context in logs)
-    tracer_provider = TracerProvider()
+    resource = Resource(attributes={
+        "service.name": "load-generator"
+    })
+    tracer_provider = TracerProvider(resource=resource)
     trace.set_tracer_provider(tracer_provider)
     trace_exporter = TraceExporter(endpoint=traces_endpoint, **common_params)
     tracer_provider.add_span_processor(BatchSpanProcessor(trace_exporter))
     
     # Configure logger provider with the same resource
-    logger_provider = LoggerProvider()
+    logger_provider = LoggerProvider(resource=resource)
     set_logger_provider(logger_provider)
     
     # Set up log exporter and processor
     log_exporter = LogExporter(endpoint=logs_endpoint, **common_params)
     logger_provider.add_log_record_processor(BatchLogRecordProcessor(log_exporter))
     
-    # Create logging handler that will include trace context
-    handler = LoggingHandler(level=logging.INFO, logger_provider=logger_provider)
-    
-    # Configure root logger
-    root_logger = logging.getLogger()
-    root_logger.addHandler(handler)
-    root_logger.setLevel(logging.INFO)
-    
     # Configure metrics
     metric_exporter = MetricExporter(endpoint=metrics_endpoint, **common_params)
     set_meter_provider(MeterProvider([PeriodicExportingMetricReader(metric_exporter)]))
-    
-    # Instrument logging to automatically inject trace context
-    LoggingInstrumentor().instrument(set_logging_format=True)
 
+setup_logging(service_name="load-generator", environment="production")
 initialize_otel_exporters()
 
 # Instrumenting manually to avoid error with locust gevent monkey
@@ -430,7 +481,7 @@ if browser_traffic_enabled:
             tracer = trace.get_tracer(__name__)
             with tracer.start_as_current_span("browser_change_currency", context=Context()):
                 try:
-                    page.on("console", lambda msg: print(msg.text))
+                    page.on("console", lambda msg: logging.debug(msg.text))
                     await page.route('**/*', add_baggage_header)
                     await page.goto("/cart", wait_until="domcontentloaded")
                     await page.select_option('[name="currency_code"]', 'CHF')
@@ -445,7 +496,7 @@ if browser_traffic_enabled:
             tracer = trace.get_tracer(__name__)
             with tracer.start_as_current_span("browser_add_to_cart", context=Context()):
                 try:
-                    page.on("console", lambda msg: print(msg.text))
+                    page.on("console", lambda msg: logging.debug(msg.text))
                     await page.route('**/*', add_baggage_header)
                     await page.goto("/", wait_until="domcontentloaded")
                     # Wait for Roof Binoculars image to load (awaiting successful XHR response in less than configured timeout)
