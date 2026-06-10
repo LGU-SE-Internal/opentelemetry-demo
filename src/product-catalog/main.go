@@ -22,7 +22,9 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -41,6 +43,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	semconv "go.opentelemetry.io/otel/semconv/v1.38.0"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/time/rate"
 
 	otelhooks "github.com/open-feature/go-sdk-contrib/hooks/open-telemetry/pkg"
 	flagd "github.com/open-feature/go-sdk-contrib/providers/flagd/pkg"
@@ -49,7 +52,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
-	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
 
@@ -70,7 +74,90 @@ var (
 	ErrTLSConfigMissingCA   = errors.New("TLS config missing CA bundle path for client auth")
 	ErrTLSInvalidCert       = errors.New("invalid TLS certificate/key")
 	ErrTLSInvalidCA         = errors.New("invalid CA bundle")
+	// Rate limit errors
+	ErrInvalidDefaultRateLimit = errors.New("invalid default rate limit value, must be integer >= 1")
 )
+
+// RateLimitInterceptor holds rate limiters per endpoint
+type RateLimitInterceptor struct {
+	defaultLimit    rate.Limit
+	endpointLimits  map[string]rate.Limit
+	limiters        map[string]*rate.Limiter
+	limiterMutex    sync.RWMutex
+}
+
+// NewRateLimitInterceptor creates a new rate limit interceptor
+func NewRateLimitInterceptor(defaultLimit rate.Limit, endpointOverrides map[string]rate.Limit) *RateLimitInterceptor {
+	return &RateLimitInterceptor{
+		defaultLimit:   defaultLimit,
+		endpointLimits: endpointOverrides,
+		limiters:       make(map[string]*rate.Limiter),
+	}
+}
+
+// Unary returns a gRPC unary server interceptor that enforces rate limits per endpoint
+func (i *RateLimitInterceptor) Unary() grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+		endpoint := info.FullMethod
+		limiter := i.getLimiter(endpoint)
+
+		if !limiter.Allow() {
+			// Get client IP
+			clientIP := "unknown"
+			if p, ok := peer.FromContext(ctx); ok {
+				if addr, ok := p.Addr.(*net.TCPAddr); ok {
+					clientIP = addr.IP.String()
+				}
+			}
+
+			// Get the limit value in RPM
+			limitRpm := int(i.defaultLimit * 60)
+			if override, ok := i.endpointLimits[endpoint]; ok {
+				limitRpm = int(override * 60)
+			}
+
+			// Log rate limit hit
+			logger.WarnContext(ctx, "rate limit exceeded",
+				slog.String("client_ip", clientIP),
+				slog.String("endpoint", endpoint),
+				slog.Int("limit_rpm", limitRpm),
+			)
+
+			return nil, status.Errorf(codes.ResourceExhausted, "rate limit exceeded for endpoint %s, limit: %d requests per minute", endpoint, limitRpm)
+		}
+
+		return handler(ctx, req)
+	}
+}
+
+func (i *RateLimitInterceptor) getLimiter(endpoint string) *rate.Limiter {
+	i.limiterMutex.RLock()
+	limiter, ok := i.limiters[endpoint]
+	i.limiterMutex.RUnlock()
+
+	if ok {
+		return limiter
+	}
+
+	i.limiterMutex.Lock()
+	defer i.limiterMutex.Unlock()
+
+	// Check again in case it was added while waiting for lock
+	if limiter, ok := i.limiters[endpoint]; ok {
+		return limiter
+	}
+
+	// Create new limiter
+	limit := i.defaultLimit
+	if override, ok := i.endpointLimits[endpoint]; ok {
+		limit = override
+	}
+	limiter = rate.NewLimiter(limit, int(limit)) // Burst equal to limit per second? Wait, limit is per second. So burst is limit per minute? Wait no: rate.Limit is per second. So if defaultLimit is RPM/60, then burst should be RPM so we allow up to RPM requests in a burst? Wait let's think: for 100 RPM, limit is 100/60 per second, burst 100 allows 100 requests immediately, then refills at 100/60 per second. That makes sense for RPM limit.
+	// Oh right! Because rate.Limiter allows burst of up to 'burst' tokens, refilling at 'limit' per second. So for RPM limit of N, we set limit = N / 60 per second, burst = N, which allows N requests in any 60 second window. That exactly matches our requirement.
+	limiter = rate.NewLimiter(limit, int(limit * 60))
+	i.limiters[endpoint] = limiter
+	return limiter
+}
 
 // RetryConfig defines configuration for retry behavior
 type RetryConfig struct {
@@ -551,7 +638,47 @@ func main() {
 		logger.Error(fmt.Sprintf("Invalid TLS configuration: %v", err))
 		os.Exit(1)
 	}
-	
+
+	// Load rate limit configuration
+	defaultRpmStr := os.Getenv("PRODUCT_CATALOG_DEFAULT_RATE_LIMIT_RPM")
+	var defaultLimit rate.Limit
+	endpointOverrides := make(map[string]rate.Limit)
+
+	if defaultRpmStr != "" {
+		defaultRpm, err := strconv.Atoi(defaultRpmStr)
+		if err != nil {
+			logger.Error(fmt.Sprintf("invalid default rate limit value: %v", err))
+			os.Exit(1)
+		}
+		if defaultRpm < 1 {
+			logger.Error("invalid default rate limit value: must be >= 1")
+			os.Exit(1)
+		}
+		defaultLimit = rate.Limit(float64(defaultRpm) / 60.0)
+
+		// Load endpoint overrides if present
+		endpointOverridesStr := os.Getenv("PRODUCT_CATALOG_ENDPOINT_RATE_LIMITS")
+		if endpointOverridesStr != "" {
+			var endpointRpmMap map[string]int
+			if err := json.Unmarshal([]byte(endpointOverridesStr), &endpointRpmMap); err != nil {
+				logger.Error(fmt.Sprintf("invalid endpoint rate limits configuration: %v", err))
+				os.Exit(1)
+			}
+			for endpoint, rpm := range endpointRpmMap {
+				if rpm < 1 {
+					logger.Error(fmt.Sprintf("invalid rate limit for endpoint %s: must be >= 1", endpoint))
+					os.Exit(1)
+				}
+				endpointOverrides[endpoint] = rate.Limit(float64(rpm) / 60.0)
+			}
+		}
+
+		// Create rate limit interceptor
+		rateLimitInterceptor := NewRateLimitInterceptor(defaultLimit, endpointOverrides)
+		// Add to gRPC server options
+		// We will modify NewGRPCServerWithTLS to accept interceptors, or just add it here
+	}
+
 	logger.Info(fmt.Sprintf("Product Catalog gRPC server started on port: %s", port))
 
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%s", port))
@@ -564,6 +691,15 @@ func main() {
 	if err != nil {
 		logger.Error(fmt.Sprintf("Failed to create gRPC server with TLS config: %v", err))
 		os.Exit(1)
+	}
+
+	// Add rate limit interceptor if configured
+	if defaultRpmStr != "" {
+		rateLimitInterceptor := NewRateLimitInterceptor(defaultLimit, endpointOverrides)
+		// Create new server with existing options plus rate limit interceptor
+		opts := srv.GetOptions()
+		opts = append(opts, grpc.UnaryInterceptor(rateLimitInterceptor.Unary()))
+		srv = grpc.NewServer(opts...)
 	}
 
 	reflection.Register(srv)
