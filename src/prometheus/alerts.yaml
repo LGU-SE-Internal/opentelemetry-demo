@@ -1,0 +1,40 @@
+groups:
+  - name: critical-alerts
+    interval: 10s
+    rules:
+      - alert: TargetDown
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Scrape target {{ $labels.job }} is down"
+          description: "The target {{ $labels.instance }} for job {{ $labels.job }} has not been reachable for 2 minutes."
+          runbook: "1. Verify the target service is running and accessible on the network\n2. Check if the service has crashed or encountered an error that caused it to stop\n3. Review service logs for error messages\n4. Restart the service if necessary, and verify it comes back up successfully"
+      - alert: HighServiceErrorRate
+        expr: sum(rate(http_requests_total{status_code=~"5.."}[5m])) / sum(rate(http_requests_total[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High error rate detected for service"
+          description: "Service is returning 5xx errors at a rate of {{ $value | humanizePercentage }} of total requests for more than 5 minutes."
+          runbook: "1. Check the service's recent deployment history for recent changes that may have introduced errors\n2. Review service logs to identify the root cause of 5xx responses\n3. Check dependent services for outages or performance issues\n4. If necessary, roll back the latest deployment to a known good version\n5. Verify error rates return to normal after remediation"
+      - alert: PrometheusHighMemoryUsage
+        expr: container_memory_usage_bytes{container="prometheus"} / container_spec_memory_limit_bytes{container="prometheus"} > 0.9
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Prometheus is using more than 90% of its allocated memory"
+          description: "Prometheus container memory usage is at {{ $value | humanizePercentage }} of its configured limit for more than 2 minutes."
+          runbook: "1. Check the Prometheus TSDB retention period and storage usage\n2. Review recent changes to metric cardinality (check for high-cardinality metrics being added)\n3. Increase the memory limit for the Prometheus container if appropriate\n4. Restart Prometheus to reclaim memory if usage continues to rise beyond 95%\n5. Investigate for memory leaks if usage consistently exceeds limits after restart"
+      - alert: HighScrapeFailureRate
+        expr: count(up == 0) / count(up) > 0.2
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "More than 20% of scrape targets are failing"
+          description: "{{ $value | humanizePercentage }} of configured Prometheus scrape targets are failing for more than 5 minutes."
+          runbook: "1. Check network connectivity between Prometheus and the failing targets\n2. Verify if there is an infrastructure outage affecting multiple services\n3. Review recent changes to scrape configuration or network policies\n4. Check for authentication or authorization issues with scrape targets\n5. Verify the status of individual failing targets using the Targets page in Prometheus UI"

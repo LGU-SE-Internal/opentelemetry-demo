@@ -1,0 +1,15 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  group_by: ['alertname']
+  group_wait: 10s
+  group_interval: 10s
+  repeat_interval: 4h
+  receiver: 'webhook-notification'
+
+receivers:
+- name: 'webhook-notification'
+  webhook_configs:
+  - url: 'http://placeholder-webhook:8080/alerts'
+    send_resolved: true
