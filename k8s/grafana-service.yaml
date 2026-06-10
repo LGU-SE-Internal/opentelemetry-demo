@@ -8,9 +8,16 @@ metadata:
 spec:
   type: ClusterIP
   ports:
+    {{- if .Values.grafana.tls.enabled }}
+    - port: 443
+      targetPort: 443
+      protocol: TCP
+      name: https
+    {{- else }}
     - port: 80
       targetPort: 3000
       protocol: TCP
       name: http
+    {{- end }}
   selector:
     app.kubernetes.io/name: grafana

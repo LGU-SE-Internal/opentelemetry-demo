@@ -26,20 +26,43 @@ spec:
       containers:
       - name: grafana
         image: grafana/grafana:10.4.10
+        env:
+          - name: GRAFANA_TLS_ENABLED
+            valueFrom:
+              configMapKeyRef:
+                name: grafana-config
+                key: grafana.tls.enabled
+                optional: true
+          - name: GRAFANA_MTLS_ENABLED
+            valueFrom:
+              configMapKeyRef:
+                name: grafana-config
+                key: grafana.mtls.enabled
+                optional: true
+          - name: GRAFANA_TLS_CERT_PATH
+            value: "/etc/grafana/tls/tls.crt"
+          - name: GRAFANA_TLS_KEY_PATH
+            value: "/etc/grafana/tls/tls.key"
+          - name: GRAFANA_MTLS_CA_CERT_PATH
+            value: "/etc/grafana/mtls/ca.crt"
         ports:
         - containerPort: 3000
-          name: grafana
+          name: http
+        - containerPort: 443
+          name: https
         livenessProbe:
           httpGet:
             path: /api/health
-            port: 3000
+            port: {{ .Values.grafana.tls.enabled | ternary 443 3000 }}
+            scheme: {{ .Values.grafana.tls.enabled | ternary "HTTPS" "HTTP" }}
           initialDelaySeconds: 30
           periodSeconds: 10
           timeoutSeconds: 5
         readinessProbe:
           httpGet:
             path: /api/health
-            port: 3000
+            port: {{ .Values.grafana.tls.enabled | ternary 443 3000 }}
+            scheme: {{ .Values.grafana.tls.enabled | ternary "HTTPS" "HTTP" }}
           initialDelaySeconds: 30
           periodSeconds: 10
           timeoutSeconds: 5
@@ -71,6 +94,16 @@ spec:
           mountPath: /tmp
         - name: grafana-log
           mountPath: /var/log/grafana
+        {{- if .Values.grafana.tls.enabled }}
+        - name: grafana-tls-cert
+          mountPath: /etc/grafana/tls
+          readOnly: true
+        {{- end }}
+        {{- if .Values.grafana.mtls.enabled }}
+        - name: grafana-mtls-ca
+          mountPath: /etc/grafana/mtls
+          readOnly: true
+        {{- end }}
       volumes:
       - name: grafana-config
         configMap:
@@ -87,3 +120,13 @@ spec:
         emptyDir: {}
       - name: grafana-log
         emptyDir: {}
+      {{- if .Values.grafana.tls.enabled }}
+      - name: grafana-tls-cert
+        secret:
+          secretName: {{ .Values.grafana.tls.secretName | default "grafana-tls" }}
+      {{- end }}
+      {{- if .Values.grafana.mtls.enabled }}
+      - name: grafana-mtls-ca
+        secret:
+          secretName: {{ .Values.grafana.mtls.caSecretName | default "grafana-mtls-ca" }}
+      {{- end }}
