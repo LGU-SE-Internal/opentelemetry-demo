@@ -115,6 +115,10 @@ if [ -n "$remote_write_tls_config" ]; then
   sed -i '/remote_write:/a \'"$remote_write_tls_config" "$GENERATED_CONFIG_PATH"
 fi
 
+# Add TSDB retention period configuration
+RETENTION_PERIOD="${PROMETHEUS_TSDB_RETENTION_PERIOD:-30d}"
+set -- "$@" --storage.tsdb.retention.time="$RETENTION_PERIOD"
+
 # Run prometheus
 exec /bin/prometheus --config.file="$GENERATED_CONFIG_PATH" "$@"
 
