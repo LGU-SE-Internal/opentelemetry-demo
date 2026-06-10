@@ -432,6 +432,11 @@ async function refundServiceHandler(call, callback) {
       err.code = grpc.status.INVALID_ARGUMENT;
       throw err;
     }
+    if (amount.units > 10000000) {
+      const err = new Error('Invalid amount: units must be less than 10,000,000');
+      err.code = grpc.status.INVALID_ARGUMENT;
+      throw err;
+    }
     if (amount.nanos < 0 || amount.nanos >= 1000000000) {
       const err = new Error('Invalid amount: nanos must be between 0 and 999,999,999');
       err.code = grpc.status.INVALID_ARGUMENT;
