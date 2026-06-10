@@ -14,15 +14,19 @@ RUN mkdir -p /etc/postgresql/tls/certs /etc/postgresql/tls/private \
 # Declare volumes for TLS certificates and keys
 VOLUME ["/etc/postgresql/tls/certs", "/etc/postgresql/tls/private"]
 
-# Copy custom entrypoint and init script
+# Copy custom entrypoint, init script, and health check script
 COPY entrypoint.sh /usr/local/bin/
 COPY init.sql /docker-entrypoint-initdb.d/
+COPY pg_healthcheck.sh /usr/local/bin/
 
-# Make entrypoint executable
-RUN chmod +x /usr/local/bin/entrypoint.sh
+# Make entrypoint and health check script executable
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/pg_healthcheck.sh
 
 # Set custom entrypoint
 ENTRYPOINT ["entrypoint.sh"]
 
 # Default command to run postgres
 CMD ["postgres"]
+
+# Health check configuration
+HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=3 CMD /usr/local/bin/pg_healthcheck.sh
