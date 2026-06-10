@@ -14,6 +14,14 @@
 {{ $retryBudgetFraction := getenv "ENVOY_RETRY_BUDGET_FRACTION" "0.2" | toFloat }}
 {{ $retryBudgetMinRetryConcurrency := getenv "ENVOY_RETRY_BUDGET_MIN_RETRY_CONCURRENCY" "10" | toInt }}
 
+{{/* Outlier detection configuration variables */}}
+{{ $outlierDetectionEnabled := eq (getenv "ENVOY_OUTLIER_DETECTION_ENABLED" "true") "true" }}
+{{ $outlierDetectionConsecutive5xx := getenv "ENVOY_OUTLIER_DETECTION_CONSECUTIVE_5XX" "5" | toInt }}
+{{ $outlierDetectionBaseEjectionTime := getenv "ENVOY_OUTLIER_DETECTION_BASE_EJECTION_TIME" "30s" }}
+{{ $outlierDetectionMaxEjectionPercent := getenv "ENVOY_OUTLIER_DETECTION_MAX_EJECTION_PERCENT" "10" | toInt }}
+{{ $outlierDetectionEnforcingConsecutive5xx := getenv "ENVOY_OUTLIER_DETECTION_ENFORCING_CONSECUTIVE_5XX" "100" | toInt }}
+{{ $outlierDetectionEjectionTimeMs := getenv "ENVOY_OUTLIER_DETECTION_EJECTION_TIME_MS" "30000" | toInt }}
+
 {{/* Parse rate limit configuration from environment variables */}}
 {{ $rateLimitGroups := dict }}
 {{ range $envKey, $envValue := getenv }}
@@ -524,6 +532,14 @@ static_resources:
             max_connections: {{ $circuitBreakerMaxConnections }}
             max_pending_requests: {{ $circuitBreakerMaxPendingRequests }}
             max_retries: {{ $circuitBreakerMaxRetries }}
+{{ if $outlierDetectionEnabled }}
+      outlier_detection:
+        consecutive_5xx: {{ $outlierDetectionConsecutive5xx }}
+        base_ejection_time: {{ $outlierDetectionBaseEjectionTime }}
+        max_ejection_percent: {{ $outlierDetectionMaxEjectionPercent }}
+        enforcing_consecutive_5xx: {{ $outlierDetectionEnforcingConsecutive5xx }}
+        ejection_time_ms: {{ $outlierDetectionEjectionTimeMs }}
+{{ end }}
 {{ if $upstreamTlsEnabled }}
       transport_socket:
         name: envoy.transport_sockets.tls
@@ -555,6 +571,14 @@ static_resources:
             max_connections: {{ $circuitBreakerMaxConnections }}
             max_pending_requests: {{ $circuitBreakerMaxPendingRequests }}
             max_retries: {{ $circuitBreakerMaxRetries }}
+{{ if $outlierDetectionEnabled }}
+      outlier_detection:
+        consecutive_5xx: {{ $outlierDetectionConsecutive5xx }}
+        base_ejection_time: {{ $outlierDetectionBaseEjectionTime }}
+        max_ejection_percent: {{ $outlierDetectionMaxEjectionPercent }}
+        enforcing_consecutive_5xx: {{ $outlierDetectionEnforcingConsecutive5xx }}
+        ejection_time_ms: {{ $outlierDetectionEjectionTimeMs }}
+{{ end }}
 {{ if $upstreamTlsEnabled }}
       transport_socket:
         name: envoy.transport_sockets.tls
