@@ -61,7 +61,121 @@ class QuoteRequestValidationMiddleware
 
         $errors = [];
         
-        if ($path === '/getquote') {
+        if ($path === '/quote') {
+            // Validate required fields for /quote endpoint
+            $requiredFields = ['item_weight', 'item_count', 'destination_zip'];
+            $validationErrors = [];
+            $invalidLogEntries = [];
+            
+            foreach ($requiredFields as $field) {
+                if (!isset($body[$field]) || $body[$field] === '') {
+                    $validationErrors[] = [
+                        'field' => $field,
+                        'error' => 'Field is required'
+                    ];
+                    $invalidLogEntries[] = [
+                        'field' => $field,
+                        'value' => isset($body[$field]) ? $body[$field] : null,
+                        'error' => 'Field is required'
+                    ];
+                }
+            }
+            
+            // Validate item_weight if present
+            if (isset($body['item_weight'])) {
+                $weight = $body['item_weight'];
+                if (!is_numeric($weight)) {
+                    $validationErrors[] = [
+                        'field' => 'item_weight',
+                        'error' => 'Must be a numeric value'
+                    ];
+                    $invalidLogEntries[] = [
+                        'field' => 'item_weight',
+                        'value' => $weight,
+                        'error' => 'Must be a numeric value'
+                    ];
+                } else {
+                    $floatWeight = (float)$weight;
+                    if ($floatWeight < 0.01 || $floatWeight > 1000) {
+                        $validationErrors[] = [
+                            'field' => 'item_weight',
+                            'error' => 'Must be between 0.01 and 1000 kg'
+                        ];
+                        $invalidLogEntries[] = [
+                            'field' => 'item_weight',
+                            'value' => $weight,
+                            'error' => 'Must be between 0.01 and 1000 kg'
+                        ];
+                    }
+                }
+            }
+            
+            // Validate item_count if present
+            if (isset($body['item_count'])) {
+                $count = $body['item_count'];
+                if (!is_int($count) && (!is_string($count) || !ctype_digit($count))) {
+                    $validationErrors[] = [
+                        'field' => 'item_count',
+                        'error' => 'Must be an integer value'
+                    ];
+                    $invalidLogEntries[] = [
+                        'field' => 'item_count',
+                        'value' => $count,
+                        'error' => 'Must be an integer value'
+                    ];
+                } else {
+                    $intCount = (int)$count;
+                    if ($intCount < 1 || $intCount > 100) {
+                        $validationErrors[] = [
+                            'field' => 'item_count',
+                            'error' => 'Must be between 1 and 100'
+                        ];
+                        $invalidLogEntries[] = [
+                            'field' => 'item_count',
+                            'value' => $count,
+                            'error' => 'Must be between 1 and 100'
+                        ];
+                    }
+                }
+            }
+            
+            // Validate destination_zip if present
+            if (isset($body['destination_zip'])) {
+                $zip = $body['destination_zip'];
+                if (!preg_match('/^\d{5}$/', $zip)) {
+                    $validationErrors[] = [
+                        'field' => 'destination_zip',
+                        'error' => 'Must be a 5-digit US zip code'
+                    ];
+                    $invalidLogEntries[] = [
+                        'field' => 'destination_zip',
+                        'value' => $zip,
+                        'error' => 'Must be a 5-digit US zip code'
+                    ];
+                }
+            }
+            
+            if (!empty($validationErrors)) {
+                // Log the validation error at ERROR level as required
+                $this->logger->error('Input validation failed', [
+                    'request_id' => $requestId,
+                    'client_ip' => $clientIp,
+                    'invalid_fields' => $invalidLogEntries
+                ]);
+                
+                $response = new Response();
+                $payload = json_encode([
+                    'error' => 'Bad Request',
+                    'message' => 'Validation failed',
+                    'details' => $validationErrors
+                ]);
+                $response->getBody()->write($payload);
+                
+                return $response
+                    ->withHeader('Content-Type', 'application/json')
+                    ->withStatus(400);
+            }
+        } elseif ($path === '/getquote') {
             // Validate required fields for /getquote endpoint
             $requiredFields = ['item_count', 'total_weight_kg', 'destination_country', 'destination_zip_code'];
             foreach ($requiredFields as $field) {
