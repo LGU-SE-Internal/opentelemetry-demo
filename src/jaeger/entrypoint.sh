@@ -1,6 +1,54 @@
 #!/bin/bash
 set -eo pipefail
 
+# Initialize variables
+JAEGER_PID=0
+JAEGER_EXIT_CODE=0
+SHUTDOWN_GRACE_PERIOD_SECONDS=${SHUTDOWN_GRACE_PERIOD_SECONDS:-30}
+# Validate grace period, default to 30 if <=0
+if [[ $SHUTDOWN_GRACE_PERIOD_SECONDS -le 0 ]]; then
+    SHUTDOWN_GRACE_PERIOD_SECONDS=30
+fi
+
+# Cleanup function to remove temporary resources
+cleanup() {
+    echo "Cleaning up temporary files in /tmp/jaeger/"
+    rm -rf /tmp/jaeger/* 2>/dev/null || true
+}
+
+# Signal handler for SIGINT and SIGTERM
+handle_shutdown_signal() {
+    local SIGNAL=$1
+    echo "Received $SIGNAL signal, initiating graceful shutdown..."
+    
+    if [[ $JAEGER_PID -ne 0 ]]; then
+        echo "Sending SIGTERM to jaeger-query process (PID $JAEGER_PID)"
+        kill -TERM "$JAEGER_PID" 2>/dev/null || true
+        
+        # Wait for grace period
+        local WAIT_COUNT=0
+        while kill -0 "$JAEGER_PID" 2>/dev/null && [[ $WAIT_COUNT -lt $SHUTDOWN_GRACE_PERIOD_SECONDS ]]; do
+            sleep 1
+            WAIT_COUNT=$((WAIT_COUNT + 1))
+        done
+        
+        # If still running after grace period, force kill
+        if kill -0 "$JAEGER_PID" 2>/dev/null; then
+            echo "jaeger-query did not exit within $SHUTDOWN_GRACE_PERIOD_SECONDS seconds, sending SIGKILL"
+            kill -KILL "$JAEGER_PID" 2>/dev/null || true
+            wait "$JAEGER_PID" 2>/dev/null || true
+            JAEGER_EXIT_CODE=137
+        fi
+    fi
+    
+    cleanup
+    exit $JAEGER_EXIT_CODE
+}
+
+# Set up signal traps
+trap 'handle_shutdown_signal SIGINT' INT
+trap 'handle_shutdown_signal SIGTERM' TERM
+
 # Initialize command array
 cmd=("jaeger-query")
 
@@ -61,6 +109,17 @@ if [[ -n "$TLS_CERT" && -n "$TLS_KEY" ]]; then
     fi
 fi
 
-# Execute jaeger-query
+# Add any command line arguments passed to the entrypoint
+cmd+=("$@")
+
+# Execute jaeger-query in background
 echo "Starting jaeger-query with command: ${cmd[*]}"
-exec "${cmd[@]}"
+"${cmd[@]}" &
+JAEGER_PID=$!
+
+# Wait for jaeger-query to exit
+wait "$JAEGER_PID" 2>/dev/null || JAEGER_EXIT_CODE=$?
+
+# Cleanup and exit with jaeger's exit code
+cleanup
+exit $JAEGER_EXIT_CODE
