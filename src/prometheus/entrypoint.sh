@@ -2,18 +2,25 @@
 
 set -e
 
-# Default values for environment variables
-PROMETHEUS_TLS_ENABLED=${PROMETHEUS_TLS_ENABLED:-false}
-PROMETHEUS_TLS_CERT_PATH=${PROMETHEUS_TLS_CERT_PATH:-/etc/prometheus/tls/tls.crt}
-PROMETHEUS_TLS_KEY_PATH=${PROMETHEUS_TLS_KEY_PATH:-/etc/prometheus/tls/tls.key}
-PROMETHEUS_MTLS_ENABLED=${PROMETHEUS_MTLS_ENABLED:-false}
-PROMETHEUS_CA_CERT_PATH=${PROMETHEUS_CA_CERT_PATH:-/etc/prometheus/tls/ca.crt}
+# Load base prometheus config
+BASE_CONFIG_PATH="/etc/prometheus/prometheus-base.yaml"
+GENERATED_CONFIG_PATH="/etc/prometheus/prometheus.yml"
 
-# Generate web config if TLS is enabled
-if [ "$PROMETHEUS_TLS_ENABLED" = "true" ]; then
-  # Check if cert and key exist
-  if [ ! -f "$PROMETHEUS_TLS_CERT_PATH" ] || [ ! -f "$PROMETHEUS_TLS_KEY_PATH" ]; then
-    echo "ERROR: TLS certificate or key not found at configured path"
+# Copy base config to generated config
+cp "$BASE_CONFIG_PATH" "$GENERATED_CONFIG_PATH"
+
+# Validate Prometheus server TLS configuration
+if [ -n "$PROMETHEUS_TLS_CERT_PATH" ]; then
+  if [ -z "$PROMETHEUS_TLS_KEY_PATH" ]; then
+    echo "ERROR: PROMETHEUS_TLS_KEY_PATH is required when PROMETHEUS_TLS_CERT_PATH is set"
+    exit 1
+  fi
+  if [ ! -f "$PROMETHEUS_TLS_CERT_PATH" ] || [ ! -r "$PROMETHEUS_TLS_CERT_PATH" ]; then
+    echo "ERROR: PROMETHEUS_TLS_CERT_PATH file $PROMETHEUS_TLS_CERT_PATH does not exist or is not readable"
+    exit 1
+  fi
+  if [ ! -f "$PROMETHEUS_TLS_KEY_PATH" ] || [ ! -r "$PROMETHEUS_TLS_KEY_PATH" ]; then
+    echo "ERROR: PROMETHEUS_TLS_KEY_PATH file $PROMETHEUS_TLS_KEY_PATH does not exist or is not readable"
     exit 1
   fi
 
@@ -24,14 +31,14 @@ tls_server_config:
   key_file: ${PROMETHEUS_TLS_KEY_PATH}
 EOF_INNER
 
-  # Add mTLS configuration if enabled
-  if [ "$PROMETHEUS_MTLS_ENABLED" = "true" ]; then
-    if [ ! -f "$PROMETHEUS_CA_CERT_PATH" ]; then
-      echo "ERROR: CA certificate required for mTLS not found at configured path"
+  # Add mTLS configuration if client CA is set
+  if [ -n "$PROMETHEUS_TLS_CLIENT_CA_PATH" ]; then
+    if [ ! -f "$PROMETHEUS_TLS_CLIENT_CA_PATH" ] || [ ! -r "$PROMETHEUS_TLS_CLIENT_CA_PATH" ]; then
+      echo "ERROR: PROMETHEUS_TLS_CLIENT_CA_PATH file $PROMETHEUS_TLS_CLIENT_CA_PATH does not exist or is not readable"
       exit 1
     fi
     cat >> /etc/prometheus/web-config.yaml << EOF_INNER
-  client_ca_file: ${PROMETHEUS_CA_CERT_PATH}
+  client_ca_file: ${PROMETHEUS_TLS_CLIENT_CA_PATH}
   client_auth_type: RequireAndVerifyClientCert
 EOF_INNER
   fi
@@ -40,5 +47,74 @@ EOF_INNER
   set -- "$@" --web.config.file=/etc/prometheus/web-config.yaml
 fi
 
+# Validate and template Alertmanager TLS configuration
+alertmanager_tls_config=""
+if [ -n "$ALERTMANAGER_TLS_CA_PATH" ]; then
+  if [ ! -f "$ALERTMANAGER_TLS_CA_PATH" ] || [ ! -r "$ALERTMANAGER_TLS_CA_PATH" ]; then
+    echo "ERROR: ALERTMANAGER_TLS_CA_PATH file $ALERTMANAGER_TLS_CA_PATH does not exist or is not readable"
+    exit 1
+  fi
+  alertmanager_tls_config="${alertmanager_tls_config}  ca_file: ${ALERTMANAGER_TLS_CA_PATH}\n"
+fi
+
+if [ -n "$ALERTMANAGER_TLS_CERT_PATH" ]; then
+  if [ -z "$ALERTMANAGER_TLS_KEY_PATH" ]; then
+    echo "ERROR: ALERTMANAGER_TLS_KEY_PATH is required when ALERTMANAGER_TLS_CERT_PATH is set"
+    exit 1
+  fi
+  if [ ! -f "$ALERTMANAGER_TLS_CERT_PATH" ] || [ ! -r "$ALERTMANAGER_TLS_CERT_PATH" ]; then
+    echo "ERROR: ALERTMANAGER_TLS_CERT_PATH file $ALERTMANAGER_TLS_CERT_PATH does not exist or is not readable"
+    exit 1
+  fi
+  if [ ! -f "$ALERTMANAGER_TLS_KEY_PATH" ] || [ ! -r "$ALERTMANAGER_TLS_KEY_PATH" ]; then
+    echo "ERROR: ALERTMANAGER_TLS_KEY_PATH file $ALERTMANAGER_TLS_KEY_PATH does not exist or is not readable"
+    exit 1
+  fi
+  alertmanager_tls_config="${alertmanager_tls_config}  cert_file: ${ALERTMANAGER_TLS_CERT_PATH}\n"
+  alertmanager_tls_config="${alertmanager_tls_config}  key_file: ${ALERTMANAGER_TLS_KEY_PATH}\n"
+fi
+
+# Add Alertmanager TLS config to generated prometheus.yml if present
+if [ -n "$alertmanager_tls_config" ]; then
+  sed -i '/alertmanager_config:/a \  tls_config:\n'"$alertmanager_tls_config" "$GENERATED_CONFIG_PATH"
+fi
+
+# Validate and template Remote Write TLS configuration
+remote_write_tls_config=""
+if [ -n "$REMOTE_WRITE_TLS_CA_PATH" ]; then
+  if [ ! -f "$REMOTE_WRITE_TLS_CA_PATH" ] || [ ! -r "$REMOTE_WRITE_TLS_CA_PATH" ]; then
+    echo "ERROR: REMOTE_WRITE_TLS_CA_PATH file $REMOTE_WRITE_TLS_CA_PATH does not exist or is not readable"
+    exit 1
+  fi
+  remote_write_tls_config="${remote_write_tls_config}    tls_config:\n"
+  remote_write_tls_config="${remote_write_tls_config}      ca_file: ${REMOTE_WRITE_TLS_CA_PATH}\n"
+fi
+
+if [ -n "$REMOTE_WRITE_TLS_CERT_PATH" ]; then
+  if [ -z "$REMOTE_WRITE_TLS_KEY_PATH" ]; then
+    echo "ERROR: REMOTE_WRITE_TLS_KEY_PATH is required when REMOTE_WRITE_TLS_CERT_PATH is set"
+    exit 1
+  fi
+  if [ ! -f "$REMOTE_WRITE_TLS_CERT_PATH" ] || [ ! -r "$REMOTE_WRITE_TLS_CERT_PATH" ]; then
+    echo "ERROR: REMOTE_WRITE_TLS_CERT_PATH file $REMOTE_WRITE_TLS_CERT_PATH does not exist or is not readable"
+    exit 1
+  fi
+  if [ ! -f "$REMOTE_WRITE_TLS_KEY_PATH" ] || [ ! -r "$REMOTE_WRITE_TLS_KEY_PATH" ]; then
+    echo "ERROR: REMOTE_WRITE_TLS_KEY_PATH file $REMOTE_WRITE_TLS_KEY_PATH does not exist or is not readable"
+    exit 1
+  fi
+  if [ -z "$remote_write_tls_config" ]; then
+    remote_write_tls_config="${remote_write_tls_config}    tls_config:\n"
+  fi
+  remote_write_tls_config="${remote_write_tls_config}      cert_file: ${REMOTE_WRITE_TLS_CERT_PATH}\n"
+  remote_write_tls_config="${remote_write_tls_config}      key_file: ${REMOTE_WRITE_TLS_KEY_PATH}\n"
+fi
+
+# Add Remote Write TLS config to generated prometheus.yml if present
+if [ -n "$remote_write_tls_config" ]; then
+  sed -i '/remote_write:/a \'"$remote_write_tls_config" "$GENERATED_CONFIG_PATH"
+fi
+
 # Run prometheus
-exec /bin/prometheus "$@"
+exec /bin/prometheus --config.file="$GENERATED_CONFIG_PATH" "$@"
+
