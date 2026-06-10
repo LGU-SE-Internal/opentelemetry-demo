@@ -61,10 +61,9 @@ class TlsSupportIntegrationTest {
         val serverKey = File("src/test/resources/tls/server.key").absolutePath
 
         val env = mapOf(
-            "GRPC_TLS_ENABLED" to "true",
-            "GRPC_TLS_CERT_PATH" to serverCert,
-            "GRPC_TLS_KEY_PATH" to serverKey,
-            "GRPC_PLAINTEXT_ENABLED" to "false"
+            "FRD_GRPC_TLS_ENABLED" to "true",
+            "FRD_GRPC_TLS_CERT_PATH" to serverCert,
+            "FRD_GRPC_TLS_KEY_PATH" to serverKey
         )
 
         val serviceProcess = startFraudDetectionService(env)
@@ -111,10 +110,11 @@ class TlsSupportIntegrationTest {
         val invalidClientKey = File("src/test/resources/tls/client.invalid.key").absolutePath
 
         val env = mapOf(
-            "GRPC_TLS_ENABLED" to "true",
-            "GRPC_TLS_CERT_PATH" to serverCert,
-            "GRPC_TLS_KEY_PATH" to serverKey,
-            "GRPC_TLS_CLIENT_CA_PATH" to caCert
+            "FRD_GRPC_TLS_ENABLED" to "true",
+            "FRD_GRPC_TLS_CERT_PATH" to serverCert,
+            "FRD_GRPC_TLS_KEY_PATH" to serverKey,
+            "FRD_GRPC_MTLS_ENABLED" to "true",
+            "FRD_GRPC_TLS_CA_CERT_PATH" to caCert
         )
 
         val serviceProcess = startFraudDetectionService(env)
