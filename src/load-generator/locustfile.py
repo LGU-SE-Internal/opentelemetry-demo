@@ -49,6 +49,73 @@ TraceExporter = OTLPSpanExporter
 MetricExporter = OTLPMetricExporter
 LogExporter = OTLPLogExporter
 
+# Load and validate configuration from environment variables
+def load_config() -> dict:
+    config = {
+        "wait_time_min": 1,
+        "wait_time_max": 10,
+        "browser_navigation_timeout": 15,
+        "trace_flush_wait": 2
+    }
+    
+    # Parse and validate wait time min
+    wait_min_str = os.environ.get("LOADGEN_WAIT_TIME_MIN_SECONDS")
+    if wait_min_str is not None:
+        try:
+            config["wait_time_min"] = int(wait_min_str)
+            if config["wait_time_min"] <= 0:
+                logging.error("LOADGEN_WAIT_TIME_MIN_SECONDS must be a positive integer")
+                sys.exit(1)
+        except ValueError:
+            logging.error("LOADGEN_WAIT_TIME_MIN_SECONDS must be a valid integer")
+            sys.exit(1)
+    
+    # Parse and validate wait time max
+    wait_max_str = os.environ.get("LOADGEN_WAIT_TIME_MAX_SECONDS")
+    if wait_max_str is not None:
+        try:
+            config["wait_time_max"] = int(wait_max_str)
+            if config["wait_time_max"] <= 0:
+                logging.error("LOADGEN_WAIT_TIME_MAX_SECONDS must be a positive integer")
+                sys.exit(1)
+        except ValueError:
+            logging.error("LOADGEN_WAIT_TIME_MAX_SECONDS must be a valid integer")
+            sys.exit(1)
+    
+    # Validate min <= max
+    if config["wait_time_min"] > config["wait_time_max"]:
+        logging.error("LOADGEN_WAIT_TIME_MIN_SECONDS cannot be greater than LOADGEN_WAIT_TIME_MAX_SECONDS")
+        sys.exit(1)
+    
+    # Parse and validate browser navigation timeout
+    nav_timeout_str = os.environ.get("LOADGEN_BROWSER_NAVIGATION_TIMEOUT_SECONDS")
+    if nav_timeout_str is not None:
+        try:
+            config["browser_navigation_timeout"] = int(nav_timeout_str)
+            if config["browser_navigation_timeout"] <= 0:
+                logging.error("LOADGEN_BROWSER_NAVIGATION_TIMEOUT_SECONDS must be a positive integer")
+                sys.exit(1)
+        except ValueError:
+            logging.error("LOADGEN_BROWSER_NAVIGATION_TIMEOUT_SECONDS must be a valid integer")
+            sys.exit(1)
+    
+    # Parse and validate trace flush wait time
+    flush_wait_str = os.environ.get("LOADGEN_TRACE_FLUSH_WAIT_SECONDS")
+    if flush_wait_str is not None:
+        try:
+            config["trace_flush_wait"] = int(flush_wait_str)
+            if config["trace_flush_wait"] <= 0:
+                logging.error("LOADGEN_TRACE_FLUSH_WAIT_SECONDS must be a positive integer")
+                sys.exit(1)
+        except ValueError:
+            logging.error("LOADGEN_TRACE_FLUSH_WAIT_SECONDS must be a valid integer")
+            sys.exit(1)
+    
+    return config
+
+# Load configuration at module level so it's available to all classes
+CONFIG = load_config()
+
 def initialize_otel_exporters():
     # Read environment variables with defaults
     traces_endpoint = os.environ.get(
@@ -228,7 +295,7 @@ people_file = open('people.json')
 people = json.load(people_file)
 
 class WebsiteUser(HttpUser):
-    wait_time = between(1, 10)
+    wait_time = between(CONFIG["wait_time_min"], CONFIG["wait_time_max"])
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -367,7 +434,7 @@ if browser_traffic_enabled:
                     await page.route('**/*', add_baggage_header)
                     await page.goto("/cart", wait_until="domcontentloaded")
                     await page.select_option('[name="currency_code"]', 'CHF')
-                    await page.wait_for_timeout(2000)  # giving the browser time to export the traces
+                    await page.wait_for_timeout(CONFIG["trace_flush_wait"] * 1000)  # giving the browser time to export the traces
                     logging.info("Currency changed to CHF")
                 except Exception as e:
                     logging.error(f"Error in change currency task: {str(e)}")
@@ -381,17 +448,17 @@ if browser_traffic_enabled:
                     page.on("console", lambda msg: print(msg.text))
                     await page.route('**/*', add_baggage_header)
                     await page.goto("/", wait_until="domcontentloaded")
-                    # Wait for Roof Binoculars image to load (awaiting successful XHR response in less than 15 seconds)
+                    # Wait for Roof Binoculars image to load (awaiting successful XHR response in less than configured timeout)
                     await page.wait_for_event(
                         "response",
                         predicate=lambda r: '/images/products/RoofBinoculars.jpg' in r.url and r.status == 200,
-                        timeout=15000
+                        timeout=CONFIG["browser_navigation_timeout"] * 1000
                     )
                     await page.click('p:has-text("Roof Binoculars")')
                     await page.wait_for_load_state("domcontentloaded")
                     await page.click('button:has-text("Add To Cart")')
                     await page.wait_for_load_state("domcontentloaded")
-                    await page.wait_for_timeout(2000)  # giving the browser time to export the traces
+                    await page.wait_for_timeout(CONFIG["trace_flush_wait"] * 1000)  # giving the browser time to export the traces
                     logging.info("Product added to cart successfully")
                 except Exception as e:
                     logging.error(f"Error in add to cart task: {str(e)}")
