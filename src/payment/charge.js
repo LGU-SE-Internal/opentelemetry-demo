@@ -8,6 +8,7 @@ const { OpenFeature } = require('@openfeature/server-sdk');
 const { FlagdProvider } = require('@openfeature/flagd-provider');
 const flagProvider = new FlagdProvider();
 
+const { evaluateFlagWithCircuitBreaker } = require('./feature_flags');
 const logger = require('./logger');
 const { withRetry } = require('./retry');
 const tracer = trace.getTracer('payment');
@@ -65,16 +66,7 @@ module.exports.charge = async request => {
       }
     );
 
-    const numberVariant = await withRetry(
-      async () => await OpenFeature.getClient().getNumberValue("paymentFailure", 0),
-      {
-        serviceName: "openfeature-flagd",
-        callType: "feature-flag-evaluation",
-        maxAttempts: FLAGD_RETRY_MAX_ATTEMPTS,
-        initialDelayMs: FLAGD_RETRY_INITIAL_DELAY_MS,
-        isIdempotent: true
-      }
-    );
+    const numberVariant = await evaluateFlagWithCircuitBreaker("paymentFailure", 0);
 
     if (numberVariant > 0) {
       // n% chance to fail with demo.user_context.loyalty_level=gold
