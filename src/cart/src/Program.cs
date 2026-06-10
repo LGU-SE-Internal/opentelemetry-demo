@@ -160,15 +160,15 @@ if (string.IsNullOrEmpty(valkeyAddress))
 
 // Load Redis retry policy settings from environment variables
 var redisRetrySettings = new RedisRetryPolicySettings();
-if (int.TryParse(builder.Configuration["CART_REDIS_MAX_RETRY_ATTEMPTS"], out int maxRetries))
+if (int.TryParse(builder.Configuration["REDIS_MAX_RETRY_ATTEMPTS"], out int maxRetries))
 {
     redisRetrySettings.MaxRetryAttempts = maxRetries;
 }
-if (int.TryParse(builder.Configuration["CART_REDIS_INITIAL_BACKOFF_MS"], out int initialBackoff))
+if (int.TryParse(builder.Configuration["REDIS_INITIAL_RETRY_DELAY_MS"], out int initialBackoff))
 {
     redisRetrySettings.InitialBackoffMs = initialBackoff;
 }
-if (int.TryParse(builder.Configuration["CART_REDIS_MAX_BACKOFF_MS"], out int maxBackoff))
+if (int.TryParse(builder.Configuration["REDIS_MAX_BACKOFF_MS"], out int maxBackoff))
 {
     redisRetrySettings.MaxBackoffMs = maxBackoff;
 }
