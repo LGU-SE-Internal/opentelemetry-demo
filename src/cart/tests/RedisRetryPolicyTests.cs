@@ -268,6 +268,180 @@ public class RedisRetryPolicyTests : IDisposable
         Assert.Contains(TestCartId, exhaustionLog.Message);
     }
 
+    [Fact]
+    public async Task Test_AC7_MaxRetryAttemptsZeroDisablesRetries()
+    {
+        // Arrange: Set max retry attempts to 0
+        Environment.SetEnvironmentVariable("REDIS_MAX_RETRY_ATTEMPTS", "0");
+        Environment.SetEnvironmentVariable("REDIS_INITIAL_RETRY_DELAY_MS", "100");
+
+        // Setup Redis to fail with transient error
+        _mockRedisDb.Setup(db => db.HashGetAllAsync(It.IsAny<RedisKey>(), It.IsAny<CommandFlags>()))
+            .ThrowsAsync(new RedisConnectionException(ConnectionFailureType.Timeout, "Transient connection timeout"));
+
+        var client = new CartServiceClient(_testHost.GetTestClient().CreateGrpcChannel());
+
+        // Act
+        var exception = await Assert.ThrowsAsync<Grpc.Core.RpcException>(() =>
+            client.GetCartAsync(new GetCartRequest { UserId = TestCartId }));
+
+        // Assert: No retries logged, fails immediately
+        var retryLogs = _capturedLogs.Where(l => l.Message.Contains("retry attempt")).ToList();
+        Assert.Empty(retryLogs);
+    }
+
+    [Fact]
+    public async Task Test_AC3_NonIdempotentOperationsNotRetried()
+    {
+        // Arrange
+        Environment.SetEnvironmentVariable("REDIS_MAX_RETRY_ATTEMPTS", "3");
+        Environment.SetEnvironmentVariable("REDIS_INITIAL_RETRY_DELAY_MS", "100");
+
+        // Setup Redis to fail with transient error for non-idempotent operation (DeleteItem)
+        _mockRedisDb.Setup(db => db.HashDeleteAsync(It.IsAny<RedisKey>(), It.IsAny<RedisValue>(), It.IsAny<CommandFlags>()))
+            .ThrowsAsync(new RedisConnectionException(ConnectionFailureType.Timeout, "Transient connection timeout"));
+
+        var client = new CartServiceClient(_testHost.GetTestClient().CreateGrpcChannel());
+
+        // Act
+        var exception = await Assert.ThrowsAsync<Grpc.Core.RpcException>(() =>
+            client.DeleteItemAsync(new DeleteItemRequest { UserId = TestCartId, ProductId = "prod-1" }));
+
+        // Assert: No retries logged for non-idempotent operation
+        var retryLogs = _capturedLogs.Where(l => l.Message.Contains("retry attempt")).ToList();
+        Assert.Empty(retryLogs);
+    }
+
+    [Fact]
+    public async Task Test_AC4_RespectCancellationTokenTimeout()
+    {
+        // Arrange
+        Environment.SetEnvironmentVariable("REDIS_MAX_RETRY_ATTEMPTS", "3");
+        Environment.SetEnvironmentVariable("REDIS_INITIAL_RETRY_DELAY_MS", "1000"); // long delay to trigger cancellation
+
+        // Setup Redis to fail first attempt
+        _mockRedisDb.Setup(db => db.HashGetAllAsync(It.IsAny<RedisKey>(), It.IsAny<CommandFlags>()))
+            .ThrowsAsync(new RedisConnectionException(ConnectionFailureType.Timeout, "Transient connection timeout"));
+
+        var client = new CartServiceClient(_testHost.GetTestClient().CreateGrpcChannel());
+
+        // Act: Call with cancellation token that expires in 500ms (before first retry delay of ~1000ms)
+        using var cts = new CancellationTokenSource(500);
+        var exception = await Assert.ThrowsAsync<Grpc.Core.RpcException>(() =>
+            client.GetCartAsync(new GetCartRequest { UserId = TestCartId }, cancellationToken: cts.Token));
+
+        // Assert: Only 1 attempt, no retry logged, cancellation respected
+        var retryLogs = _capturedLogs.Where(l => l.Message.Contains("retry attempt")).ToList();
+        Assert.Empty(retryLogs);
+        Assert.Contains("cancelled", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Test_AC5_RetryAttemptsLogWarningWithRequiredFields()
+    {
+        // Arrange
+        Environment.SetEnvironmentVariable("REDIS_MAX_RETRY_ATTEMPTS", "2");
+        Environment.SetEnvironmentVariable("REDIS_INITIAL_RETRY_DELAY_MS", "100");
+
+        // Setup Redis to fail 2 times then succeed
+        var attempt = 0;
+        _mockRedisDb.Setup(db => db.HashGetAllAsync(It.IsAny<RedisKey>(), It.IsAny<CommandFlags>()))
+            .ReturnsAsync(() =>
+            {
+                attempt++;
+                if (attempt <= 2)
+                    throw new RedisConnectionException(ConnectionFailureType.Timeout, "Transient connection timeout");
+                return Array.Empty<HashEntry>();
+            });
+
+        var client = new CartServiceClient(_testHost.GetTestClient().CreateGrpcChannel());
+
+        // Act
+        await client.GetCartAsync(new GetCartRequest { UserId = TestCartId });
+
+        // Assert: Each retry logs Warning level with all required fields
+        var retryLogs = _capturedLogs.Where(l => l.LogLevel == LogLevel.Warning && l.Message.Contains("retry attempt")).ToList();
+        Assert.Equal(2, retryLogs.Count);
+
+        for (var i = 0; i < retryLogs.Count; i++)
+        {
+            var log = retryLogs[i];
+            Assert.Contains("operation_name: GetCartAsync", log.Message);
+            Assert.Contains($"attempt_number: {i + 1}", log.Message);
+            Assert.Contains("delay_ms:", log.Message);
+            Assert.Contains("error_message: Transient connection timeout", log.Message);
+        }
+    }
+
+    [Fact]
+    public async Task Test_AC6_FinalFailureLogsErrorWithRequiredFields()
+    {
+        // Arrange
+        Environment.SetEnvironmentVariable("REDIS_MAX_RETRY_ATTEMPTS", "2");
+        Environment.SetEnvironmentVariable("REDIS_INITIAL_RETRY_DELAY_MS", "100");
+        const string errorMsg = "Permanent connection failure";
+
+        // Setup Redis to always fail
+        _mockRedisDb.Setup(db => db.HashGetAllAsync(It.IsAny<RedisKey>(), It.IsAny<CommandFlags>()))
+            .ThrowsAsync(new RedisConnectionException(ConnectionFailureType.UnableToConnect, errorMsg));
+
+        var client = new CartServiceClient(_testHost.GetTestClient().CreateGrpcChannel());
+
+        // Act
+        var exception = await Assert.ThrowsAsync<Grpc.Core.RpcException>(() =>
+            client.GetCartAsync(new GetCartRequest { UserId = TestCartId }));
+
+        // Assert: Final failure logs Error level with all required fields
+        var errorLog = _capturedLogs.FirstOrDefault(l => l.LogLevel == LogLevel.Error && l.Message.Contains("All retry attempts exhausted"));
+        Assert.NotNull(errorLog);
+        Assert.Contains("operation_name: GetCartAsync", errorLog.Message);
+        Assert.Contains("total_attempts: 3", errorLog.Message); // 1 initial + 2 retries = 3 total attempts
+        Assert.Contains("total_delay_ms:", errorLog.Message);
+        Assert.Contains($"error_details: {errorMsg}", errorLog.Message);
+    }
+
+    [Fact]
+    public async Task Test_AC8_EnvironmentVariableChangesTakeEffectOnRestart()
+    {
+        // First test with max retry 1
+        Environment.SetEnvironmentVariable("REDIS_MAX_RETRY_ATTEMPTS", "1");
+        Environment.SetEnvironmentVariable("REDIS_INITIAL_RETRY_DELAY_MS", "100");
+
+        // Setup Redis to fail all attempts
+        _mockRedisDb.Setup(db => db.HashGetAllAsync(It.IsAny<RedisKey>(), It.IsAny<CommandFlags>()))
+            .ThrowsAsync(new RedisConnectionException(ConnectionFailureType.Timeout, "Transient timeout"));
+
+        var client = new CartServiceClient(_testHost.GetTestClient().CreateGrpcChannel());
+        await Assert.ThrowsAsync<Grpc.Core.RpcException>(() => client.GetCartAsync(new GetCartRequest { UserId = TestCartId }));
+        var retryLogsFirstRun = _capturedLogs.Where(l => l.Message.Contains("retry attempt")).Count();
+        Assert.Equal(1, retryLogsFirstRun);
+
+        // Clear logs, dispose existing host, restart with new env var value
+        _capturedLogs.Clear();
+        _testHost.Dispose();
+        
+        Environment.SetEnvironmentVariable("REDIS_MAX_RETRY_ATTEMPTS", "3");
+        
+        // Rebuild host
+        _testHost = new HostBuilder()
+            .ConfigureWebHost(webBuilder =>
+            {
+                webBuilder.UseTestServer();
+                webBuilder.ConfigureServices(services =>
+                {
+                    services.AddSingleton(_mockRedisMultiplexer.Object);
+                    services.AddSingleton<ILoggerProvider, TestLoggerProvider>(sp => new TestLoggerProvider(_capturedLogs));
+                });
+            })
+            .Build();
+        await _testHost.StartAsync();
+        
+        client = new CartServiceClient(_testHost.GetTestClient().CreateGrpcChannel());
+        await Assert.ThrowsAsync<Grpc.Core.RpcException>(() => client.GetCartAsync(new GetCartRequest { UserId = TestCartId }));
+        var retryLogsSecondRun = _capturedLogs.Where(l => l.Message.Contains("retry attempt")).Count();
+        Assert.Equal(3, retryLogsSecondRun);
+    }
+
     // Helper classes for test logging
     private class TestLoggerProvider : ILoggerProvider
     {
