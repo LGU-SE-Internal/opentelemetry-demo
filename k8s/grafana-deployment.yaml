@@ -5,6 +5,7 @@ metadata:
   labels:
     app.kubernetes.io/name: grafana
     app.kubernetes.io/part-of: opentelemetry-demo
+    app.kubernetes.io/component: grafana
 spec:
   replicas: 1
   selector:
@@ -15,6 +16,7 @@ spec:
       labels:
         app.kubernetes.io/name: grafana
         app.kubernetes.io/part-of: opentelemetry-demo
+        app.kubernetes.io/component: grafana
     spec:
       securityContext:
         runAsNonRoot: true
@@ -23,7 +25,7 @@ spec:
         readOnlyRootFilesystem: true
       containers:
       - name: grafana
-        image: grafana/grafana:11.2.0
+        image: grafana/grafana:10.4.10
         ports:
         - containerPort: 3000
           name: grafana
@@ -33,16 +35,14 @@ spec:
             port: 3000
           initialDelaySeconds: 30
           periodSeconds: 10
-          failureThreshold: 3
           timeoutSeconds: 5
         readinessProbe:
           httpGet:
             path: /api/health
             port: 3000
-          initialDelaySeconds: 5
+          initialDelaySeconds: 30
           periodSeconds: 10
-          timeoutSeconds: 3
-          failureThreshold: 3
+          timeoutSeconds: 5
         resources:
           requests:
             cpu: 100m
@@ -57,46 +57,32 @@ spec:
           capabilities:
             drop:
               - ALL
-        env:
-        - name: GRAFANA_LIVENESS_PROBE_INITIAL_DELAY_SECONDS
-          value: "$(GRAFANA_LIVENESS_PROBE_INITIAL_DELAY_SECONDS:30)"
-        - name: GRAFANA_LIVENESS_PROBE_PERIOD_SECONDS
-          value: "$(GRAFANA_LIVENESS_PROBE_PERIOD_SECONDS:10)"
-        - name: GRAFANA_READINESS_PROBE_INITIAL_DELAY_SECONDS
-          value: "$(GRAFANA_READINESS_PROBE_INITIAL_DELAY_SECONDS:5)"
-        - name: GRAFANA_READINESS_PROBE_PERIOD_SECONDS
-          value: "$(GRAFANA_READINESS_PROBE_PERIOD_SECONDS:5)"
-        - name: GRAFANA_RESOURCE_REQUEST_CPU
-          value: "$(GRAFANA_RESOURCE_REQUEST_CPU:100m)"
-        - name: GRAFANA_RESOURCE_REQUEST_MEMORY
-          value: "$(GRAFANA_RESOURCE_REQUEST_MEMORY:256Mi)"
-        - name: GRAFANA_RESOURCE_LIMIT_CPU
-          value: "$(GRAFANA_RESOURCE_LIMIT_CPU:500m)"
-        - name: GRAFANA_RESOURCE_LIMIT_MEMORY
-          value: "$(GRAFANA_RESOURCE_LIMIT_MEMORY:512Mi)"
-        - name: GRAFANA_RUN_USER_UID
-          value: "$(GRAFANA_RUN_USER_UID:472)"
         volumeMounts:
+        - name: grafana-config
+          mountPath: /etc/grafana/grafana.ini
+          subPath: grafana.ini
         - name: grafana-storage
           mountPath: /var/lib/grafana
-        - name: grafana-dashboards-config
+        - name: grafana-provisioning-dashboards
           mountPath: /etc/grafana/provisioning/dashboards
-        - name: grafana-datasources-config
+        - name: grafana-provisioning-datasources
           mountPath: /etc/grafana/provisioning/datasources
         - name: grafana-tmp
           mountPath: /tmp
         - name: grafana-log
           mountPath: /var/log/grafana
       volumes:
+      - name: grafana-config
+        configMap:
+          name: grafana-config
       - name: grafana-storage
-        persistentVolumeClaim:
-          claimName: grafana-storage
-      - name: grafana-dashboards-config
+        emptyDir: {}
+      - name: grafana-provisioning-dashboards
         configMap:
-          name: grafana-dashboards
-      - name: grafana-datasources-config
+          name: grafana-provisioning-dashboards
+      - name: grafana-provisioning-datasources
         configMap:
-          name: grafana-datasources
+          name: grafana-provisioning-datasources
       - name: grafana-tmp
         emptyDir: {}
       - name: grafana-log
