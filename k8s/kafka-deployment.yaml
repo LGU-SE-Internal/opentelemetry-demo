@@ -28,23 +28,19 @@ spec:
           livenessProbe:
             exec:
               command:
-                - kafka-broker-api-versions.sh
-                - --bootstrap-server
-                - localhost:9092
-            initialDelaySeconds: 60
-            periodSeconds: 30
+                - /opt/kafka/bin/kafka-liveness-probe.sh
+            initialDelaySeconds: 30
+            periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
           readinessProbe:
             exec:
               command:
-                - kafka-broker-api-versions.sh
-                - --bootstrap-server
-                - localhost:9092
-            initialDelaySeconds: 30
-            periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 2
+                - /opt/kafka/bin/kafka-readiness-probe.sh
+            initialDelaySeconds: 60
+            periodSeconds: 5
+            timeoutSeconds: 10
+            failureThreshold: 3
           resources:
             requests:
               cpu: 500m

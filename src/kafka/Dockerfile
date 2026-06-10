@@ -11,7 +11,9 @@ USER appuser
 
 ADD --chown=appuser:appuser https://github.com/open-telemetry/opentelemetry-java-instrumentation/releases/download/v$OTEL_JAVA_AGENT_VERSION/opentelemetry-javaagent.jar /tmp/opentelemetry-javaagent.jar
 COPY --chown=root:root entrypoint.sh /opt/kafka/custom-entrypoint.sh
-RUN chmod +x /opt/kafka/custom-entrypoint.sh
+COPY --chown=root:root kafka-liveness-probe.sh /opt/kafka/bin/kafka-liveness-probe.sh
+COPY --chown=root:root kafka-readiness-probe.sh /opt/kafka/bin/kafka-readiness-probe.sh
+RUN chmod +x /opt/kafka/custom-entrypoint.sh /opt/kafka/bin/kafka-liveness-probe.sh /opt/kafka/bin/kafka-readiness-probe.sh
 
 ENV KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
 ENV KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
