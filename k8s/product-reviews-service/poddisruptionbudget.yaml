@@ -1,0 +1,13 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: productreviewservice
+  labels:
+    app.kubernetes.io/name: productreviewservice
+    app.kubernetes.io/part-of: opentelemetry-demo
+    app.kubernetes.io/component: service
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: productreviewservice
