@@ -253,7 +253,16 @@ public class ValkeyCartStore : ICartStore
                 _logger.LogDebug("Small test result: {result}", res);
             }
 
-            _redis.InternalError += (_, e) => { Console.WriteLine(e.Exception); };
+            _redis.InternalError += (_, e) => {
+                _logger.LogError(e.Exception, "Valkey operation failed", 
+                    new Dictionary<string, object>
+                    {
+                        { "error.type", e.Exception.GetType().FullName },
+                        { "error.message", e.Exception.Message },
+                        { "valkey.endpoint", _connectionString },
+                        { "valkey.operation", "InternalError" }
+                    });
+            };
             _redis.ConnectionRestored += (_, _) =>
             {
                 _isRedisConnectionOpened = true;

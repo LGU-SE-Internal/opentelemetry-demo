@@ -154,7 +154,9 @@ else if (mtlsEnabled)
 string valkeyAddress = builder.Configuration["VALKEY_ADDR"];
 if (string.IsNullOrEmpty(valkeyAddress))
 {
-    Console.WriteLine("VALKEY_ADDR environment variable is required.");
+    var loggerFactory = LoggerFactory.Create(b => b.AddConsole().AddOpenTelemetry(options => options.AddOtlpExporter()));
+    var logger = loggerFactory.CreateLogger<Program>();
+    logger.LogError("VALKEY_ADDR environment variable is not configured");
     Environment.Exit(1);
 }
 
