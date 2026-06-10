@@ -4,6 +4,7 @@ metadata:
   name: quote-service
   labels:
     app.kubernetes.io/name: quote-service
+    app.kubernetes.io/component: service
     app.kubernetes.io/part-of: opentelemetry-demo
 spec:
   type: ClusterIP
@@ -16,3 +17,4 @@ spec:
     name: grpc
   selector:
     app.kubernetes.io/name: quote-service
+    app.kubernetes.io/component: service
