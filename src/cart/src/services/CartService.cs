@@ -137,6 +137,8 @@ public class CartService : Oteldemo.CartService.CartServiceBase
         {
             throw new RpcException(new Status(StatusCode.InvalidArgument, "User ID cannot be empty"));
         }
+        try
+        {
             if (await _featureFlagHelper.GetBooleanValueAsync("cartFailure", false))
             {
                 await _badCartStore.EmptyCartAsync(request.UserId);
