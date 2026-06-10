@@ -28,6 +28,20 @@ type Config struct {
 	DBUser      string
 	DBPassword  string
 	DBName      string
+	// New TLS fields
+	DBSSLMode     string
+	DBSSLRootCert string
+	DBSSLCert     string
+	DBSSLKey      string
+}
+
+var allowedSSLMode = map[string]bool{
+	"disable":     true,
+	"allow":       true,
+	"prefer":      true,
+	"require":     true,
+	"verify-ca":   true,
+	"verify-full": true,
 }
 
 // LoadConfig reads configuration from environment variables and returns a validated Config instance
@@ -41,6 +55,7 @@ func LoadConfig() (Config, error) {
 		DBUser:      "postgres",
 		DBPassword:  "postgres",
 		DBName:      "ads",
+		DBSSLMode:   "disable",
 	}
 
 	// Read service port from environment
@@ -87,6 +102,55 @@ func LoadConfig() (Config, error) {
 		cfg.DBName = name
 	}
 
+	// Read TLS configuration from environment
+	if sslMode := os.Getenv("POSTGRES_SSLMODE"); sslMode != "" {
+		cfg.DBSSLMode = sslMode
+	}
+	if rootCert := os.Getenv("POSTGRES_SSLROOTCERT"); rootCert != "" {
+		cfg.DBSSLRootCert = rootCert
+	}
+	if sslCert := os.Getenv("POSTGRES_SSLCERT"); sslCert != "" {
+		cfg.DBSSLCert = sslCert
+	}
+	if sslKey := os.Getenv("POSTGRES_SSLKEY"); sslKey != "" {
+		cfg.DBSSLKey = sslKey
+	}
+
+	// Validate SSL mode
+	if !allowedSSLMode[cfg.DBSSLMode] {
+		return cfg, fmt.Errorf("invalid POSTGRES_SSLMODE value: %q, allowed values are: disable, allow, prefer, require, verify-ca, verify-full", cfg.DBSSLMode)
+	}
+
+	// Validate root cert is provided for verify-ca and verify-full modes
+	if (cfg.DBSSLMode == "verify-ca" || cfg.DBSSLMode == "verify-full") && cfg.DBSSLRootCert == "" {
+		return cfg, fmt.Errorf("POSTGRES_SSLROOTCERT is required when POSTGRES_SSLMODE is %q", cfg.DBSSLMode)
+	}
+
+	// Validate client cert and key are both provided if either is present
+	if cfg.DBSSLCert != "" && cfg.DBSSLKey == "" {
+		return cfg, fmt.Errorf("POSTGRES_SSLKEY is required when POSTGRES_SSLCERT is provided")
+	}
+	if cfg.DBSSLKey != "" && cfg.DBSSLCert == "" {
+		return cfg, fmt.Errorf("POSTGRES_SSLCERT is required when POSTGRES_SSLKEY is provided")
+	}
+
+	// Validate certificate files are readable
+	if cfg.DBSSLRootCert != "" {
+		if _, err := os.Stat(cfg.DBSSLRootCert); err != nil {
+			return cfg, fmt.Errorf("cannot read POSTGRES_SSLROOTCERT file %q: %w", cfg.DBSSLRootCert, err)
+		}
+	}
+	if cfg.DBSSLCert != "" {
+		if _, err := os.Stat(cfg.DBSSLCert); err != nil {
+			return cfg, fmt.Errorf("cannot read POSTGRES_SSLCERT file %q: %w", cfg.DBSSLCert, err)
+		}
+	}
+	if cfg.DBSSLKey != "" {
+		if _, err := os.Stat(cfg.DBSSLKey); err != nil {
+			return cfg, fmt.Errorf("cannot read POSTGRES_SSLKEY file %q: %w", cfg.DBSSLKey, err)
+		}
+	}
+
 	return cfg, nil
 }
 
@@ -105,9 +169,18 @@ func main() {
 
 	// Initialize database connection
 	portStr := strconv.Itoa(cfg.DBPort)
-	dbConn, err := sql.Open("postgres",
-		fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
-			cfg.DBHost, portStr, cfg.DBUser, cfg.DBPassword, cfg.DBName))
+	connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
+		cfg.DBHost, portStr, cfg.DBUser, cfg.DBPassword, cfg.DBName, cfg.DBSSLMode)
+	if cfg.DBSSLRootCert != "" {
+		connStr += fmt.Sprintf(" sslrootcert=%s", cfg.DBSSLRootCert)
+	}
+	if cfg.DBSSLCert != "" {
+		connStr += fmt.Sprintf(" sslcert=%s", cfg.DBSSLCert)
+	}
+	if cfg.DBSSLKey != "" {
+		connStr += fmt.Sprintf(" sslkey=%s", cfg.DBSSLKey)
+	}
+	dbConn, err := sql.Open("postgres", connStr)
 	if err != nil {
 		logger.Fatalf("Failed to connect to database: %v", err)
 	}
