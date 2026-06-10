@@ -17,6 +17,24 @@ use opentelemetry_proto::oteldemo::{GetQuoteRequest, GetQuoteResponse, ShipOrder
 use tokio::signal::unix::{signal, SignalKind};
 use chrono::Utc;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ServiceState {
+    Running = 0,
+    ShuttingDown = 1,
+    Exiting = 2,
+}
+
+impl From<usize> for ServiceState {
+    fn from(v: usize) -> Self {
+        match v {
+            0 => ServiceState::Running,
+            1 => ServiceState::ShuttingDown,
+            2 => ServiceState::Exiting,
+            _ => ServiceState::Running,
+        }
+    }
+}
+
 // Active request tracker interceptor to count in-flight requests for shutdown logging
 #[derive(Debug, Clone)]
 struct ActiveRequestTracker {
@@ -548,9 +566,23 @@ async fn main() -> std::io::Result<()> {
     // Create active request tracker
     let active_requests = Arc::new(AtomicUsize::new(0));
     let request_tracker = ActiveRequestTracker { count: active_requests.clone() };
+    
+    // Initialize service state
+    pub static SERVICE_STATE: once_cell::sync::Lazy<Arc<AtomicUsize>> = once_cell::sync::Lazy::new(|| Arc::new(AtomicUsize::new(ServiceState::Running as usize)));
+    let service_state = SERVICE_STATE.clone();
+    
+    // Shutdown interceptor: reject new requests when service is shutting down
+    let shutdown_interceptor = move |req: Request<()>| -> Result<Request<()>, Status> {
+        let state: ServiceState = SERVICE_STATE.load(Ordering::SeqCst).into();
+        if state == ServiceState::ShuttingDown {
+            return Err(Status::unavailable("Service is shutting down"));
+        }
+        Ok(req)
+    };
 
-    // Chain interceptors: request tracker first, then rate limiter
+    // Chain interceptors: shutdown check first, then request tracker, then rate limiter
     let service = tower::ServiceBuilder::new()
+        .layer(tonic::service::interceptor(shutdown_interceptor))
         .layer(tonic::service::interceptor(request_tracker))
         .layer(tonic::service::interceptor(rate_limit_interceptor))
         .service(ShippingServiceServer::new(ShippingServiceImpl));
@@ -581,6 +613,9 @@ async fn main() -> std::io::Result<()> {
         _ = sigint.recv() => "SIGINT",
         _ = sigterm.recv() => "SIGTERM",
     };
+
+    // Update service state to shutting down
+    service_state.store(ServiceState::ShuttingDown as usize, Ordering::SeqCst);
 
     // Log signal received event
     info!(
