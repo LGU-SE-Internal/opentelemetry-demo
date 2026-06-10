@@ -31,14 +31,14 @@ spec:
           # Health probe paths match implementation in src/load-generator/locustfile.py
           livenessProbe:
             httpGet:
-              path: /health/liveness
+              path: /health/live
               port: 8089
             initialDelaySeconds: 15
             periodSeconds: 10
             failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: /health/readiness
+              path: /health/ready
               port: 8089
             initialDelaySeconds: 5
             periodSeconds: 10
