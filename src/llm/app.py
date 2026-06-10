@@ -16,14 +16,71 @@ import types
 from typing import Optional
 import threading
 from uuid import uuid4
+from datetime import datetime
+from pythonjsonlogger import jsonlogger
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
 from openfeature import api
 from openfeature.contrib.provider.flagd import FlagdProvider
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 
-app = Flask(__name__)
-app.logger.setLevel(logging.INFO)
+def init_llm_service_logger(service_name: str = "llm-service") -> logging.Logger:
+    """
+    Initializes structured JSON logger integrated with OpenTelemetry context.
+    Args:
+        service_name: Name of the service to include in log metadata
+    Returns:
+        Configured logger instance for use across the LLM service
+    Error Conditions:
+        - Returns a fallback standard logger if OpenTelemetry SDK is not initialized
+        - Throws no exceptions on initialization failure (to avoid blocking service startup)
+    """
+    logger = logging.getLogger(service_name)
+    logger.setLevel(logging.INFO)
+    # Remove existing handlers to avoid duplicate logs
+    if logger.handlers:
+        logger.handlers.clear()
+    
+    try:
+        # Custom JSON formatter with OTel context injection
+        class StructuredFormatter(jsonlogger.JsonFormatter):
+            def add_fields(self, log_record, record, message_dict):
+                super().add_fields(log_record, record, message_dict)
+                # Add standard required fields
+                log_record['timestamp'] = datetime.utcnow().isoformat() + 'Z'
+                log_record['service.name'] = service_name
+                log_record['level'] = record.levelname
+                # Add trace/span context if available
+                try:
+                    current_span = trace.get_current_span()
+                    if current_span.is_recording():
+                        span_context = current_span.get_span_context()
+                        log_record['trace_id'] = format(span_context.trace_id, '032x')
+                        log_record['span_id'] = format(span_context.span_id, '016x')
+                except Exception:
+                    # Ignore any errors when getting trace context
+                    pass
+        
+        handler = logging.StreamHandler()
+        formatter = StructuredFormatter("%(message)s")
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+        logger.propagate = False
+    except Exception:
+        # Fallback to basic logger if structured logging setup fails
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter('%(message)s')
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+    
+    return logger
 
+# Initialize logger
+logger = init_llm_service_logger()
+
+app = Flask(__name__)
+app.logger = logger
 # Graceful shutdown configuration
 shutdown_initiated = False
 shutdown_timeout = int(os.environ.get('LLM_SERVICE_SHUTDOWN_TIMEOUT', 30))
@@ -87,9 +144,9 @@ def track_request_end(exc=None):
 
 # Rate limiting configuration
 def get_rate_limit():
-    max_requests = int(os.environ.get('RATE_LIMIT_MAX_REQUESTS', 100))
-    window_seconds = int(os.environ.get('RATE_LIMIT_WINDOW_SECONDS', 60))
-    return f"{max_requests} per {window_seconds} seconds"
+            except json.JSONDecodeError:
+                logger.error("Error: Invalid JSON string provided during initialization.")
+                return {}
 
 # Initialize rate limiter
 limiter = Limiter(
@@ -498,9 +555,9 @@ if __name__ == '__main__':
     app.logger.info(product_review_summaries)
 
     if ssl_context:
-        print("OpenAI API server starting on https://0.0.0.0:8000")
-        print("Set your OpenAI base URL to: https://localhost:8000/v1")
+        logger.info("OpenAI API server starting on https://0.0.0.0:8000")
+        logger.info("Set your OpenAI base URL to: https://localhost:8000/v1")
     else:
-        print("OpenAI API server starting on http://0.0.0.0:8000")
-        print("Set your OpenAI base URL to: http://localhost:8000/v1")
+        logger.info("OpenAI API server starting on http://0.0.0.0:8000")
+        logger.info("Set your OpenAI base URL to: http://localhost:8000/v1")
     app.run(host='0.0.0.0', port=8000, debug=True, ssl_context=ssl_context)
