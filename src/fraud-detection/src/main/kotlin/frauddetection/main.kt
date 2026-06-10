@@ -45,12 +45,74 @@ import io.opentelemetry.demo.frauddetection.CheckTransactionResponse
 import io.opentelemetry.demo.frauddetection.FraudDetectionServiceGrpc
 import java.io.File
 import java.io.FileInputStream
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
 import sun.misc.Signal
 import sun.misc.SignalHandler
 import frauddetection.health.ServiceReadinessCheck
+
+/**
+ * Validates CheckTransactionRequest input parameters
+ * @throws StatusRuntimeException with INVALID_ARGUMENT status if validation fails
+ */
+fun validateCheckFraudRequest(request: CheckTransactionRequest): Unit {
+    // AC-1: Check transaction_id is not empty
+    if (request.transactionId.isNullOrEmpty()) {
+        throw Status.INVALID_ARGUMENT
+            .withDescription("transaction_id is required and cannot be empty")
+            .asRuntimeException()
+    }
+
+    // AC-2: Check transaction_id is valid UUID v4
+    try {
+        val uuid = UUID.fromString(request.transactionId)
+        if (uuid.version() != 4) {
+            throw IllegalArgumentException("Not UUID v4")
+        }
+    } catch (e: IllegalArgumentException) {
+        throw Status.INVALID_ARGUMENT
+            .withDescription("transaction_id must be a valid UUID v4")
+            .asRuntimeException()
+    }
+
+    // AC-3: Check user_id is positive
+    if (request.userId == 0L) {
+        throw Status.INVALID_ARGUMENT
+            .withDescription("user_id must be a positive integer")
+            .asRuntimeException()
+    }
+
+    // AC-4: Check merchant_id is positive
+    if (request.merchantId == 0L) {
+        throw Status.INVALID_ARGUMENT
+            .withDescription("merchant_id must be a positive integer")
+            .asRuntimeException()
+    }
+
+    // AC-5: Check amount >= 0.01
+    if (request.amount < 0.01) {
+        throw Status.INVALID_ARGUMENT
+            .withDescription("amount must be greater than or equal to 0.01")
+            .asRuntimeException()
+    }
+
+    // AC-6: Check payment_method_id is not empty
+    if (request.paymentMethodId.isNullOrEmpty()) {
+        throw Status.INVALID_ARGUMENT
+            .withDescription("payment_method_id is required and cannot be empty")
+            .asRuntimeException()
+    }
+
+    // AC-7: Check payment_method_id matches pattern ^pm_[a-zA-Z0-9]{24}$
+    val paymentMethodPattern = "^pm_[a-zA-Z0-9]{24}$".toRegex()
+    if (!paymentMethodPattern.matches(request.paymentMethodId)) {
+        throw Status.INVALID_ARGUMENT
+            .withDescription("payment_method_id must match format pm_<24 alphanumeric characters>")
+            .asRuntimeException()
+    }
+}
 
 val isShuttingDown = AtomicBoolean(false)
 val kafkaConnected = AtomicBoolean(false)
@@ -130,6 +192,12 @@ class FraudDetectionServiceImpl : FraudDetectionServiceGrpc.FraudDetectionServic
         request: CheckTransactionRequest,
         responseObserver: io.grpc.stub.StreamObserver<CheckTransactionResponse>
     ) {
+        try {
+            validateCheckFraudRequest(request)
+        } catch (e: StatusRuntimeException) {
+            responseObserver.onError(e)
+            return
+        }
         // Basic implementation for validation test
         val response = CheckTransactionResponse.newBuilder()
             .setFraudScore(0.0)
