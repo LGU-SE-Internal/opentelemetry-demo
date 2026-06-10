@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-demo-recommendation
+  labels:
+    app.kubernetes.io/name: recommendation
+    app.kubernetes.io/instance: otel-demo
+    app.kubernetes.io/version: latest
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: opentelemetry-demo
+    opentelemetry.io/demo-service: recommendation
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: recommendation
+    app.kubernetes.io/instance: otel-demo
+  ports:
+    - name: grpc
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
