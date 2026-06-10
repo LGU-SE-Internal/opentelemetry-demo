@@ -2,11 +2,37 @@ load_module modules/ngx_otel_module.so;
 
 pid /tmp/nginx.pid;
 
+worker_shutdown_timeout 30s;
+
 events {
     worker_connections 1024;
 }
 
 http {
+    # Map to detect shutdown state
+    map $shutdown_time $in_shutdown {
+        default 0;
+        ~.+ 1;
+    }
+
+    # Health response bodies
+    map $in_shutdown $health_status {
+        0 '{"status": "healthy"}';
+        1 '{"status": "shutting_down"}';
+    }
+
+    map $in_shutdown $health_code {
+        0 200;
+        1 503;
+    }
+
+    # Custom error page for 503 during shutdown
+    error_page 503 /503_shutdown.html;
+    location = /503_shutdown.html {
+        root /usr/share/nginx/html;
+        internal;
+    }
+
     otel_exporter {
         endpoint ${OTEL_COLLECTOR_HOST}:${OTEL_COLLECTOR_PORT_GRPC};
     }
@@ -55,15 +81,32 @@ error_page 429 @rate_limit_exceeded;
         server_name _;
         server_tokens off;
 
+        # Reject new requests with 503 during shutdown
+        if ($in_shutdown) {
+            return 503;
+        }
+
         root /static;
         gzip_static on;
+    server {
+        listen 8080;
+        listen [::]:8080;
 
-        location /status {
-            stub_status on;
-            access_log  on;           
+        resolver 127.0.0.11;
+        autoindex off;
+
+        server_name _;
+        server_tokens off;
+
+        root /static;
+        gzip_static on;
+        location /health {
+            access_log off;
             allow all;
+            default_type application/json;
             add_header Cache-Control "no-cache, no-store, must-revalidate" always;
             expires 0;
+            return $health_code $health_status;
         }
 
         location /healthz {
@@ -100,11 +143,16 @@ error_page 429 @rate_limit_exceeded;
         }
 
         # Rate limit image assets only
-        location ~* \.(png|jpg|jpeg|gif|webp|svg)$ {
-            limit_req zone=image_rate_limit burst=5 nodelay;
-            limit_req zone=per_image burst=5 nodelay;
-            expires 1y;
-            add_header Cache-Control "public, max-age=31536000, immutable" always;
+        server_name _;
+        server_tokens off;
+
+        # Reject new requests with 503 during shutdown
+        if ($in_shutdown) {
+            return 503;
+        }
+
+        root /static;
+        gzip_static on;
             try_files $uri =404;
         }
 
@@ -165,13 +213,13 @@ error_page 429 @rate_limit_exceeded;
             default_type text/plain;
             return 400 "Bad Request: HTTP request sent to HTTPS port";
         }
-
-        location /status {
-            stub_status on;
-            access_log  on;           
+        location /health {
+            access_log off;
             allow all;
+            default_type application/json;
             add_header Cache-Control "no-cache, no-store, must-revalidate" always;
             expires 0;
+            return $health_code $health_status;
         }
 
         location /healthz {

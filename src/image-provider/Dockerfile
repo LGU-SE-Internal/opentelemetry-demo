@@ -18,7 +18,7 @@ COPY src/image-provider/nginx.conf.template /nginx.conf.template
 EXPOSE 8080
 EXPOSE 8443
 
-STOPSIGNAL SIGQUIT
+STOPSIGNAL SIGTERM
 
 # Start nginx
 CMD ["/bin/sh" , "-c" , "\
