@@ -191,36 +191,173 @@ $errorMiddleware = $app->addErrorMiddleware(true, true, true);
 // Graceful Shutdown Implementation
 $activeRequestCount = 0;
 $isShuttingDown = false;
-$gracePeriod = (int)getenv('GRACEFUL_SHUTDOWN_TIMEOUT') ?: 30;
 $logger = $container->get(Psr\Log\LoggerInterface::class);
-global $shutdownHandler, $gracePeriod, $isShuttingDown, $activeRequestCount;
+$startShutdownTime = null;
+global $shutdownHandler, $isShuttingDown, $activeRequestCount, $logger, $startShutdownTime, $socket, $container;
 
-// Public API functions as per interface
-function registerShutdownSignalHandlers(int $timeout = 30): void {
-    global $gracePeriod;
-    $gracePeriod = $timeout ?: (int)getenv('GRACEFUL_SHUTDOWN_TIMEOUT') ?: 30;
-    React\EventLoop\Loop::get()->addSignal(SIGTERM, 'handleSigTerm');
-    React\EventLoop\Loop::get()->addSignal(SIGINT, 'handleSigInt');
+// Get configured timeout from env var
+function getConfiguredShutdownTimeout(): int {
+    $timeout = getenv('QUOTE_SERVICE_GRACEFUL_SHUTDOWN_TIMEOUT');
+    return $timeout !== false ? (int)$timeout : 10;
 }
 
-function isShuttingDown(): bool {
+// Public API functions as per interface
+function registerGracefulShutdownHandlers(): void {
+    global $logger;
+    
+    // Check if pcntl functions are available
+    if (!function_exists('pcntl_signal') || !function_exists('React\EventLoop\Loop::get')->addSignal) {
+        $logger->error('Signal registration failed: pcntl extension or React event loop signals not supported in this environment');
+        throw new RuntimeException('POSIX signals are not supported in this environment');
+    }
+    
+    try {
+        $loop = React\EventLoop\Loop::get();
+        $loop->addSignal(SIGTERM, function(int $signal) {
+            initiateGracefulShutdown($signal);
+        });
+        $loop->addSignal(SIGINT, function(int $signal) {
+            initiateGracefulShutdown($signal);
+        });
+    } catch (Exception $e) {
+        $logger->error('Signal registration failed: ' . $e->getMessage());
+        throw new RuntimeException('Failed to register signal handlers: ' . $e->getMessage());
+    }
+}
+
+function isServiceShuttingDown(): bool {
     global $isShuttingDown;
     return $isShuttingDown;
 }
 
-function incrementInFlightRequestCount(): void {
+function getActiveRequestCount(): int {
+    global $activeRequestCount;
+    return $activeRequestCount;
+}
+
+function incrementActiveRequestCounter(): void {
     global $activeRequestCount;
     $activeRequestCount++;
 }
 
-function decrementInFlightRequestCount(): void {
+function decrementActiveRequestCounter(): void {
     global $activeRequestCount;
-    $activeRequestCount--;
+    $activeRequestCount = max(0, $activeRequestCount - 1);
 }
 
-// Middleware to track active requests
-$app->add(function (ServerRequestInterface $request, Psr\Http\Server\RequestHandlerInterface $handler) use (&$activeRequestCount, &$isShuttingDown, &$gracePeriod) {
+function cleanupConnections(): void {
+    global $logger, $container;
+    
+    try {
+        // Close database connections if available
+        if ($container->has('db')) {
+            $db = $container->get('db');
+            if (method_exists($db, 'close')) {
+                $db->close();
+            }
+        }
+        
+        // Close external service clients if available
+        if ($container->has('external_service_client')) {
+            $extClient = $container->get('external_service_client');
+            if (method_exists($extClient, 'close')) {
+                $extClient->close();
+            }
+        }
+        
+        // Close resource manager if available
+        if ($container->has('ResourceManager')) {
+            $resourceManager = $container->get('ResourceManager');
+            if (method_exists($resourceManager, 'shutdown')) {
+                $resourceManager->shutdown();
+            }
+        }
+        
+        $logger->info('Connections cleaned up');
+    } catch (Exception $e) {
+        $logger->warning('Error during connection cleanup: ' . $e->getMessage());
+    }
+}
+
+function initiateGracefulShutdown(int $signal): void {
+    global $isShuttingDown, $activeRequestCount, $logger, $startShutdownTime, $socket, $container;
+    
     if ($isShuttingDown) {
+        return; // Already shutting down
+    }
+    
+    $signalNames = [
+        SIGTERM => 'SIGTERM',
+        SIGINT => 'SIGINT'
+    ];
+    $signalName = $signalNames[$signal] ?? 'UNKNOWN';
+    
+    $logger->info('Shutdown signal received', [
+        'signal' => $signal,
+        'signal_name' => $signalName
+    ]);
+    
+    $isShuttingDown = true;
+    $startShutdownTime = microtime(true);
+    $timeout = getConfiguredShutdownTimeout();
+    
+    $logger->info('Stopped accepting new requests');
+    $logger->info('In-flight request count at shutdown start', [
+        'active_requests' => $activeRequestCount
+    ]);
+    
+    // Stop accepting new connections
+    if (isset($socket) && method_exists($socket, 'close')) {
+        $socket->close();
+    }
+    
+    $loop = React\EventLoop\Loop::get();
+    
+    $checkShutdownComplete = function () use (&$checkShutdownComplete, $loop, $timeout, $logger) {
+        global $activeRequestCount, $startShutdownTime;
+        
+        if ($activeRequestCount === 0) {
+            // All requests completed successfully
+            $duration = round(microtime(true) - $startShutdownTime, 2);
+            $logger->info('All in-flight requests completed', [
+                'duration_seconds' => $duration
+            ]);
+            
+            cleanupConnections();
+            
+            $logger->info('Service exiting', [
+                'exit_code' => 0
+            ]);
+            
+            exit(0);
+        }
+        
+        if (microtime(true) - $startShutdownTime >= $timeout) {
+            // Grace period expired
+            $logger->warning('Graceful shutdown timeout reached, forcing exit', [
+                'timeout_seconds' => $timeout,
+                'unfinished_requests' => $activeRequestCount
+            ]);
+            
+            cleanupConnections();
+            
+            $logger->info('Service exiting', [
+                'exit_code' => 1
+            ]);
+            
+            exit(1);
+        }
+        
+        // Check again in 100ms
+        $loop->addTimer(0.1, $checkShutdownComplete);
+    };
+    
+    $checkShutdownComplete();
+}
+
+// Middleware to track active requests and return 503 when shutting down
+$app->add(function (ServerRequestInterface $request, Psr\Http\Server\RequestHandlerInterface $handler) {
+    if (isServiceShuttingDown()) {
         $response = new Slim\Psr7\Response();
         $payload = json_encode([
             'error' => 'Service Unavailable',
@@ -229,17 +366,17 @@ $app->add(function (ServerRequestInterface $request, Psr\Http\Server\RequestHand
         $response->getBody()->write($payload);
         return $response
             ->withHeader('Content-Type', 'application/json')
-            ->withHeader('Retry-After', (string)$gracePeriod)
+            ->withHeader('Retry-After', (string)getConfiguredShutdownTimeout())
             ->withHeader('Connection', 'close')
             ->withStatus(503);
     }
     
-    incrementInFlightRequestCount();
+    incrementActiveRequestCounter();
     try {
         $response = $handler->handle($request);
         return $response;
     } finally {
-        decrementInFlightRequestCount();
+        decrementActiveRequestCounter();
     }
 });
 
@@ -315,74 +452,10 @@ if ($tlsCertPath) {
 $socket = new SocketServer($address, ['tcp' => $socketContext]);
 $server->listen($socket);
 
-// Public API functions as per interface
-function stopAcceptingConnections(): void {
-    global $socket;
-    $socket->close();
-}
-
-function getActiveRequestCount(): int {
-    global $activeRequestCount;
-    return $activeRequestCount;
-}
-
-// Now that socket exists, we can pass it to shutdown handler
-$shutdownHandler = function () use (&$isShuttingDown, &$activeRequestCount, $gracePeriod, $logger, $socket, $container, $server) {
-    if ($isShuttingDown) {
-        return; // Already shutting down
-    }
-    
-    $isShuttingDown = true;
-    $logger->info('shutdown.initiated', ['grace_period_seconds' => $gracePeriod]);
-    
-    // Stop accepting new connections
-    stopAcceptingConnections();
-    
-    $loop = React\EventLoop\Loop::get();
-    $startTime = time();
-    
-    $checkComplete = function () use (&$activeRequestCount, &$checkComplete, $loop, $startTime, $gracePeriod, $logger, $container) {
-        if ($activeRequestCount === 0) {
-            // All requests completed successfully
-            $logger->info('shutdown.completed');
-            
-            // Close all resources
-            $resourceManager = $container->get('ResourceManager');
-            $resourceManager->shutdown();
-            $logger->info('shutdown.resources_closed');
-            
-            exit(0);
-        }
-        
-        if (time() - $startTime >= $gracePeriod) {
-            // Grace period expired
-            $logger->warning('shutdown.timeout', ['dropped_requests' => $activeRequestCount]);
-            
-            // Close all resources
-            $resourceManager = $container->get('ResourceManager');
-            $resourceManager->shutdown();
-            $logger->info('shutdown.resources_closed');
-            
-            exit(1);
-        }
-        
-        // Check again in 100ms
-        $loop->addTimer(0.1, $checkComplete);
-    };
-    
-    $checkComplete();
-};
-
-// Public signal handler functions
-function handleSigInt() {
-    global $shutdownHandler;
-    $shutdownHandler();
-}
-
-function handleSigTerm() {
-    global $shutdownHandler;
-    $shutdownHandler();
-}
-
 // Register signal handlers on application start
-registerShutdownSignalHandlers();
+try {
+    registerGracefulShutdownHandlers();
+} catch (RuntimeException $e) {
+    // Graceful shutdown not supported, fall back to normal operation
+    $logger->warning('Graceful shutdown unavailable: ' . $e->getMessage() . ' - service will exit immediately on termination signals');
+}
