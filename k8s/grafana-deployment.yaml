@@ -56,7 +56,7 @@ spec:
           privileged: false
           capabilities:
             drop:
-              - ALL
+            - ALL
         volumeMounts:
         - name: grafana-config
           mountPath: /etc/grafana/grafana.ini
