@@ -282,14 +282,14 @@ async function chargeServiceHandler(call, callback) {
 
     // AC-2: Validate amount units non-negative
     if (amount.units < 0) {
-      const err = new Error("Invalid amount.units: must be non-negative integer");
+      const err = new Error("units must be a non-negative integer");
       err.code = grpc.status.INVALID_ARGUMENT;
       throw err;
     }
 
     // AC-3: Validate amount nanos range
     if (amount.nanos < 0 || amount.nanos > 999999999) {
-      const err = new Error("Invalid amount.nanos: must be between 0 and 999999999 inclusive");
+      const err = new Error("nanos must be an integer between 0 and 999999999 inclusive");
       err.code = grpc.status.INVALID_ARGUMENT;
       throw err;
     }
@@ -298,6 +298,13 @@ async function chargeServiceHandler(call, callback) {
     const currencyCodeRegex = /^[A-Z]{3}$/;
     if (!currencyCodeRegex.test(amount.currency_code)) {
       const err = new Error("Invalid amount.currency_code: must be 3-letter uppercase ISO 4217 code");
+      err.code = grpc.status.INVALID_ARGUMENT;
+      throw err;
+    }
+
+    // AC-4: Validate currency is supported
+    if (!SUPPORTED_CURRENCIES.includes(amount.currency_code)) {
+      const err = new Error(`currency code ${amount.currency_code} is not supported. Supported currencies: ${SUPPORTED_CURRENCIES.join(', ')}`);
       err.code = grpc.status.INVALID_ARGUMENT;
       throw err;
     }
