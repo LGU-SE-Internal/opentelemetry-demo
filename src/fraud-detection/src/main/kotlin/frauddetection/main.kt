@@ -839,31 +839,6 @@ fun main() {
             Thread.sleep(HEALTH_CHECK_INTERVAL_MS)
         }
     }
-        logger.warn("Signal handling not supported on this platform, falling back to JVM shutdown hook", e)
-    }
-
-    // Add backup shutdown hook
-    Runtime.getRuntime().addShutdownHook(thread(start = false) {
-        if (!shutdownInitiated.get()) {
-            logger.info("Received shutdown request via JVM shutdown hook, initiating graceful shutdown")
-            shutdownManager.shutdown()
-        }
-    })
-
-    // Background thread to monitor Kafka health
-    thread(start = true, isDaemon = true) {
-        while (true) {
-            val currentTime = System.currentTimeMillis()
-            val timeSinceLastPoll = currentTime - lastSuccessfulPollTime.get()
-
-            val isHealthy = kafkaConsumerConnected && timeSinceLastPoll < MAX_UNHEALTHY_POLL_INTERVAL_MS
-            val newStatus = if (isHealthy) ServingStatus.SERVING else ServingStatus.NOT_SERVING
-
-            healthStatusManager.setStatus(HealthStatusManager.SERVICE_NAME_ALL_SERVICES, newStatus)
-
-            Thread.sleep(HEALTH_CHECK_INTERVAL_MS)
-        }
-    }
 
     var totalCount = 0L
 
