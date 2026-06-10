@@ -704,7 +704,7 @@ app = express();
     }
   });
 
-  // New standard liveness endpoint per #1769
+  // New standard liveness endpoint per #1866
   app.get('/health/liveness', (req, res) => {
     const start = Date.now();
     const tracer = opentelemetry.trace.getTracer('paymentservice');
@@ -714,14 +714,16 @@ app = express();
     try {
       res.setHeader('Content-Type', 'application/json');
       res.status(200).json({
-        status: "ok",
-        message: "Service is alive",
-        timestamp: timestamp
+        status: "healthy",
+        service: "payment-service",
+        timestamp: timestamp,
+        checkType: "liveness"
       });
 
       span.setAttributes({
         'http.method': 'GET',
         'http.route': '/health/liveness',
+        'health.check_type': 'liveness',
         'http.status_code': 200
       });
       
@@ -736,75 +738,95 @@ app = express();
     }
   });
 
-  // Health/readiness endpoint updated per #1769
+  // Health/readiness endpoint updated per #1866
   app.get('/health/readiness', async (req, res) => {
     const start = Date.now();
-    const span = opentelemetry.trace.getTracer('paymentservice').startSpan('GET /health/readiness');
-    const timestamp = new Date().toISOString();
-    let paymentProcessorStatus = 'ok';
-    let paymentProcessorError = null;
-
-    // Check payment processor (charge module health)
+    const tracer = opentelemetry.trace.getTracer('paymentservice');
+    const span = tracer.startSpan('GET /health/readiness');
     try {
-      if (!charge.isHealthy()) {
-        throw new Error('Payment processor unhealthy');
+      const timestamp = new Date().toISOString();
+      let paymentProcessorStatus = 'reachable';
+      let paymentProcessorError = null;
+      const traceId = span.spanContext().traceId;
+
+      // Check payment processor (charge module health)
+      try {
+        // Test with a minimal valid charge request to ensure processing works
+        await charge.charge({
+          creditCard: {
+            creditCardNumber: '4111-1111-1111-1111',
+            creditCardExpirationMonth: 12,
+            creditCardExpirationYear: new Date().getFullYear() + 1,
+            creditCardCvv: '123'
+          },
+          amount: {
+            currencyCode: 'USD',
+            units: 0,
+            nanos: 0
+          }
+        });
+      } catch (err) {
+        paymentProcessorStatus = 'unreachable';
+        paymentProcessorError = err.message;
+        
+        // Log error for AC-5
+        logger.error(`Readiness probe failed: Payment gateway unreachable. Error: ${paymentProcessorError}, Trace ID: ${traceId}`);
       }
-    } catch (err) {
-      paymentProcessorStatus = 'failed';
-      paymentProcessorError = err.message;
+
+      res.setHeader('Content-Type', 'application/json');
+
+      if (paymentProcessorStatus === 'reachable') {
+        res.status(200).json({
+          status: "ready",
+          service: "payment-service",
+          timestamp: timestamp,
+          checkType: "readiness",
+          dependencies: [
+            {
+              name: "payment-gateway",
+              status: "reachable"
+            }
+          ]
+        });
+
+        span.setAttributes({
+          'http.method': 'GET',
+          'http.route': '/health/readiness',
+          'health.check_type': 'readiness',
+          'http.status_code': 200
+        });
+
+        logger.info({
+          method: 'GET',
+          path: '/health/readiness',
+          status: 200,
+          duration: Date.now() - start
+        });
+      } else {
+        res.status(503).json({
+          status: "not_ready",
+          service: "payment-service",
+          timestamp: timestamp,
+          checkType: "readiness",
+          dependencies: [
+            {
+              name: "payment-gateway",
+              status: "unreachable",
+              error: paymentProcessorError
+            }
+          ]
+        });
+
+        span.setAttributes({
+          'http.method': 'GET',
+          'http.route': '/health/readiness',
+          'health.check_type': 'readiness',
+          'http.status_code': 503
+        });
+      }
+    } finally {
+      span.end();
     }
-
-    res.setHeader('Content-Type', 'application/json');
-
-    if (paymentProcessorStatus === 'ok') {
-      res.status(200).json({
-        status: "ok",
-        message: "All dependencies are available",
-        timestamp: timestamp,
-        checks: {
-          payment_processor: "ok"
-        }
-      });
-
-      span.setAttributes({
-        'http.method': 'GET',
-        'http.route': '/health/readiness',
-        'http.status_code': 200
-      });
-
-      logger.info({
-        method: 'GET',
-        path: '/health/readiness',
-        status: 200,
-        duration: Date.now() - start
-      });
-    } else {
-      res.status(503).json({
-        status: "unavailable",
-        message: "One or more dependencies are unavailable",
-        timestamp: timestamp,
-        checks: {
-          payment_processor: "failed",
-          error: paymentProcessorError
-        }
-      });
-
-      span.setAttributes({
-        'http.method': 'GET',
-        'http.route': '/health/readiness',
-        'http.status_code': 503
-      });
-
-      logger.error({
-        method: 'GET',
-        path: '/health/readiness',
-        status: 503,
-        duration: Date.now() - start,
-        error: paymentProcessorError
-      });
-    }
-
-    span.end();
   });
   
   // New required /health/ready endpoint per issue #1238
