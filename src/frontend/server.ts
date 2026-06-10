@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 require('./Instrumentation.js');
+import { logs } from '@opentelemetry/api-logs';
 import { startServerWithTls, loadTlsConfigFromEnv, TlsConfigError } from './utils/tls';
 import { NextServer } from 'next';
 import * as http from 'http';
 import * as gateways from './gateways';
+
+const logger = logs.getLogger('frontend', '1.0.0');
 
 // Configuration type for graceful shutdown
 export type ShutdownConfig = {
@@ -42,13 +45,13 @@ export function setupGracefulShutdown(server: NextServer, config: ShutdownConfig
 
   // Handle uncaught exceptions
   process.on('uncaughtException', (err: Error) => {
-    console.error('Unhandled exception:', err);
+    logger.error('Unhandled exception:', { error: err, stack: err.stack });
     process.exit(1);
   });
 
   // Handle unhandled promise rejections
   process.on('unhandledRejection', (reason: Error) => {
-    console.error('Unhandled promise rejection:', reason);
+    logger.error('Unhandled promise rejection:', { error: reason, stack: reason.stack });
     process.exit(1);
   });
 
@@ -64,13 +67,13 @@ export function setupGracefulShutdown(server: NextServer, config: ShutdownConfig
     if (isShuttingDown) return;
     isShuttingDown = true;
 
-    console.info(`Shutdown signal received: ${signal}`);
-    console.info(`Shutdown started with grace period of ${config.gracePeriodMs}ms`);
+    logger.info(`Shutdown signal received: ${signal}`);
+    logger.info(`Shutdown started with grace period of ${config.gracePeriodMs}ms`, { gracePeriodMs: config.gracePeriodMs });
 
     // Stop accepting new connections
     httpServer.close((err) => {
       if (err) {
-        console.error('Error closing HTTP server:', err);
+        logger.error('Error closing HTTP server:', { error: err, stack: err.stack });
       }
     });
 
@@ -102,7 +105,7 @@ export function setupGracefulShutdown(server: NextServer, config: ShutdownConfig
     try {
       await shutdownPromise;
       clearTimeout(shutdownTimeout);
-      console.info('All requests completed successfully');
+      logger.info('All requests completed successfully');
 
       // Clean up backend connections
       try {
@@ -113,15 +116,15 @@ export function setupGracefulShutdown(server: NextServer, config: ShutdownConfig
           gateways.paymentGateway.close(),
           gateways.shippingGateway.close(),
         ]);
-        console.info('Backend connections cleaned up');
-        console.info('Shutdown completed successfully');
+        logger.info('Backend connections cleaned up');
+        logger.info('Shutdown completed successfully');
         process.exit(0);
       } catch (cleanupErr) {
-        console.error('Backend connection cleanup failed:', cleanupErr);
+        logger.error('Backend connection cleanup failed:', { error: cleanupErr, stack: (cleanupErr as Error).stack });
         throw new BackendConnectionCleanupError('Failed to clean up backend connections', cleanupErr as Error);
       }
     } catch (shutdownErr) {
-      console.error('Shutdown error:', shutdownErr);
+      logger.error('Shutdown error:', { error: shutdownErr, stack: (shutdownErr as Error).stack });
 
       // Ensure we clean up backend connections even if shutdown failed
       try {
@@ -135,7 +138,7 @@ export function setupGracefulShutdown(server: NextServer, config: ShutdownConfig
       } catch {}
 
       if (shutdownErr instanceof ShutdownTimeoutError) {
-        console.error('Shutdown timed out, force exiting');
+        logger.error('Shutdown timed out, force exiting');
       }
 
       process.exit(1);
@@ -153,11 +156,11 @@ async function main() {
   const result = await startServerWithTls(tlsConfig, port);
   
   if (!result.success) {
-    console.error('Server startup failed:');
+    logger.error('Server startup failed:');
     if (typeof result.error === 'string') {
-      console.error(result.error);
+      logger.error(result.error);
     } else if ('code' in result.error!) {
-      console.error(`${result.error.code}: ${'path' in result.error ? result.error.path : result.error.message}`);
+      logger.error(`${result.error.code}: ${'path' in result.error ? result.error.path : result.error.message}`, { errorCode: result.error.code, errorPath: 'path' in result.error ? result.error.path : undefined, errorMessage: result.error.message });
     }
     process.exit(1);
   }
@@ -166,14 +169,14 @@ async function main() {
   const shutdownConfig = getShutdownConfig();
   setupGracefulShutdown(result.server, shutdownConfig);
 
-  console.log(`> Frontend server running on ${tlsConfig.enabled ? 'https' : 'http'}://localhost:${port}`);
-  console.log(`> TLS enabled: ${tlsConfig.enabled}`);
+  logger.info(`> Frontend server running on ${tlsConfig.enabled ? 'https' : 'http'}://localhost:${port}`, { port, protocol: tlsConfig.enabled ? 'https' : 'http' });
+  logger.info(`> TLS enabled: ${tlsConfig.enabled}`, { tlsEnabled: tlsConfig.enabled });
   if (tlsConfig.enabled) {
-    console.log(`> mTLS enabled: ${tlsConfig.mtlsEnabled}`);
+    logger.info(`> mTLS enabled: ${tlsConfig.mtlsEnabled}`, { mtlsEnabled: tlsConfig.mtlsEnabled });
   }
 }
 
 main().catch(err => {
-  console.error('Unexpected error during server startup:', err);
+  logger.error('Unexpected error during server startup:', { error: err, stack: err.stack });
   process.exit(1);
 });
