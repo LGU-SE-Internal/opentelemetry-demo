@@ -88,18 +88,7 @@ error_page 429 @rate_limit_exceeded;
 
         root /static;
         gzip_static on;
-    server {
-        listen 8080;
-        listen [::]:8080;
 
-        resolver 127.0.0.11;
-        autoindex off;
-
-        server_name _;
-        server_tokens off;
-
-        root /static;
-        gzip_static on;
         location /health {
             access_log off;
             allow all;
@@ -118,15 +107,6 @@ error_page 429 @rate_limit_exceeded;
             return 200 '';
         }
 
-        location /health {
-            access_log off;
-            allow all;
-            default_type text/plain;
-            add_header Cache-Control "no-cache, no-store, must-revalidate" always;
-            expires 0;
-            return 200 'OK';
-        }
-
         location /ready {
             access_log off;
             allow all;
@@ -143,16 +123,11 @@ error_page 429 @rate_limit_exceeded;
         }
 
         # Rate limit image assets only
-        server_name _;
-        server_tokens off;
-
-        # Reject new requests with 503 during shutdown
-        if ($in_shutdown) {
-            return 503;
-        }
-
-        root /static;
-        gzip_static on;
+        location ~* \.(png|jpg|jpeg|gif|webp|svg)$ {
+            limit_req zone=image_rate_limit burst=5 nodelay;
+            limit_req zone=per_image burst=5 nodelay;
+            expires 1y;
+            add_header Cache-Control "public, max-age=31536000, immutable" always;
             try_files $uri =404;
         }
 
@@ -229,15 +204,6 @@ error_page 429 @rate_limit_exceeded;
             add_header Cache-Control "no-cache, no-store, must-revalidate" always;
             expires 0;
             return 200 '';
-        }
-
-        location /health {
-            access_log off;
-            allow all;
-            default_type text/plain;
-            add_header Cache-Control "no-cache, no-store, must-revalidate" always;
-            expires 0;
-            return 200 'OK';
         }
 
         location /ready {
