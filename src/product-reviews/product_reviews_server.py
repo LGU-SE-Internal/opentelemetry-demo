@@ -50,6 +50,13 @@ from metrics import (
     init_metrics
 )
 
+# Rate limiting imports
+from limits import Limiter, RateLimitItemPerMinute
+from limits.storage import MemoryStorage
+from limits.strategies import TokenBucketRateLimiter as LimitsTokenBucket
+from datetime import datetime
+import ipaddress
+
 # OpenAI
 from openai import OpenAI
 
@@ -61,6 +68,77 @@ service_initialized = False
 logger = logging.getLogger('main')
 import psycopg2
 import time
+
+# --- Rate Limiting Implementation ---
+class TokenBucketRateLimiter:
+    def __init__(self, capacity: int, refill_rate_per_minute: float) -> None:
+        """
+        Args:
+            capacity: Maximum number of requests allowed in a burst
+            refill_rate_per_minute: Number of tokens added to the bucket per minute
+        """
+        self.capacity = capacity
+        self.refill_rate_per_minute = refill_rate_per_minute
+        self._is_unlimited = capacity == 0 or refill_rate_per_minute == 0
+        if not self._is_unlimited:
+            self._limiter = Limiter(
+                storage=MemoryStorage(),
+                strategy=LimitsTokenBucket()
+            )
+            self._rate = RateLimitItemPerMinute(int(refill_rate_per_minute))
+    
+    def allow_request(self) -> bool:
+        """Returns True if request is allowed, False if rate limit exceeded"""
+        if self._is_unlimited:
+            return True
+        return self._limiter.check(self._rate, "global")
+
+# --- Rate Limit gRPC Interceptor ---
+class RateLimitInterceptor(grpc.ServerInterceptor):
+    def __init__(
+        self,
+        endpoint_limits: dict[str, TokenBucketRateLimiter],
+        metrics_client,
+        logger: logging.Logger
+    ) -> None:
+        self.endpoint_limits = endpoint_limits
+        self.metrics_client = metrics_client
+        self.logger = logger
+    
+    def intercept_service(self, continuation, handler_call_details, context):
+        method = handler_call_details.method
+        limiter = self.endpoint_limits.get(method)
+        
+        if not limiter or limiter.allow_request():
+            return continuation(handler_call_details)
+        
+        # Rate limit exceeded
+        self.metrics_client.product_reviews_rate_limited_requests_total.labels(
+            endpoint=method
+        ).add(1)
+        
+        # Extract client IP
+        peer = handler_call_details.peer()
+        remote_addr = "unknown"
+        if peer.startswith("ipv4:") or peer.startswith("ipv6:"):
+            parts = peer.split(":", 2)
+            if len(parts) >= 2:
+                remote_addr = parts[1]
+        
+        # Emit structured log
+        log_data = {
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "endpoint": method,
+            "remote_addr": remote_addr,
+            "rate_limit": limiter.refill_rate_per_minute,
+            "status": "rejected"
+        }
+        self.logger.info(log_data)
+        
+        # Set gRPC error status
+        context.set_code(grpc.StatusCode.RESOURCE_EXHAUSTED)
+        context.set_details("Rate limit exceeded. Try again later.")
+        return None
 
 # --- Circuit Breaker Metrics ---
 meter = metrics.get_meter("product-reviews.service")
@@ -658,6 +736,39 @@ if __name__ == "__main__":
     meter = metrics.get_meter_provider().get_meter(service_name)
 
     product_review_svc_metrics = init_metrics(meter)
+    
+    # Initialize rate limiters
+    ENDPOINTS = {
+        "ListProductReviews": "/opentelemetry.demo.DemoService/ListProductReviews",
+        "CreateProductReview": "/opentelemetry.demo.DemoService/CreateProductReview",
+        "GetProductReviewSummary": "/opentelemetry.demo.DemoService/GetProductReviewSummary",
+        "DeleteProductReview": "/opentelemetry.demo.DemoService/DeleteProductReview",
+    }
+    
+    # Get default limit from env
+    default_limit = int(os.environ.get("PRODUCT_REVIEWS_RATE_LIMIT_DEFAULT", "0"))
+    
+    endpoint_limits = {}
+    for endpoint_name, full_method_name in ENDPOINTS.items():
+        env_var = f"PRODUCT_REVIEWS_RATE_LIMIT_{endpoint_name.upper()}"
+        limit = int(os.environ.get(env_var, str(default_limit)))
+        if limit > 0:
+            endpoint_limits[full_method_name] = TokenBucketRateLimiter(
+                capacity=limit,
+                refill_rate_per_minute=limit
+            )
+        else:
+            endpoint_limits[full_method_name] = TokenBucketRateLimiter(
+                capacity=0,
+                refill_rate_per_minute=0
+            )
+    
+    # Create rate limit interceptor
+    rate_limit_interceptor = RateLimitInterceptor(
+        endpoint_limits=endpoint_limits,
+        metrics_client=product_review_svc_metrics,
+        logger=logger
+    )
 
     # Initialize Logs
     logger_provider = LoggerProvider(
@@ -678,7 +789,7 @@ if __name__ == "__main__":
     # Create async gRPC server
     server = grpc.aio.server(
         futures.ThreadPoolExecutor(max_workers=10),
-        interceptors=[RateLimitInterceptor()]
+        interceptors=[rate_limit_interceptor]
     )
 
     # Add class to gRPC server
