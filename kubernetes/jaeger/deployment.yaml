@@ -95,4 +95,4 @@ spec:
               mountPath: /etc/jaeger
               readOnly: true
             - name: jaeger-storage
-              mountPath: /badger/data
+              mountPath: /badger

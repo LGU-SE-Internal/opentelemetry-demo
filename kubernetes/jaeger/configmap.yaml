@@ -11,7 +11,12 @@ data:
   jaeger.yaml: |
     badger:
       ephemeral: false
-      directory: /badger/data
+      directory-key: /badger/key
+      directory-value: /badger/data
+    retention:
+      go:
+        traces:
+          ttl: 7d
     service:
       telemetry:
         health-check-http:

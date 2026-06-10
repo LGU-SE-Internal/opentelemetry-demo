@@ -1,0 +1,20 @@
+{{- if .Values.jaeger.pvc.storageSize }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: jaeger-storage
+  labels:
+    app.kubernetes.io/name: jaeger
+    app.kubernetes.io/part-of: opentelemetry-demo
+spec:
+  accessModes:
+    {{- range .Values.jaeger.pvc.accessModes }}
+    - {{ . }}
+    {{- end }}
+  {{- if .Values.jaeger.pvc.storageClassName }}
+  storageClassName: {{ .Values.jaeger.pvc.storageClassName }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.jaeger.pvc.storageSize }}
+{{- end }}

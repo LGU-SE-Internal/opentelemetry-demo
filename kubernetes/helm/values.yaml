@@ -1,0 +1,8 @@
+jaeger:
+  pvc:
+    storageClassName: ""
+    storageSize: "10Gi"
+    accessModes:
+      - ReadWriteOnce
+  retention:
+    ttl: "7d"

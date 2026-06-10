@@ -1,0 +1,6 @@
+apiVersion: v2
+name: opentelemetry-demo-jaeger
+description: Jaeger deployment for OpenTelemetry Demo with persistent storage
+type: application
+version: 0.1.0
+appVersion: "2.14.1"
