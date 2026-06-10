@@ -1,0 +1,78 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm
+  labels:
+    app.kubernetes.io/name: llm
+    app.kubernetes.io/instance: llm
+    app.kubernetes.io/version: latest
+    app.kubernetes.io/part-of: opentelemetry-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: llm
+      app.kubernetes.io/instance: llm
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: llm
+        app.kubernetes.io/instance: llm
+        app.kubernetes.io/version: latest
+        app.kubernetes.io/part-of: opentelemetry-demo
+    spec:
+      containers:
+        - name: llm
+          image: otel/demo:llm-latest
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8000
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: LLM_SERVICE_SHUTDOWN_TIMEOUT
+              value: "30"
+            - name: RATE_LIMIT_MAX_REQUESTS
+              value: "100"
+            - name: RATE_LIMIT_WINDOW_SECONDS
+              value: "60"
+            - name: FLAGD_HOST
+              value: "flagd"
+            - name: FLAGD_PORT
+              value: "8013"
+            - name: OTEL_SERVICE_NAME
+              value: "llm-service"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otelcol:4317"
+            - name: LOG_LEVEL
+              value: "info"
