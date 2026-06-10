@@ -28,6 +28,8 @@ public class ValkeyCartStore : ICartStore
     private const string CaCertPathEnvVar = "CART_SERVICE_VALKEY_CA_CERT_PATH";
     private const string ClientCertPathEnvVar = "CART_SERVICE_VALKEY_CLIENT_CERT_PATH";
     private const string ClientKeyPathEnvVar = "CART_SERVICE_VALKEY_CLIENT_KEY_PATH";
+    private const string RedisMaxRetryAttemptsEnvVar = "REDIS_MAX_RETRY_ATTEMPTS";
+    private const string RedisInitialRetryDelayMsEnvVar = "REDIS_INITIAL_RETRY_DELAY_MS";
 
     private volatile ConnectionMultiplexer _redis;
     private volatile bool _isRedisConnectionOpened;
@@ -67,6 +69,9 @@ public class ValkeyCartStore : ICartStore
         description: "Total number of requests rejected while the circuit breaker is open");
     private readonly ConfigurationOptions _redisConnectionOptions;
     private readonly AsyncCircuitBreakerPolicy _circuitBreakerPolicy;
+    private readonly AsyncRetryPolicy _retryPolicy;
+    private readonly int _maxRetryAttempts;
+    private readonly int _initialRetryDelayMs;
     public AsyncCircuitBreakerPolicy CircuitBreaker => _circuitBreakerPolicy;
 
     public ValkeyCartStore(ILogger<ValkeyCartStore> logger, IConfiguration configuration)
@@ -112,6 +117,49 @@ public class ValkeyCartStore : ICartStore
             {
                 throw new ConfigurationException($"Client key file not found at path: {clientKeyPath}");
             }
+        }
+
+        // Load retry configuration from environment variables
+        _maxRetryAttempts = configuration.GetValue<int>(RedisMaxRetryAttemptsEnvVar, 3);
+        _initialRetryDelayMs = configuration.GetValue<int>(RedisInitialRetryDelayMsEnvVar, 100);
+
+        // Build retry policy if max attempts > 0
+        if (_maxRetryAttempts > 0)
+        {
+            var random = new Random();
+            _retryPolicy = Policy
+                .Handle<RedisConnectionException>()
+                .Or<SocketException>()
+                .Or<TimeoutException>()
+                .WaitAndRetryAsync(
+                    retryCount: _maxRetryAttempts,
+                    sleepDurationProvider: (attempt, context) =>
+                    {
+                        // Exponential backoff: delay = initial * 2^(attempt-1) with ±20% jitter
+                        var baseDelay = _initialRetryDelayMs * Math.Pow(2, attempt - 1);
+                        var jitter = random.NextDouble() * 0.4 - 0.2; // -20% to +20%
+                        var delayMs = (int)(baseDelay * (1 + jitter));
+                        return TimeSpan.FromMilliseconds(delayMs);
+                    },
+                    onRetryAsync: async (exception, delay, attempt, context) =>
+                    {
+                        var operationName = context.TryGetValue("operationName", out var opName) ? opName.ToString() : "Unknown";
+                        _logger.LogWarning(
+                            exception,
+                            "Retry attempt {attempt_number} for operation {operation_name}, delaying {delay_ms}ms: {error_message}",
+                            attempt,
+                            operationName,
+                            (int)delay.TotalMilliseconds,
+                            exception.Message
+                        );
+                        await Task.CompletedTask;
+                    }
+                );
+        }
+        else
+        {
+            // No retries, use no-op policy
+            _retryPolicy = Policy.NoOpAsync();
         }
 
         // Build connection string base
@@ -272,6 +320,7 @@ public class ValkeyCartStore : ICartStore
     public async Task AddItemAsync(string userId, string productId, int quantity)
     {
         var stopwatch = Stopwatch.StartNew();
+        var operationName = nameof(AddItemAsync);
 
         if (_logger.IsEnabled(LogLevel.Information))
         {
@@ -280,41 +329,46 @@ public class ValkeyCartStore : ICartStore
 
         try
         {
-            await _circuitBreakerPolicy.ExecuteAsync(async () =>
+            await _retryPolicy.ExecuteAsync(async (context, ct) =>
             {
-                EnsureRedisConnected();
-
-                var db = _redis.GetDatabase();
-
-                // Access the cart from the cache
-                var value = await db.HashGetAsync(userId, CartFieldName);
-
-                Oteldemo.Cart cart;
-                if (value.IsNull)
+                await _circuitBreakerPolicy.ExecuteAsync(async () =>
                 {
-                    cart = new Oteldemo.Cart
+                    EnsureRedisConnected();
+
+                    var db = _redis.GetDatabase();
+
+                    // Access the cart from the cache
+                    var value = await db.HashGetAsync(userId, CartFieldName);
+
+                    Oteldemo.Cart cart;
+                    if (value.IsNull)
                     {
-                        UserId = userId
-                    };
-                    cart.Items.Add(new Oteldemo.CartItem { ProductId = productId, Quantity = quantity });
-                }
-                else
-                {
-                    cart = Oteldemo.Cart.Parser.ParseFrom(value);
-                    var existingItem = cart.Items.SingleOrDefault(i => i.ProductId == productId);
-                    if (existingItem == null)
-                    {
+                        cart = new Oteldemo.Cart
+                        {
+                            UserId = userId
+                        };
                         cart.Items.Add(new Oteldemo.CartItem { ProductId = productId, Quantity = quantity });
                     }
                     else
                     {
-                        existingItem.Quantity += quantity;
+                        cart = Oteldemo.Cart.Parser.ParseFrom(value);
+                        var existingItem = cart.Items.SingleOrDefault(i => i.ProductId == productId);
+                        if (existingItem == null)
+                        {
+                            cart.Items.Add(new Oteldemo.CartItem { ProductId = productId, Quantity = quantity });
+                        }
+                        else
+                        {
+                            existingItem.Quantity += quantity;
+                        }
                     }
-                }
 
-                await db.HashSetAsync(userId, new[]{ new HashEntry(CartFieldName, cart.ToByteArray()) });
-                await db.KeyExpireAsync(userId, TimeSpan.FromMinutes(60));
-            });
+                    await db.HashSetAsync(userId, new[]{ new HashEntry(CartFieldName, cart.ToByteArray()) });
+                    await db.KeyExpireAsync(userId, TimeSpan.FromMinutes(60));
+                });
+            },
+            contextData: new Dictionary<string, object> { { "operationName", operationName } },
+            cancellationToken: default);
         }
         catch (BrokenCircuitException ex)
         {
@@ -324,6 +378,17 @@ public class ValkeyCartStore : ICartStore
                 new KeyValuePair<string, object>("resilience.circuit_breaker.name", "redis"),
                 new KeyValuePair<string, object>("error.type", "circuit_breaker_open"));
             throw new RpcException(new Status(StatusCode.Unavailable, "Redis circuit breaker is open; please try again later"));
+        }
+        catch (Exception ex) when (_maxRetryAttempts > 0 && (ex is RedisConnectionException || ex is SocketException || ex is TimeoutException))
+        {
+            _logger.LogError(
+                ex,
+                "All retry attempts exhausted for operation {operation_name}, total_attempts: {total_attempts}, error_details: {error_details}",
+                operationName,
+                _maxRetryAttempts + 1,
+                ex.Message
+            );
+            throw new RpcException(new Status(StatusCode.FailedPrecondition, $"Can't access cart storage. {ex}"));
         }
         catch (Exception ex)
         {
@@ -383,21 +448,27 @@ public class ValkeyCartStore : ICartStore
 
     public async Task EmptyCartAsync(string userId)
     {
+        var operationName = nameof(EmptyCartAsync);
         if (_logger.IsEnabled(LogLevel.Information))
         {
             _logger.LogInformation("EmptyCartAsync called with userId={userId}", userId);
         }
         try
         {
-            await _circuitBreakerPolicy.ExecuteAsync(async () =>
+            await _retryPolicy.ExecuteAsync(async (context, ct) =>
             {
-                EnsureRedisConnected();
-                var db = _redis.GetDatabase();
+                await _circuitBreakerPolicy.ExecuteAsync(async () =>
+                {
+                    EnsureRedisConnected();
+                    var db = _redis.GetDatabase();
 
-                // Update the cache with empty cart for given user
-                await db.HashSetAsync(userId, new[] { new HashEntry(CartFieldName, _emptyCartBytes) });
-                await db.KeyExpireAsync(userId, TimeSpan.FromMinutes(60));
-            });
+                    // Update the cache with empty cart for given user
+                    await db.HashSetAsync(userId, new[] { new HashEntry(CartFieldName, _emptyCartBytes) });
+                    await db.KeyExpireAsync(userId, TimeSpan.FromMinutes(60));
+                });
+            },
+            contextData: new Dictionary<string, object> { { "operationName", operationName } },
+            cancellationToken: default);
         }
         catch (BrokenCircuitException ex)
         {
@@ -407,6 +478,17 @@ public class ValkeyCartStore : ICartStore
                 new KeyValuePair<string, object>("resilience.circuit_breaker.name", "redis"),
                 new KeyValuePair<string, object>("error.type", "circuit_breaker_open"));
             throw new RpcException(new Status(StatusCode.Unavailable, "Redis circuit breaker is open; please try again later"));
+        }
+        catch (Exception ex) when (_maxRetryAttempts > 0 && (ex is RedisConnectionException || ex is SocketException || ex is TimeoutException))
+        {
+            _logger.LogError(
+                ex,
+                "All retry attempts exhausted for operation {operation_name}, total_attempts: {total_attempts}, error_details: {error_details}",
+                operationName,
+                _maxRetryAttempts + 1,
+                ex.Message
+            );
+            throw new RpcException(new Status(StatusCode.FailedPrecondition, $"Can't access cart storage. {ex}"));
         }
         catch (Exception ex)
         {
@@ -417,6 +499,8 @@ public class ValkeyCartStore : ICartStore
     public async Task<Oteldemo.Cart> GetCartAsync(string userId)
     {
         var stopwatch = Stopwatch.StartNew();
+        var totalDelayMs = 0;
+        var operationName = nameof(GetCartAsync);
 
         if (_logger.IsEnabled(LogLevel.Information))
         {
@@ -425,23 +509,28 @@ public class ValkeyCartStore : ICartStore
 
         try
         {
-            return await _circuitBreakerPolicy.ExecuteAsync(async () =>
+            return await _retryPolicy.ExecuteAsync(async (context, ct) =>
             {
-                EnsureRedisConnected();
-
-                var db = _redis.GetDatabase();
-
-                // Access the cart from the cache
-                var value = await db.HashGetAsync(userId, CartFieldName);
-
-                if (!value.IsNull)
+                return await _circuitBreakerPolicy.ExecuteAsync(async () =>
                 {
-                    return Oteldemo.Cart.Parser.ParseFrom(value);
-                }
+                    EnsureRedisConnected();
 
-                // We decided to return empty cart in cases when user wasn't in the cache before
-                return new Oteldemo.Cart();
-            });
+                    var db = _redis.GetDatabase();
+
+                    // Access the cart from the cache
+                    var value = await db.HashGetAsync(userId, CartFieldName);
+
+                    if (!value.IsNull)
+                    {
+                        return Oteldemo.Cart.Parser.ParseFrom(value);
+                    }
+
+                    // We decided to return empty cart in cases when user wasn't in the cache before
+                    return new Oteldemo.Cart();
+                });
+            },
+            contextData: new Dictionary<string, object> { { "operationName", operationName } },
+            cancellationToken: default);
         }
         catch (BrokenCircuitException ex)
         {
@@ -451,6 +540,17 @@ public class ValkeyCartStore : ICartStore
                 new KeyValuePair<string, object>("resilience.circuit_breaker.name", "redis"),
                 new KeyValuePair<string, object>("error.type", "circuit_breaker_open"));
             throw new RpcException(new Status(StatusCode.Unavailable, "Redis circuit breaker is open; please try again later"));
+        }
+        catch (Exception ex) when (_maxRetryAttempts > 0 && (ex is RedisConnectionException || ex is SocketException || ex is TimeoutException))
+        {
+            _logger.LogError(
+                ex,
+                "All retry attempts exhausted for operation {operation_name}, total_attempts: {total_attempts}, error_details: {error_details}",
+                operationName,
+                _maxRetryAttempts + 1,
+                ex.Message
+            );
+            throw new RpcException(new Status(StatusCode.FailedPrecondition, $"Can't access cart storage. {ex}"));
         }
         catch (Exception ex)
         {
