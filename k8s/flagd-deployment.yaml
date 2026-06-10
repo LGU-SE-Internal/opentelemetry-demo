@@ -16,8 +16,18 @@ spec:
     spec:
       securityContext:
         runAsNonRoot: true
-        runAsUser: 1000
-        fsGroup: 1000
+        runAsUser: 1001
+        fsGroup: 1001
+      initContainers:
+      - name: set-permissions
+        image: busybox:stable
+        command: ["sh", "-c", "chown -R 1001:1001 /var/lib/flagd/config"]
+        securityContext:
+          runAsUser: 0
+          privileged: true
+        volumeMounts:
+        - name: flagd-custom-config
+          mountPath: /var/lib/flagd/config
       containers:
       - name: flagd
         image: ghcr.io/open-feature/flagd:v0.6.0
@@ -58,7 +68,7 @@ spec:
             memory: 256Mi
         securityContext:
           runAsNonRoot: true
-          runAsUser: 1000
+          runAsUser: 1001
           allowPrivilegeEscalation: false
           privileged: false
           readOnlyRootFilesystem: true
