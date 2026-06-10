@@ -6,6 +6,7 @@
 
 declare(strict_types=1);
 
+use DateTimeImmutable;
 use DI\Bridge\Slim\Bridge;
 use DI\ContainerBuilder;
 use OpenTelemetry\API\Globals;
@@ -193,6 +194,13 @@ $activeRequestCount = 0;
 $isShuttingDown = false;
 $gracePeriod = (int)getenv('GRACEFUL_SHUTDOWN_TIMEOUT') ?: 30;
 $logger = $container->get(Psr\Log\LoggerInterface::class);
+// Log service startup
+$logger->info('Service started successfully', [
+    'event_type' => 'service_startup',
+    'service_name' => 'quote',
+    'startup_time' => (string) new DateTimeImmutable(),
+    'environment' => getenv('APP_ENV') ?: 'production'
+]);
 global $shutdownHandler, $gracePeriod, $isShuttingDown, $activeRequestCount;
 
 // Public API functions as per interface
@@ -260,17 +268,30 @@ if (($meterProvider = Globals::meterProvider()) instanceof MeterProviderInterfac
     });
 }
 
-$server = new HttpServer(function (ServerRequestInterface $request) use ($app) {
+$server = new HttpServer(function (ServerRequestInterface $request) use ($app, $logger) {
+    $startTime = microtime(true);
     $response = $app->handle($request);
-    echo sprintf('[%s] "%s %s HTTP/%s" %d %d %s',
-        date('Y-m-d H:i:sP'),
-        $request->getMethod(),
-        $request->getUri()->getPath(),
-        $request->getProtocolVersion(),
-        $response->getStatusCode(),
-        $response->getBody()->getSize(),
-        PHP_EOL,
-    );
+    $executionTimeMs = (microtime(true) - $startTime) * 1000;
+
+    // Get client IP address
+    $xForwardedFor = $request->getHeaderLine('X-Forwarded-For');
+    if (!empty($xForwardedFor)) {
+        $ips = explode(',', $xForwardedFor);
+        $clientIp = trim($ips[0]);
+    } else {
+        $serverParams = $request->getServerParams();
+        $clientIp = $serverParams['REMOTE_ADDR'] ?? 'unknown';
+    }
+
+    $logger->info('Request processed', [
+        'event_type' => 'request_access',
+        'remote_address' => $clientIp,
+        'status_code' => $response->getStatusCode(),
+        'request_method' => $request->getMethod(),
+        'request_path' => $request->getUri()->getPath(),
+        'execution_time_ms' => $executionTimeMs,
+        'user_agent' => $request->getHeaderLine('User-Agent') ?: 'unknown'
+    ]);
 
     return $response;
 });
@@ -281,7 +302,10 @@ $ipv6_enabled = getenv('IPV6_ENABLED');
 
 if ($ipv6_enabled == "true") {
     $ip = "[::]";
-    echo "Overwriting Localhost IP: {$ip}" . PHP_EOL;
+    $logger->info('IPv6 enabled, using address', [
+        'event_type' => 'service_configuration',
+        'listen_address' => $ip
+    ]);
 } 
 
 $port = getenv('QUOTE_PORT') ?: '8080';
@@ -307,9 +331,15 @@ if ($tlsCertPath) {
     $socketContext['ssl'] = $tlsContext;
     // Use tls:// scheme for SSL/TLS
     $address = 'tls://' . $address;
-    echo "TLS enabled, serving HTTPS on: {$address}" . PHP_EOL;
+    $logger->info('TLS enabled, serving HTTPS', [
+        'event_type' => 'service_startup',
+        'listen_address' => $address
+    ]);
 } else {
-    echo "Serving plain HTTP on: {$address}" . PHP_EOL;
+    $logger->info('Serving plain HTTP', [
+        'event_type' => 'service_startup',
+        'listen_address' => $address
+    ]);
 }
 
 $socket = new SocketServer($address, ['tcp' => $socketContext]);
