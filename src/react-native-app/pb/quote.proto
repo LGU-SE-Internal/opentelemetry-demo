@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package opentelemetry.demo.proto.shipping.v1;
+
+option php_namespace = "Opentelemetry\\Demo\\Proto\\Shipping\\V1";
+option php_metadata_namespace = "Opentelemetry\\Demo\\Proto\\Shipping\\V1\\Metadata";
+
+service QuoteService {
+  rpc CalculateShippingQuote(CalculateShippingQuoteRequest) returns (CalculateShippingQuoteResponse);
+}
+
+message CalculateShippingQuoteRequest {
+  int32 item_count = 1; // Number of items in shipment
+  float total_weight_kg = 2; // Total weight of shipment in kilograms
+  string destination_country = 3; // 2-letter ISO 3166-1 alpha-2 country code
+  string destination_zip_code = 4; // Postal code for destination
+}
+
+message CalculateShippingQuoteResponse {
+  float shipping_cost_usd = 1;
+}

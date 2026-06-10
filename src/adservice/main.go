@@ -25,6 +25,9 @@ import (
 	pb "github.com/open-telemetry/opentelemetry-demo/pb/oteldemo"
 )
 
+var isShuttingDown atomic.Bool
+var logger = log.Default()
+
 // Config holds all service configuration values
 type Config struct {
 	ServicePort int
@@ -314,6 +317,19 @@ func main() {
 type adService struct {
 	pb.UnimplementedAdServiceServer
 	db *sql.DB
+}
+
+// GetAds returns ads based on the request context
+func (s *adService) GetAds(ctx context.Context, req *pb.GetAdsRequest) (*pb.GetAdsResponse, error) {
+	// Simple implementation - return dummy ads for now
+	return &pb.GetAdsResponse{
+		Ads: []*pb.Ad{
+			{
+				Text: "Sample ad",
+				Url:  "https://example.com",
+			},
+		},
+	}, nil
 }
 
 // GracefulShutdown triggers the shutdown sequence for the ad service
