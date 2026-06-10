@@ -33,5 +33,23 @@ if ! promtool tsdb validate-duration "$SCRAPE_INTERVAL" 2>/dev/null; then
   exit 1
 fi
 
+# Validate Prometheus config syntax
+echo "🔍 Checking Prometheus config syntax..."
+promtool check config prometheus-config.yaml
+if [ $? -ne 0 ]; then
+  echo "❌ Prometheus config syntax is invalid."
+  exit 1
+fi
+echo "✅ Prometheus config syntax is valid."
+
+# Validate alert rules syntax
+echo "🔍 Checking alert rules syntax..."
+promtool check rules alerts.yaml
+if [ $? -ne 0 ]; then
+  echo "❌ Alert rules syntax is invalid."
+  exit 1
+fi
+echo "✅ Alert rules syntax is valid."
+
 echo "All configuration parameters are valid."
 exit 0
