@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: currencyservice
+  labels:
+    app: currencyservice
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: currencyservice
+  template:
+    metadata:
+      labels:
+        app: currencyservice
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+      - name: currencyservice
+        image: otel/demo-currencyservice:latest
+        ports:
+        - containerPort: 8080
+          name: grpc
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        livenessProbe:
+          grpc:
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+        readinessProbe:
+          grpc:
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+        securityContext:
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        env:
+        - name: TLS_ENABLED
+          value: "false"
+        - name: TLS_CERT_PATH
+          value: "/etc/currencyservice/tls/tls.crt"
+        - name: TLS_KEY_PATH
+          value: "/etc/currencyservice/tls/tls.key"
+        - name: RATE_LIMIT_RPS
+          value: "100"
+        - name: CURRENCY_RATES_FILE
+          value: "/etc/currencyservice/currency_rates.json"
