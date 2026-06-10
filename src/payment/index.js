@@ -777,87 +777,107 @@ app = express();
       span.end();
     }
   });
-  // Health/readiness endpoint for backwards compatibility
+
+  // New standard liveness endpoint per #1769
+  app.get('/health/liveness', (req, res) => {
+    const start = Date.now();
+    const tracer = opentelemetry.trace.getTracer('paymentservice');
+    const span = tracer.startSpan('GET /health/liveness');
+    const timestamp = new Date().toISOString();
+
+    try {
+      res.setHeader('Content-Type', 'application/json');
+      res.status(200).json({
+        status: "ok",
+        message: "Service is alive",
+        timestamp: timestamp
+      });
+
+      span.setAttributes({
+        'http.method': 'GET',
+        'http.route': '/health/liveness',
+        'http.status_code': 200
+      });
+      
+      logger.info({
+        method: 'GET',
+        path: '/health/liveness',
+        status: 200,
+        duration: Date.now() - start
+      });
+    } finally {
+      span.end();
+    }
+  });
+
+  // Health/readiness endpoint updated per #1769
   app.get('/health/readiness', async (req, res) => {
     const start = Date.now();
     const span = opentelemetry.trace.getTracer('paymentservice').startSpan('GET /health/readiness');
-    const errors = [];
-
-    // Check gRPC server health
-    try {
-      await new Promise((resolve, reject) => {
-        healthClient.check({ service: 'opentelemetry.demo.payment.v1.PaymentService' }, (err, response) => {
-          if (err) return reject(err);
-          if (response.status !== health.servingStatus.SERVING) return reject(new Error('gRPC payment service not serving'));
-          resolve();
-        });
-      });
-    } catch (err) {
-      errors.push(`gRPC payment service connection failed: ${err.message}`);
-    }
+    const timestamp = new Date().toISOString();
+    let paymentProcessorStatus = 'ok';
+    let paymentProcessorError = null;
 
     // Check payment processor (charge module health)
     try {
-      // Simulate check for payment processor connectivity
-      // In a real implementation this would ping the external payment API
       if (!charge.isHealthy()) {
         throw new Error('Payment processor unhealthy');
       }
     } catch (err) {
-      errors.push(`payment processor API unreachable: ${err.message}`);
+      paymentProcessorStatus = 'failed';
+      paymentProcessorError = err.message;
     }
 
-    // Check all required environment variables are present
-    const requiredEnvVars = ['PAYMENT_PORT'];
-    requiredEnvVars.forEach(varName => {
-      if (!process.env[varName]) {
-        errors.push(`Missing required environment variable: ${varName}`);
-      }
-    });
-
-    let statusCode;
-    let healthStatus;
-    let responseBody;
     res.setHeader('Content-Type', 'application/json');
-    
-    if (errors.length > 0) {
-      statusCode = 503;
-      healthStatus = 'FAIL';
-      responseBody = { 
-        status: 'NOT_READY',
-        dependencies: {
-          paymentProcessor: charge.isHealthy() ? 'UP' : 'DOWN'
+
+    if (paymentProcessorStatus === 'ok') {
+      res.status(200).json({
+        status: "ok",
+        message: "All dependencies are available",
+        timestamp: timestamp,
+        checks: {
+          payment_processor: "ok"
         }
-      };
+      });
+
+      span.setAttributes({
+        'http.method': 'GET',
+        'http.route': '/health/readiness',
+        'http.status_code': 200
+      });
+
+      logger.info({
+        method: 'GET',
+        path: '/health/readiness',
+        status: 200,
+        duration: Date.now() - start
+      });
     } else {
-      statusCode = 200;
-      healthStatus = 'PASS';
-      responseBody = { 
-        status: 'READY',
-        dependencies: {
-          paymentProcessor: 'UP'
+      res.status(503).json({
+        status: "unavailable",
+        message: "One or more dependencies are unavailable",
+        timestamp: timestamp,
+        checks: {
+          payment_processor: "failed",
+          error: paymentProcessorError
         }
-      };
+      });
+
+      span.setAttributes({
+        'http.method': 'GET',
+        'http.route': '/health/readiness',
+        'http.status_code': 503
+      });
+
+      logger.error({
+        method: 'GET',
+        path: '/health/readiness',
+        status: 503,
+        duration: Date.now() - start,
+        error: paymentProcessorError
+      });
     }
-    
-    res.status(statusCode).json(responseBody);
-    
-    span.setAttributes({
-      'http.method': 'GET',
-      'http.route': '/health/readiness',
-      'http.status_code': statusCode,
-      'health.check.type': 'readiness',
-      'health.check.status': healthStatus
-    });
-    
-    logger.info({
-      method: 'GET',
-      path: '/health/readiness',
-      status: statusCode,
-      duration: Date.now() - start,
-      errors: errors.length > 0 ? errors : undefined
-    });
-    
+
     span.end();
   });
   
