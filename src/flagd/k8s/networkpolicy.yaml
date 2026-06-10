@@ -1,0 +1,37 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: opentelemetry-demo-flagd-access
+  labels:
+    app.kubernetes.io/name: flagd
+    app.kubernetes.io/component: feature-flags
+    app.kubernetes.io/part-of: opentelemetry-demo
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: flagd
+  policyTypes:
+  - Ingress
+  ingress:
+  # Allow gRPC access only from opentelemetry demo pods
+  - ports:
+    - port: 8013
+      protocol: TCP
+    from:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: opentelemetry-demo
+  # Allow HTTP access from prometheus and Kubernetes health checks
+  - ports:
+    - port: 8016
+      protocol: TCP
+    from:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: prometheus
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
