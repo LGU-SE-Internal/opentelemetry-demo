@@ -27,6 +27,18 @@ the whole opentelemetry-demo.
 
 Please follow the root README to do so.
 
+## Configuration
+
+The quote service supports the following environment variables for dynamic shipping cost configuration:
+
+| Variable Name | Type | Default Value | Description |
+| --- | --- | --- | --- |
+| `SHIPPING_BASE_COST_PER_ITEM` | float | 8.99 | Base shipping cost added per item in the order. Must be a non-negative number. |
+| `SHIPPING_WEIGHT_SURCHARGE_PER_KG` | float | 0.0 | Additional surcharge applied per kilogram of total order weight. Must be a non-negative number. |
+| `SHIPPING_MINIMUM_ORDER_COST` | float | 8.99 | Minimum shipping cost charged if calculated total is lower than this value. Must be a non-negative number. |
+
+All configuration values are validated during service startup. Invalid values (non-numeric or negative) will cause the service to fail to start with an explicit error message.
+
 ## Development
 
 To build and run the quote service locally:
