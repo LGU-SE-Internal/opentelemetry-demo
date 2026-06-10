@@ -212,20 +212,26 @@ if tls_enabled
   cert_path = ENV["EMAIL_SERVICE_SSL_CERT_PATH"]
   key_path = ENV["EMAIL_SERVICE_SSL_KEY_PATH"]
   
-  unless cert_path && File.exist?(cert_path) && key_path && File.exist?(key_path)
-    STDERR.puts "Error: Invalid SSL configuration - EMAIL_SERVICE_SSL_CERT_PATH and EMAIL_SERVICE_SSL_KEY_PATH must be provided and point to valid files when TLS is enabled"
-    exit 1
-  end
+    unless cert_path && File.exist?(cert_path) && key_path && File.exist?(key_path)
+      $logger.error("Invalid SSL configuration - EMAIL_SERVICE_SSL_CERT_PATH and EMAIL_SERVICE_SSL_KEY_PATH must be provided and point to valid files when TLS is enabled",
+        event_id: "ssl_configuration_invalid",
+        service: "email-service"
+      )
+      exit 1
+    end
 
   mtls_enabled = ENV.fetch("EMAIL_SERVICE_MTLS_ENABLED", "false") == "true"
   ca_cert_path = ENV["EMAIL_SERVICE_SSL_CA_CERT_PATH"] if mtls_enabled
 
-  if mtls_enabled
-    unless ca_cert_path && File.exist?(ca_cert_path)
-      STDERR.puts "Error: Invalid mTLS configuration - EMAIL_SERVICE_SSL_CA_CERT_PATH must be provided and point to a valid file when mTLS is enabled"
-      exit 1
+    if mtls_enabled
+      unless ca_cert_path && File.exist?(ca_cert_path)
+        $logger.error("Invalid mTLS configuration - EMAIL_SERVICE_SSL_CA_CERT_PATH must be provided and point to a valid file when mTLS is enabled",
+          event_id: "mtls_configuration_invalid",
+          service: "email-service"
+        )
+        exit 1
+      end
     end
-  end
 
   # Configure SSL settings for the server
   ssl_settings = {
@@ -647,7 +653,11 @@ def send_email(data)
       attributes: { 'demo.order.id' => data.order.order_id },
     )
 
-    puts "Order confirmation email sent for order #{data.order.order_id}"
+    $logger.info("Order confirmation email sent for order #{data.order.order_id}",
+      event_id: "email_send_succeeded",
+      service: "email-service",
+      order_id: data.order.order_id
+    )
   end
   # manually created spans need to be ended
   # in Ruby, the method `in_span` ends it automatically
@@ -666,7 +676,12 @@ def handle_shutdown_signal(signal)
     body: "Received #{signal} signal, starting graceful shutdown with #{$grace_period}s grace period",
     attributes: { signal: signal, grace_period_seconds: $grace_period },
   )
-  puts "Shutdown signal received, waiting for in-flight operations to complete..."
+  $logger.info("Shutdown signal received, waiting for in-flight operations to complete...",
+    event_id: "service_shutdown_initiated",
+    service: "email-service",
+    signal: signal,
+    grace_period_seconds: $grace_period
+  )
 
   start_time = Time.now
   while Time.now - start_time < $grace_period
@@ -678,7 +693,11 @@ def handle_shutdown_signal(signal)
         body: "All in-flight operations completed, exiting gracefully",
         attributes: { shutdown_duration_seconds: Time.now - start_time },
       )
-      puts "All operations completed, exiting."
+      $logger.info("All operations completed, exiting.",
+        event_id: "service_shutdown_completed",
+        service: "email-service",
+        shutdown_duration_seconds: Time.now - start_time
+      )
       exit 0
     end
     sleep 0.5
@@ -692,7 +711,12 @@ def handle_shutdown_signal(signal)
     body: "Grace period timeout reached, aborting #{active} in-flight operations",
     attributes: { grace_period_seconds: $grace_period, aborted_operations_count: active },
   )
-  puts "Timeout reached, aborting #{active} incomplete operations."
+  $logger.error("Timeout reached, aborting #{active} incomplete operations.",
+    event_id: "service_shutdown_timeout",
+    service: "email-service",
+    grace_period_seconds: $grace_period,
+    aborted_operations_count: active
+  )
   exit 1
 end
 
