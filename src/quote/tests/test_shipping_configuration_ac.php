@@ -1,7 +1,8 @@
 <?php
 
 use PHPUnit\Framework\TestCase;
-use InvalidConfigurationException;
+use App\Service\QuoteService;
+use App\Exception\InvalidConfigurationException;
 
 class ShippingConfigurationACTest extends TestCase
 {
