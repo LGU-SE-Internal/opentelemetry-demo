@@ -44,6 +44,17 @@ http {
         root /static;
         gzip_static on;
 
+        # Security headers
+        add_header X-Frame-Options "DENY" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-XSS-Protection "1; mode=block" always;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-src 'none'; object-src 'none'" always;
+
+        # HSTS only for HTTPS connections
+        if ($https = 'on') {
+            add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+        }
+
         # Don't trace static assets
         location ~* \.(css|js|png|jpg|jpeg|svg|ico|woff|woff2|ttf|eot|map|json|xml|gz)$ {
             otel_trace off;
