@@ -33,9 +33,12 @@ repositories {
 
 
 dependencies {
+    implementation("org.springframework.boot:spring-boot-starter-web")
+    implementation("org.springframework.boot:spring-boot-starter-actuator")
     implementation("io.quarkus:quarkus-smallrye-health")
     implementation("com.google.protobuf:protobuf-java:${protobufVersion}")
     testImplementation(kotlin("test"))
+    testImplementation("org.springframework.boot:spring-boot-starter-test")
     implementation(kotlin("script-runtime"))
     implementation("org.apache.kafka:kafka-clients:4.3.0")
     implementation("com.google.api.grpc:proto-google-common-protos:2.71.0")
@@ -100,9 +103,9 @@ protobuf {
 }
 
 application {
-    mainClass.set("frauddetection.MainKt")
+    mainClass.set("io.opentelemetry.demo.frauddetection.FraudDetectionApplication")
 }
 
 tasks.jar {
-    manifest.attributes["Main-Class"] = "frauddetection.MainKt"
+    manifest.attributes["Main-Class"] = "io.opentelemetry.demo.frauddetection.FraudDetectionApplication"
 }
