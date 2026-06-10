@@ -384,7 +384,7 @@ class CurrencyService final : public oteldemo::CurrencyService::Service
         span->SetStatus(StatusCode::kError);
         logger->Error(std::string(__func__) + " conversion failed: amount units cannot be negative");
         span->End();
-        return Status(grpc::INVALID_ARGUMENT, "Amount units cannot be negative");
+        return Status(grpc::INVALID_ARGUMENT, "amount cannot be negative");
       }
       
       // Validate amount nanos are non-negative
@@ -392,7 +392,7 @@ class CurrencyService final : public oteldemo::CurrencyService::Service
         span->SetStatus(StatusCode::kError);
         logger->Error(std::string(__func__) + " conversion failed: amount nanos cannot be negative");
         span->End();
-        return Status(grpc::INVALID_ARGUMENT, "Amount nanos cannot be negative");
+        return Status(grpc::INVALID_ARGUMENT, "amount cannot be negative");
       }
       
       // Validate from currency code is not empty
@@ -400,7 +400,7 @@ class CurrencyService final : public oteldemo::CurrencyService::Service
         span->SetStatus(StatusCode::kError);
         logger->Error(std::string(__func__) + " conversion failed: from currency code is empty");
         span->End();
-        return Status(grpc::INVALID_ARGUMENT, "from currency code cannot be empty");
+        return Status(grpc::INVALID_ARGUMENT, "from_currency cannot be empty");
       }
       
       std::shared_lock<std::shared_mutex> lock(rates_mutex);
@@ -409,7 +409,7 @@ class CurrencyService final : public oteldemo::CurrencyService::Service
         span->SetStatus(StatusCode::kError);
         logger->Error(std::string(__func__) + " conversion failed: unsupported from currency code: " + from_code);
         span->End();
-        return Status(grpc::INVALID_ARGUMENT, "Source currency code " + from_code + " is not supported");
+        return Status(grpc::INVALID_ARGUMENT, "from_currency " + from_code + " is not supported");
       }
       double rate = current_rates.at(from_code);
       double one_euro = getDouble(from) / rate ;
@@ -421,7 +421,7 @@ class CurrencyService final : public oteldemo::CurrencyService::Service
         span->SetStatus(StatusCode::kError);
         logger->Error(std::string(__func__) + " conversion failed: to currency code is empty");
         span->End();
-        return Status(grpc::INVALID_ARGUMENT, "to currency code cannot be empty");
+        return Status(grpc::INVALID_ARGUMENT, "to_currency cannot be empty");
       }
       
       // Validate to currency code is supported
@@ -429,7 +429,7 @@ class CurrencyService final : public oteldemo::CurrencyService::Service
         span->SetStatus(StatusCode::kError);
         logger->Error(std::string(__func__) + " conversion failed: unsupported to currency code: " + to_code);
         span->End();
-        return Status(grpc::INVALID_ARGUMENT, "Target currency code " + to_code + " is not supported");
+        return Status(grpc::INVALID_ARGUMENT, "to_currency " + to_code + " is not supported");
       }
       double to_rate = current_rates.at(to_code);
 
