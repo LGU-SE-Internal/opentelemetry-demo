@@ -37,15 +37,15 @@ public class CartService : Oteldemo.CartService.CartServiceBase
         // Validate inputs
         if (string.IsNullOrWhiteSpace(request.UserId))
         {
-            throw new RpcException(new Status(StatusCode.InvalidArgument, "User ID cannot be empty"));
+            throw new RpcException(new Status(StatusCode.InvalidArgument, "User ID must not be empty"));
         }
         if (string.IsNullOrWhiteSpace(request.ProductId))
         {
-            throw new RpcException(new Status(StatusCode.InvalidArgument, "Product ID cannot be empty"));
+            throw new RpcException(new Status(StatusCode.InvalidArgument, "Product ID must not be empty"));
         }
         if (request.Quantity < 1)
         {
-            throw new RpcException(new Status(StatusCode.InvalidArgument, "Quantity must be greater than 0"));
+            throw new RpcException(new Status(StatusCode.InvalidArgument, "Quantity must be a positive integer"));
         }
         if (request.Quantity > 100)
         {
@@ -75,7 +75,7 @@ public class CartService : Oteldemo.CartService.CartServiceBase
         // Validate inputs
         if (string.IsNullOrWhiteSpace(request.UserId))
         {
-            throw new RpcException(new Status(StatusCode.InvalidArgument, "User ID cannot be empty"));
+            throw new RpcException(new Status(StatusCode.InvalidArgument, "User ID must not be empty"));
         }
         try
         {
@@ -107,11 +107,11 @@ public class CartService : Oteldemo.CartService.CartServiceBase
         // Validate inputs
         if (string.IsNullOrWhiteSpace(request.UserId))
         {
-            throw new RpcException(new Status(StatusCode.InvalidArgument, "User ID cannot be empty"));
+            throw new RpcException(new Status(StatusCode.InvalidArgument, "User ID must not be empty"));
         }
         if (string.IsNullOrWhiteSpace(request.ProductId))
         {
-            throw new RpcException(new Status(StatusCode.InvalidArgument, "Product ID cannot be empty"));
+            throw new RpcException(new Status(StatusCode.InvalidArgument, "Product ID must not be empty"));
         }
         try
         {
@@ -135,7 +135,7 @@ public class CartService : Oteldemo.CartService.CartServiceBase
         // Validate inputs
         if (string.IsNullOrWhiteSpace(request.UserId))
         {
-            throw new RpcException(new Status(StatusCode.InvalidArgument, "User ID cannot be empty"));
+            throw new RpcException(new Status(StatusCode.InvalidArgument, "User ID must not be empty"));
         }
         try
         {
