@@ -29,6 +29,8 @@ spec:
         env:
         - name: FLAGD_TLS_ENABLED
           value: "false"
+        - name: FLAGD_CUSTOM_CONFIG_PATH
+          value: "/var/lib/flagd/config/flags.json"
         livenessProbe:
           httpGet:
             path: /healthz
@@ -69,6 +71,8 @@ spec:
           mountPath: /etc/flagd
         - name: tls-certs
           mountPath: /etc/flagd/tls
+        - name: flagd-custom-config
+          mountPath: /var/lib/flagd/config
         command: ["/entrypoint.sh"]
       volumes:
       - name: flagd-config
@@ -77,6 +81,20 @@ spec:
       - name: tls-certs
         secret:
           secretName: flagd-tls
+      - name: flagd-custom-config
+        persistentVolumeClaim:
+          claimName: flagd-custom-config
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: flagd-custom-config
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
 ---
 apiVersion: v1
 kind: Service

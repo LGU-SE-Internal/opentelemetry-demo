@@ -1,8 +1,27 @@
 #!/bin/sh
 set -e
 
+# Initialize default config path
+DEFAULT_CONFIG_PATH="/etc/flagd/demo.flagd.json"
+# Default custom config path
+FLAGD_CUSTOM_CONFIG_PATH="${FLAGD_CUSTOM_CONFIG_PATH:-/var/lib/flagd/config/flags.json}"
+
+# Determine which config to use
+CONFIG_PATH="$DEFAULT_CONFIG_PATH"
+if [ -f "$FLAGD_CUSTOM_CONFIG_PATH" ]; then
+    # Check if file is readable
+    if [ -r "$FLAGD_CUSTOM_CONFIG_PATH" ]; then
+        CONFIG_PATH="$FLAGD_CUSTOM_CONFIG_PATH"
+        echo "Using custom flag configuration from $FLAGD_CUSTOM_CONFIG_PATH"
+    else
+        echo "WARNING: Custom flag configuration file $FLAGD_CUSTOM_CONFIG_PATH exists but is not readable. Falling back to default config."
+    fi
+else
+    echo "No custom flag configuration found at $FLAGD_CUSTOM_CONFIG_PATH. Using default config."
+fi
+
 # Initialize start arguments
-START_ARGS="start --uri file:./etc/flagd/demo.flagd.json"
+START_ARGS="start --uri file:$CONFIG_PATH"
 
 # Check TLS configuration
 if [ -n "$FLAGD_TLS_CERT_PATH" ] && [ -n "$FLAGD_TLS_KEY_PATH" ]; then
