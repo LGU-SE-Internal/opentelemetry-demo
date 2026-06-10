@@ -37,15 +37,15 @@ public class CartService : Oteldemo.CartService.CartServiceBase
         // Validate inputs
         if (string.IsNullOrWhiteSpace(request.UserId))
         {
-            throw new RpcException(new Status(StatusCode.InvalidArgument, "User ID must not be empty or contain only whitespace"));
+            throw new RpcException(new Status(StatusCode.InvalidArgument, "User ID cannot be empty"));
         }
         if (string.IsNullOrWhiteSpace(request.ProductId))
         {
-            throw new RpcException(new Status(StatusCode.InvalidArgument, "Product ID must not be empty or contain only whitespace"));
+            throw new RpcException(new Status(StatusCode.InvalidArgument, "Product ID cannot be empty"));
         }
         if (request.Quantity < 1)
         {
-            throw new RpcException(new Status(StatusCode.InvalidArgument, "Quantity must be a positive integer greater than 0"));
+            throw new RpcException(new Status(StatusCode.InvalidArgument, "Quantity must be greater than 0"));
         }
         if (request.Quantity > 100)
         {
@@ -75,9 +75,8 @@ public class CartService : Oteldemo.CartService.CartServiceBase
         // Validate inputs
         if (string.IsNullOrWhiteSpace(request.UserId))
         {
-            throw new RpcException(new Status(StatusCode.InvalidArgument, "User ID must not be empty or contain only whitespace"));
+            throw new RpcException(new Status(StatusCode.InvalidArgument, "User ID cannot be empty"));
         }
-
         try
         {
             var cart = await _cartStore.GetCartAsync(request.UserId);
@@ -108,13 +107,12 @@ public class CartService : Oteldemo.CartService.CartServiceBase
         // Validate inputs
         if (string.IsNullOrWhiteSpace(request.UserId))
         {
-            throw new RpcException(new Status(StatusCode.InvalidArgument, "User ID must not be empty or contain only whitespace"));
+            throw new RpcException(new Status(StatusCode.InvalidArgument, "User ID cannot be empty"));
         }
         if (string.IsNullOrWhiteSpace(request.ProductId))
         {
-            throw new RpcException(new Status(StatusCode.InvalidArgument, "Product ID must not be empty or contain only whitespace"));
+            throw new RpcException(new Status(StatusCode.InvalidArgument, "Product ID cannot be empty"));
         }
-
         try
         {
             await _cartStore.RemoveItemAsync(request.UserId, request.ProductId);
@@ -137,11 +135,8 @@ public class CartService : Oteldemo.CartService.CartServiceBase
         // Validate inputs
         if (string.IsNullOrWhiteSpace(request.UserId))
         {
-            throw new RpcException(new Status(StatusCode.InvalidArgument, "User ID must not be empty or contain only whitespace"));
+            throw new RpcException(new Status(StatusCode.InvalidArgument, "User ID cannot be empty"));
         }
-
-        try
-        {
             if (await _featureFlagHelper.GetBooleanValueAsync("cartFailure", false))
             {
                 await _badCartStore.EmptyCartAsync(request.UserId);
