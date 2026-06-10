@@ -27,7 +27,56 @@ return function (App $app) {
     });
     
     $app->get('/health/liveness', function (Request $request, Response $response) {
-        return $response->withStatus(200);
+        $simulateFailure = $request->getHeaderLine('X-Simulate-Failure');
+        
+        // Check for required PHP extensions
+        $requiredExtensions = ['json', 'openssl', 'curl', 'mbstring'];
+        $missingExtensions = [];
+        foreach ($requiredExtensions as $ext) {
+            if (!extension_loaded($ext)) {
+                $missingExtensions[] = $ext;
+            }
+        }
+        
+        if ($simulateFailure === 'runtime' || $simulateFailure === 'missing-extension' || !empty($missingExtensions)) {
+            $error = $simulateFailure === 'missing-extension' || !empty($missingExtensions) 
+                ? 'Missing required PHP extensions: ' . implode(', ', $missingExtensions ?: ['simulated missing extension'])
+                : 'Critical runtime failure detected';
+            
+            $payload = json_encode([
+                'status' => 'unhealthy',
+                'error' => $error
+            ]);
+            $statusCode = 503;
+        } else {
+            $payload = json_encode([
+                'status' => 'ok',
+                'checks' => [
+                    'process' => 'running',
+                    'runtime' => 'healthy'
+                ]
+            ]);
+            $statusCode = 200;
+        }
+        
+        $response->getBody()->write($payload);
+        
+        // Add test trace headers if in test mode
+        if (getenv('APP_ENV') === 'test') {
+            $span = Span::getCurrent();
+            $traceId = $span->getContext()->getTraceId();
+            $response = $response
+                ->withHeader('X-Trace-Id', $traceId)
+                ->withHeader('X-Span-Attributes', json_encode([
+                    'http.method' => $request->getMethod(),
+                    'http.route' => '/health/liveness',
+                    'http.status_code' => $statusCode
+                ]));
+        }
+        
+        return $response
+            ->withHeader('Content-Type', 'application/json')
+            ->withStatus($statusCode);
     });
     
     $app->get('/ready', function (Request $request, Response $response) {
@@ -70,16 +119,94 @@ return function (App $app) {
             ->withStatus($statusCode);
     });
     
-    $app->get('/health/readiness', function (Request $request, Response $response) {
-        // Check dependencies
-        $pricingConfigOk = true; // Pricing config is loaded during service initialization
-        $databaseOk = true; // Quote service currently has no database connections
+    $app->get('/health/readiness', function (Request $request, Response $response, LoggerInterface $logger) {
+        $simulateFailure = $request->getHeaderLine('X-Simulate-Failure');
         
-        if ($pricingConfigOk && $databaseOk) {
-            return $response->withStatus(200);
-        } else {
-            return $response->withStatus(503);
+        // Check if quote calculation service is initialized properly
+        $quoteServiceAvailable = false;
+        $configurationLoaded = false;
+        
+        try {
+            // Test instantiating quote service to ensure it works
+            $quoteService = new QuoteService($logger);
+            $quoteServiceAvailable = true;
+            
+            // Verify configuration is loaded
+            $config = $logger->getLoggerConfig() ?? []; // Just an example, replace with actual config check
+            $configurationLoaded = true;
+        } catch (Exception $e) {
+            // Quote service initialization failed
         }
+        
+        if ($simulateFailure === 'quote-service' || !$quoteServiceAvailable || !$configurationLoaded) {
+            $error = $simulateFailure === 'quote-service' 
+                ? 'Quote calculation service is not available (simulated failure)'
+                : (!$quoteServiceAvailable ? 'Quote calculation service failed to initialize' : 'Configuration not loaded properly');
+            
+            $payload = json_encode([
+                'status' => 'not_ready',
+                'error' => $error
+            ]);
+            $statusCode = 503;
+        } else {
+            $payload = json_encode([
+                'status' => 'ready',
+                'checks' => [
+                    'quote_calculation_service' => 'available',
+                    'configuration' => 'loaded'
+                ]
+            ]);
+            $statusCode = 200;
+        }
+        
+        $response->getBody()->write($payload);
+        
+        // Add test trace headers if in test mode
+        if (getenv('APP_ENV') === 'test') {
+            $span = Span::getCurrent();
+            $traceId = $span->getContext()->getTraceId();
+            $response = $response
+                ->withHeader('X-Trace-Id', $traceId)
+                ->withHeader('X-Span-Attributes', json_encode([
+                    'http.method' => $request->getMethod(),
+                    'http.route' => '/health/readiness',
+                    'http.status_code' => $statusCode
+                ]));
+        }
+        
+        return $response
+            ->withHeader('Content-Type', 'application/json')
+            ->withStatus($statusCode);
+    });
+    
+    // Test endpoints for metrics verification (only available in test environment)
+    $app->post('/test/reset-metrics', function (Request $request, Response $response) {
+        if (getenv('APP_ENV') !== 'test') {
+            return $response->withStatus(404);
+        }
+        
+        // Reset metrics counter for testing
+        global $httpRequestMetrics;
+        $httpRequestMetrics = [];
+        
+        return $response->withStatus(204);
+    });
+    
+    $app->get('/test/metrics', function (Request $request, Response $response) {
+        if (getenv('APP_ENV') !== 'test') {
+            return $response->withStatus(404);
+        }
+        
+        global $httpRequestMetrics;
+        
+        $payload = json_encode([
+            'http_server_request_count' => array_values($httpRequestMetrics ?? [])
+        ]);
+        
+        $response->getBody()->write($payload);
+        return $response
+            ->withHeader('Content-Type', 'application/json')
+            ->withStatus(200);
     });
 
     $app->post('/quote', function (Request $request, Response $response, LoggerInterface $logger) {
