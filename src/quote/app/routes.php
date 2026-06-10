@@ -82,6 +82,52 @@ return function (App $app) {
         }
     });
 
+    $app->post('/quote', function (Request $request, Response $response, LoggerInterface $logger) {
+        $span = Span::getCurrent();
+        $span->addEvent('Received quote request, processing it');
+
+        $body = $request->getParsedBody();
+        
+        $itemCount = (int)$body['item_count'];
+        $itemWeight = (float)$body['item_weight'];
+        $forceFailure = isset($body['forceFailure']) ? (bool)$body['forceFailure'] : false;
+
+        try {
+            $quoteService = new QuoteService($logger);
+            $data = $quoteService->calculateQuote($itemCount, $itemWeight, $forceFailure);
+
+            $payload = json_encode(['quote' => $data, 'shipping_cost_usd' => $data]);
+            $response->getBody()->write($payload);
+
+            $span->addEvent('Quote processed, response sent back', [
+                'demo.shipping.quote.cost.total' => $data
+            ]);
+            $logger->info('Calculated quote', [
+                'total' => $data,
+                'item_count' => $itemCount,
+                'item_weight' => $itemWeight,
+                'destination_zip' => $body['destination_zip']
+            ]);
+
+            return $response
+                ->withHeader('Content-Type', 'application/json');
+        } catch (QuoteCalculationException $e) {
+            $span->setStatus(\OpenTelemetry\API\Trace\StatusCode::STATUS_ERROR, 'Quote calculation failed');
+            $span->recordException($e);
+            
+            $traceId = $span->getContext()->getTraceId();
+            $payload = json_encode([
+                'error' => 'Quote calculation failed',
+                'traceId' => $traceId
+            ]);
+            $response->getBody()->write($payload);
+            
+            return $response
+                ->withHeader('Content-Type', 'application/json')
+                ->withStatus(500);
+        }
+    })->add(\App\Application\Middleware\QuoteRequestValidationMiddleware::class);
+    
     $app->post('/getquote', function (Request $request, Response $response, LoggerInterface $logger) {
         $span = Span::getCurrent();
         $span->addEvent('Received get quote request, processing it');
