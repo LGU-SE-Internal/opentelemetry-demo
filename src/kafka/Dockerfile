@@ -10,6 +10,8 @@ ARG OTEL_JAVA_AGENT_VERSION
 USER appuser
 
 ADD --chown=appuser:appuser https://github.com/open-telemetry/opentelemetry-java-instrumentation/releases/download/v$OTEL_JAVA_AGENT_VERSION/opentelemetry-javaagent.jar /tmp/opentelemetry-javaagent.jar
+COPY --chown=root:root entrypoint.sh /opt/kafka/custom-entrypoint.sh
+RUN chmod +x /opt/kafka/custom-entrypoint.sh
 
 ENV KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
 ENV KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
@@ -24,5 +26,7 @@ ENV KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
 ENV KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1
 ENV KAFKA_OPTS="-javaagent:/tmp/opentelemetry-javaagent.jar -Dotel.jmx.target.system=kafka-broker"
 ENV CLUSTER_ID=ckjPoprWQzOf0-FuNkGfFQ
+
+ENTRYPOINT ["/opt/kafka/custom-entrypoint.sh"]
 
 HEALTHCHECK --start-period=30s --interval=10s --timeout=5s --retries=3 CMD kafka-broker-api-versions.sh --bootstrap-server localhost:9092
