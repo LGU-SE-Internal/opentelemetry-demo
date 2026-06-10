@@ -17,7 +17,8 @@ use opentelemetry_proto::oteldemo::{GetQuoteRequest, GetQuoteResponse, ShipOrder
 use tokio::signal::unix::{signal, SignalKind};
 use chrono::Utc;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(usize)]
 pub enum ServiceState {
     Running = 0,
     ShuttingDown = 1,
@@ -33,6 +34,37 @@ impl From<usize> for ServiceState {
             _ => ServiceState::Running,
         }
     }
+}
+
+/// Signal handler that listens for SIGINT/SIGTERM and updates service state
+pub async fn shutdown_signal_handler(state: Arc<AtomicUsize>) {
+    let mut sigint = signal(SignalKind::interrupt()).expect("Failed to set up SIGINT handler");
+    let mut sigterm = signal(SignalKind::terminate()).expect("Failed to set up SIGTERM handler");
+
+    tokio::select! {
+        _ = sigint.recv() => {},
+        _ = sigterm.recv() => {},
+    };
+
+    state.store(ServiceState::ShuttingDown as usize, Ordering::SeqCst);
+}
+
+/// Graceful shutdown implementation for server
+pub async fn graceful_shutdown<S>(server: Server, state: Arc<AtomicUsize>, timeout: Duration = Duration::from_secs(30)) -> () {
+    // Wait for state to transition to ShuttingDown
+    while state.load(Ordering::SeqCst) != ServiceState::ShuttingDown as usize {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Trigger server shutdown
+    let (shutdown_handle, server_fut) = server.serve_with_graceful_shutdown("0.0.0.0:0".parse().unwrap(), async move {});
+    tokio::spawn(server_fut);
+
+    // Wait for either shutdown completion or timeout
+    let _ = tokio::time::timeout(timeout, shutdown_handle.shutdown()).await;
+
+    // Update state to exiting
+    state.store(ServiceState::Exiting as usize, Ordering::SeqCst);
 }
 
 // Active request tracker interceptor to count in-flight requests for shutdown logging
@@ -525,7 +557,8 @@ pub async fn init_flagd_provider_concrete() -> FlagdProvider {
     FlagdProvider::new(options).await.unwrap()
 }
 
-const NANOS_MULTIPLE: u32 = 10000000u32;
+/// Global service state for shutdown coordination
+pub static SERVICE_STATE: once_cell::sync::Lazy<Arc<AtomicUsize>> = once_cell::sync::Lazy::new(|| Arc::new(AtomicUsize::new(ServiceState::Running as usize)));
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -568,7 +601,6 @@ async fn main() -> std::io::Result<()> {
     let request_tracker = ActiveRequestTracker { count: active_requests.clone() };
     
     // Initialize service state
-    pub static SERVICE_STATE: once_cell::sync::Lazy<Arc<AtomicUsize>> = once_cell::sync::Lazy::new(|| Arc::new(AtomicUsize::new(ServiceState::Running as usize)));
     let service_state = SERVICE_STATE.clone();
     
     // Shutdown interceptor: reject new requests when service is shutting down

@@ -137,9 +137,14 @@ pub use shipping_types::*;
 mod retry;
 pub use retry::*;
 
+use crate::{ServiceState, SERVICE_STATE};
+use std::sync::atomic::Ordering;
+
 #[derive(Serialize)]
 struct HealthResponse {
     status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
     dependencies: Dependencies,
 }
 
@@ -150,6 +155,17 @@ struct Dependencies {
 
 #[get("/health")]
 pub async fn health_check() -> impl Responder {
+    let state: ServiceState = SERVICE_STATE.load(Ordering::SeqCst).into();
+    if state == ServiceState::ShuttingDown {
+        return HttpResponse::ServiceUnavailable().json(HealthResponse {
+            status: "unhealthy",
+            reason: Some("shutting down"),
+            dependencies: Dependencies {
+                quote_service: "up", // irrelevant when shutting down
+            },
+        });
+    }
+
     let quote_up = check_quote_service_health().await;
     let (status, quote_status, http_status) = if quote_up {
         ("healthy", "up", HttpResponse::Ok())
@@ -159,6 +175,7 @@ pub async fn health_check() -> impl Responder {
 
     http_status.json(HealthResponse {
         status,
+        reason: None,
         dependencies: Dependencies {
             quote_service: quote_status,
         },
