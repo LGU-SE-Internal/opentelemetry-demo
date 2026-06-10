@@ -335,6 +335,52 @@ public class ValkeyCartStore : ICartStore
         }
     }
 
+    public async Task DeleteItemAsync(string userId, string productId)
+    {
+        if (_logger.IsEnabled(LogLevel.Information))
+        {
+            _logger.LogInformation("DeleteItemAsync called with userId={userId}, productId={productId}", userId, productId);
+        }
+        try
+        {
+            await _circuitBreakerPolicy.ExecuteAsync(async () =>
+            {
+                EnsureRedisConnected();
+                var db = _redis.GetDatabase();
+
+                // Access the cart from the cache
+                var value = await db.HashGetAsync(userId, CartFieldName);
+
+                if (value.IsNull)
+                {
+                    return;
+                }
+
+                var cart = Oteldemo.Cart.Parser.ParseFrom(value);
+                var existingItem = cart.Items.SingleOrDefault(i => i.ProductId == productId);
+                if (existingItem != null)
+                {
+                    cart.Items.Remove(existingItem);
+                    await db.HashSetAsync(userId, new[] { new HashEntry(CartFieldName, cart.ToByteArray()) });
+                    await db.KeyExpireAsync(userId, TimeSpan.FromMinutes(60));
+                }
+            });
+        }
+        catch (BrokenCircuitException ex)
+        {
+            _logger.LogWarning(ex, "Circuit breaker is open for Valkey/Redis operations");
+            // Record rejected request metric
+            CircuitBreakerRequestsRejectedCounter.Add(1,
+                new KeyValuePair<string, object>("resilience.circuit_breaker.name", "redis"),
+                new KeyValuePair<string, object>("error.type", "circuit_breaker_open"));
+            throw new RpcException(new Status(StatusCode.Unavailable, "Redis circuit breaker is open; please try again later"));
+        }
+        catch (Exception ex)
+        {
+            throw new RpcException(new Status(StatusCode.FailedPrecondition, $"Can't access cart storage. {ex}"));
+        }
+    }
+
     public async Task EmptyCartAsync(string userId)
     {
         if (_logger.IsEnabled(LogLevel.Information))
