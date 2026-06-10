@@ -46,7 +46,7 @@ public class CartServiceValidationTests
 
         var exception = await Assert.ThrowsAsync<RpcException>(() => cartClient.GetCartAsync(request));
         Assert.Equal(StatusCode.InvalidArgument, exception.StatusCode);
-        Assert.Contains("User ID cannot be empty", exception.Status.Detail);
+        Assert.Contains("User ID must not be empty", exception.Status.Detail);
     }
 
     [Fact]
@@ -68,7 +68,7 @@ public class CartServiceValidationTests
 
         var exception = await Assert.ThrowsAsync<RpcException>(() => cartClient.EmptyCartAsync(request));
         Assert.Equal(StatusCode.InvalidArgument, exception.StatusCode);
-        Assert.Contains("User ID cannot be empty", exception.Status.Detail);
+        Assert.Contains("User ID must not be empty", exception.Status.Detail);
     }
 
     [Fact]
@@ -94,7 +94,7 @@ public class CartServiceValidationTests
 
         var exception = await Assert.ThrowsAsync<RpcException>(() => cartClient.AddItemAsync(request));
         Assert.Equal(StatusCode.InvalidArgument, exception.StatusCode);
-        Assert.Contains("User ID cannot be empty", exception.Status.Detail);
+        Assert.Contains("User ID must not be empty", exception.Status.Detail);
     }
 
     [Fact]
@@ -120,7 +120,7 @@ public class CartServiceValidationTests
 
         var exception = await Assert.ThrowsAsync<RpcException>(() => cartClient.AddItemAsync(request));
         Assert.Equal(StatusCode.InvalidArgument, exception.StatusCode);
-        Assert.Contains("Product ID cannot be empty", exception.Status.Detail);
+        Assert.Contains("Product ID must not be empty", exception.Status.Detail);
     }
 
     [Fact]
@@ -146,7 +146,7 @@ public class CartServiceValidationTests
 
         var exception = await Assert.ThrowsAsync<RpcException>(() => cartClient.AddItemAsync(request));
         Assert.Equal(StatusCode.InvalidArgument, exception.StatusCode);
-        Assert.Contains("Quantity must be greater than 0", exception.Status.Detail);
+        Assert.Contains("Quantity must be a positive integer", exception.Status.Detail);
     }
 
     [Fact]
@@ -172,7 +172,7 @@ public class CartServiceValidationTests
 
         var exception = await Assert.ThrowsAsync<RpcException>(() => cartClient.AddItemAsync(request));
         Assert.Equal(StatusCode.InvalidArgument, exception.StatusCode);
-        Assert.Contains("Quantity must be greater than 0", exception.Status.Detail);
+        Assert.Contains("Quantity must be a positive integer", exception.Status.Detail);
     }
 
     [Fact]
@@ -198,7 +198,7 @@ public class CartServiceValidationTests
 
         var exception = await Assert.ThrowsAsync<RpcException>(() => cartClient.RemoveItemAsync(request));
         Assert.Equal(StatusCode.InvalidArgument, exception.StatusCode);
-        Assert.Contains("User ID cannot be empty", exception.Status.Detail);
+        Assert.Contains("User ID must not be empty", exception.Status.Detail);
     }
 
     [Fact]
@@ -224,7 +224,7 @@ public class CartServiceValidationTests
 
         var exception = await Assert.ThrowsAsync<RpcException>(() => cartClient.RemoveItemAsync(request));
         Assert.Equal(StatusCode.InvalidArgument, exception.StatusCode);
-        Assert.Contains("Product ID cannot be empty", exception.Status.Detail);
+        Assert.Contains("Product ID must not be empty", exception.Status.Detail);
     }
 
     [Fact]
@@ -250,9 +250,9 @@ public class CartServiceValidationTests
 
         var exception = await Assert.ThrowsAsync<RpcException>(() => cartClient.AddItemAsync(request));
         Assert.Equal(StatusCode.InvalidArgument, exception.StatusCode);
-        Assert.Contains("User ID cannot be empty", exception.Status.Detail);
-        Assert.Contains("product_id is required", exception.Status.Detail);
-        Assert.Contains("Quantity must be greater than 0", exception.Status.Detail);
+        Assert.Contains("User ID must not be empty", exception.Status.Detail);
+        Assert.Contains("Product ID must not be empty", exception.Status.Detail);
+        Assert.Contains("Quantity must be a positive integer", exception.Status.Detail);
     }
 
     [Fact]
