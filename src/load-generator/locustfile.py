@@ -485,11 +485,11 @@ def add_health_probe_endpoints(environment, **kwargs):
     if environment.web_ui:
         app = environment.web_ui.app
 
-        @app.route("/health/liveness")
+        @app.route("/health/live")
         def liveness_probe():
             return Response("OK", status=200, mimetype="text/plain")
 
-        @app.route("/health/readiness")
+        @app.route("/health/ready")
         def readiness_probe():
             if environment.runner is not None:
                 return Response("READY", status=200, mimetype="text/plain")

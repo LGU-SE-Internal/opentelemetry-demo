@@ -28,6 +28,7 @@ spec:
           ports:
             - containerPort: 8089
               name: http
+          # Health probe paths match implementation in src/load-generator/locustfile.py
           livenessProbe:
             httpGet:
               path: /health/live
