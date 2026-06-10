@@ -853,7 +853,7 @@ fun main() {
  */
 class FraudDetectionServiceImpl : FraudDetectionServiceGrpcKt.FraudDetectionServiceCoroutineImplBase() {
     override suspend fun checkFraud(request: CheckFraudRequest): CheckFraudResponse {
-        validateRequest(request)
+        validateCheckFraudRequest(request)
 
         // Proceed with normal fraud scoring (existing logic would be here)
         return CheckFraudResponse.newBuilder()
@@ -862,65 +862,69 @@ class FraudDetectionServiceImpl : FraudDetectionServiceGrpcKt.FraudDetectionServ
             .build()
     }
 
-    private fun validateRequest(request: CheckFraudRequest) {
-        // Validate user ID
-        if (request.userId.isNullOrBlank()) {
-            logValidationFailure("user_id", "user_id is required")
+    /**
+     * Validates CheckFraudRequest input parameters
+     * @throws StatusRuntimeException with INVALID_ARGUMENT status if validation fails
+     */
+    private fun validateCheckFraudRequest(request: CheckFraudRequest): Unit {
+        // Validate transaction id is present and non-empty
+        if (request.transactionId.isBlank()) {
+            logValidationFailure("transaction_id", "transaction_id is required and cannot be empty")
             throw Status.INVALID_ARGUMENT
-                .withDescription("user_id is required")
+                .withDescription("transaction_id is required and cannot be empty")
                 .asRuntimeException()
         }
-        
-        // Validate order ID
-        if (request.orderId.isNullOrBlank()) {
-            logValidationFailure("order_id", "order_id is required")
+
+        // Validate transaction id is UUID v4 format
+        if (!isValidUUIDv4(request.transactionId)) {
+            logValidationFailure("transaction_id", "transaction_id must be a valid UUID v4")
             throw Status.INVALID_ARGUMENT
-                .withDescription("order_id is required")
+                .withDescription("transaction_id must be a valid UUID v4")
                 .asRuntimeException()
         }
-        
-        // Validate transaction amount
-        if (request.amount <= 0) {
-            logValidationFailure("transaction_amount", "transaction_amount must be greater than 0")
+
+        // Validate user id is positive integer
+        if (request.userId == 0L) {
+            logValidationFailure("user_id", "user_id must be a positive integer")
             throw Status.INVALID_ARGUMENT
-                .withDescription("transaction_amount must be greater than 0")
+                .withDescription("user_id must be a positive integer")
                 .asRuntimeException()
         }
-        
-        // Validate address fields
-        val address = request.address
-        if (address == null) {
-            logValidationFailure("address", "address is required")
+
+        // Validate merchant id is positive integer
+        if (request.merchantId == 0L) {
+            logValidationFailure("merchant_id", "merchant_id must be a positive integer")
             throw Status.INVALID_ARGUMENT
-                .withDescription("address is required")
+                .withDescription("merchant_id must be a positive integer")
                 .asRuntimeException()
         }
-        if (address.street.isNullOrBlank()) {
-            logValidationFailure("address.street", "address.street is required")
+
+        // Validate amount is >= 0.01
+        if (request.amount < 0.01) {
+            logValidationFailure("amount", "amount must be greater than or equal to 0.01")
             throw Status.INVALID_ARGUMENT
-                .withDescription("address.street is required")
+                .withDescription("amount must be greater than or equal to 0.01")
                 .asRuntimeException()
         }
-        if (address.city.isNullOrBlank()) {
-            logValidationFailure("address.city", "address.city is required")
+
+        // Validate payment method id is present and non-empty
+        if (request.paymentMethodId.isBlank()) {
+            logValidationFailure("payment_method_id", "payment_method_id is required and cannot be empty")
             throw Status.INVALID_ARGUMENT
-                .withDescription("address.city is required")
+                .withDescription("payment_method_id is required and cannot be empty")
                 .asRuntimeException()
         }
-        if (address.zipCode.isNullOrBlank()) {
-            logValidationFailure("address.zip_code", "address.zip_code is required")
+
+        // Validate payment method id format
+        val paymentMethodRegex = "^pm_[a-zA-Z0-9]{24}$".toRegex()
+        if (!paymentMethodRegex.matches(request.paymentMethodId)) {
+            logValidationFailure("payment_method_id", "payment_method_id must match format pm_<24 alphanumeric characters>")
             throw Status.INVALID_ARGUMENT
-                .withDescription("address.zip_code is required")
-                .asRuntimeException()
-        }
-        if (address.country.isNullOrBlank()) {
-            logValidationFailure("address.country", "address.country is required")
-            throw Status.INVALID_ARGUMENT
-                .withDescription("address.country is required")
+                .withDescription("payment_method_id must match format pm_<24 alphanumeric characters>")
                 .asRuntimeException()
         }
     }
-    
+
     private fun logValidationFailure(invalidField: String, errorMessage: String) {
         MDC.put("request_id", GRPC_CONTEXT_REQUEST_ID_KEY.get() ?: "unknown")
         MDC.put("invalid_field", invalidField)
