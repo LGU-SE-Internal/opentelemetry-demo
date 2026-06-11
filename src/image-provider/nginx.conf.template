@@ -97,6 +97,30 @@ error_page 429 @rate_limit_exceeded;
         server_name _;
         server_tokens off;
 
+        # Validate requests to prevent path traversal and invalid file requests
+        set $rejection_reason "";
+
+        # Check for path traversal sequences (including URL encoded variants)
+        if ($request_uri ~* "\.\./|%2e%2e%2f|%252e%252e%252f") {
+            set $rejection_reason "path traversal attempt";
+        }
+
+        # Check for invalid characters in path: only allow a-z, A-Z, 0-9, _, -, ., /
+        if ($request_uri ~* "[^a-zA-Z0-9_\-\./]") {
+            set $rejection_reason "invalid characters in path";
+        }
+
+        # Restrict /images/* paths to allowed image extensions (case-insensitive)
+        if ($request_uri ~* "^/images/.*\.(?!(png|jpg|jpeg|webp|gif|svg)$)[^.]+") {
+            set $rejection_reason "disallowed file extension";
+        }
+
+        # Return 400 Bad Request for all invalid requests with structured logging
+        if ($rejection_reason != "") {
+            error_log /dev/stderr warn "Rejected request: client_ip=$real_client_ip, path=$request_uri, reason=$rejection_reason, request_id=$request_id, timestamp=$time_iso8601";
+            return 400;
+        }
+
         # Reject new requests with 503 during shutdown
         if ($in_shutdown) {
             return 503;
@@ -213,6 +237,30 @@ error_page 429 @rate_limit_exceeded;
 
         server_name _;
         server_tokens off;
+
+        # Validate requests to prevent path traversal and invalid file requests
+        set $rejection_reason "";
+
+        # Check for path traversal sequences (including URL encoded variants)
+        if ($request_uri ~* "\.\./|%2e%2e%2f|%252e%252e%252f") {
+            set $rejection_reason "path traversal attempt";
+        }
+
+        # Check for invalid characters in path: only allow a-z, A-Z, 0-9, _, -, ., /
+        if ($request_uri ~* "[^a-zA-Z0-9_\-\./]") {
+            set $rejection_reason "invalid characters in path";
+        }
+
+        # Restrict /images/* paths to allowed image extensions (case-insensitive)
+        if ($request_uri ~* "^/images/.*\.(?!(png|jpg|jpeg|webp|gif|svg)$)[^.]+") {
+            set $rejection_reason "disallowed file extension";
+        }
+
+        # Return 400 Bad Request for all invalid requests with structured logging
+        if ($rejection_reason != "") {
+            error_log /dev/stderr warn "Rejected request: client_ip=$real_client_ip, path=$request_uri, reason=$rejection_reason, request_id=$request_id, timestamp=$time_iso8601";
+            return 400;
+        }
 
         root /static;
         gzip_static on;
