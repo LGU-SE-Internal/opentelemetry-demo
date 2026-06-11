@@ -1,3 +1,7 @@
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../src/product-reviews'))
+
 import time
 from unittest.mock import patch, MagicMock
 import pytest
@@ -6,7 +10,7 @@ import pybreaker
 from opentelemetry.metrics import get_meter
 
 # Import functions from spec (will fail until implementation exists)
-from src.product_reviews.db import (
+from database import (
     fetch_product_reviews,
     fetch_average_review_score,
     create_review,
