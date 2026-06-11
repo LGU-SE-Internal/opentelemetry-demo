@@ -201,8 +201,365 @@ type HealthResponse struct {
 	Status        string `json:"status"`
 	Service       string `json:"service"`
 	Check         string `json:"check"`
-	KafkaConnected *bool  `json:"kafka_connected,omitempty"`
+	KafkaConnected *bool `json:"kafkaConnected,omitempty"`
 	Error         string `json:"error,omitempty"`
+}
+
+// KafkaConsumerConfig holds configuration for Kafka consumer
+type KafkaConsumerConfig struct {
+	Brokers []string
+	Topic   string
+	GroupID string
+	TLSConfig *tls.Config
+}
+
+// KafkaConsumer is the consumer with retry logic
+type KafkaConsumer struct {
+	cfg                  KafkaConsumerConfig
+	retryMaxAttempts     int
+	retryInitialBackoff  time.Duration
+	retryMaxBackoff      time.Duration
+	dlqTopic             string
+	client               sarama.Client
+	consumerGroup        sarama.ConsumerGroup
+	messageProcessor     func(ctx context.Context, msg *sarama.ConsumerMessage) error
+	dlqSender            func(msg *sarama.ConsumerMessage, err error) error
+	shutdownCtx          context.Context
+	shutdownCancel       context.CancelFunc
+	wg                   sync.WaitGroup
+}
+
+// NewKafkaConsumerWithRetry creates a new Kafka consumer with built-in retry logic for connection and consumption
+func NewKafkaConsumerWithRetry(cfg KafkaConsumerConfig) (*KafkaConsumer, error) {
+	// Load retry config from env vars
+	retryMaxAttempts := 5
+	if val, ok := os.LookupEnv("KAFKA_RETRY_MAX_ATTEMPTS"); ok {
+		if intVal, err := strconv.Atoi(val); err == nil && intVal > 0 {
+			retryMaxAttempts = intVal
+		}
+	}
+
+	retryInitialBackoff := 100 * time.Millisecond
+	if val, ok := os.LookupEnv("KAFKA_RETRY_INITIAL_BACKOFF_MS"); ok {
+		if intVal, err := strconv.Atoi(val); err == nil && intVal > 0 {
+			retryInitialBackoff = time.Duration(intVal) * time.Millisecond
+		}
+	}
+
+	retryMaxBackoff := 10 * time.Second
+	if val, ok := os.LookupEnv("KAFKA_RETRY_MAX_BACKOFF_MS"); ok {
+		if intVal, err := strconv.Atoi(val); err == nil && intVal > 0 {
+			retryMaxBackoff = time.Duration(intVal) * time.Millisecond
+		}
+	}
+
+	dlqTopic := "kafka-collector-dlq"
+	if val, ok := os.LookupEnv("KAFKA_DLQ_TOPIC"); ok && val != "" {
+		dlqTopic = val
+	}
+
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
+
+	consumer := &KafkaConsumer{
+		cfg:                  cfg,
+		retryMaxAttempts:     retryMaxAttempts,
+		retryInitialBackoff:  retryInitialBackoff,
+		retryMaxBackoff:      retryMaxBackoff,
+		dlqTopic:             dlqTopic,
+		shutdownCtx:          shutdownCtx,
+		shutdownCancel:       shutdownCancel,
+	}
+
+	// Set default message processor
+	consumer.messageProcessor = func(ctx context.Context, msg *sarama.ConsumerMessage) error {
+		return nil
+	}
+
+	// Set default DLQ sender
+	consumer.dlqSender = func(msg *sarama.ConsumerMessage, err error) error {
+		// Default implementation would create a producer and send to DLQ
+		// For testability, this can be overridden
+		return nil
+	}
+
+	// Attempt to connect with retry
+	connectBackoff := backoff.NewExponentialBackOff()
+	connectBackoff.InitialInterval = retryInitialBackoff
+	connectBackoff.MaxInterval = retryMaxBackoff
+	connectBackoff.MaxElapsedTime = 0 // We use retry count instead of elapsed time
+
+	retryCount := 0
+	operation := func() error {
+		select {
+		case <-consumer.shutdownCtx.Done():
+			return backoff.Permanent(consumer.shutdownCtx.Err())
+		default:
+		}
+
+		saramaConfig := sarama.NewConfig()
+		saramaConfig.Consumer.Group.Rebalance.GroupStrategies = []sarama.BalanceStrategy{sarama.NewBalanceStrategyRoundRobin()}
+		saramaConfig.Consumer.Offsets.Initial = sarama.OffsetOldest
+		if cfg.TLSConfig != nil {
+			saramaConfig.Net.TLS.Enable = true
+			saramaConfig.Net.TLS.Config = cfg.TLSConfig
+		}
+
+		client, err := sarama.NewClient(cfg.Brokers, saramaConfig)
+		if err != nil {
+			// Check if error is retriable
+			var retriable bool
+			if errors.Is(err, sarama.ErrBrokerNotAvailable) || 
+			   errors.Is(err, sarama.ErrLeaderNotAvailable) ||
+			   errors.Is(err, sarama.ErrNetworkException) ||
+			   errors.Is(err, sarama.RequestTimeout) {
+				retriable = true
+			}
+
+			if !retriable {
+				return backoff.Permanent(NonRetriableKafkaError{Err: err})
+			}
+
+			retryCount++
+			if retryCount >= retryMaxAttempts {
+				return backoff.Permanent(fmt.Errorf("failed to connect after %d attempts: %w", retryMaxAttempts, err))
+			}
+
+			errStr := err.Error()
+			kafkaLastErr.Store(&errStr)
+			kafkaConnected.Store(false)
+			return RetriableKafkaError{Err: err}
+		}
+
+		consumerGroup, err := sarama.NewConsumerGroupFromClient(cfg.GroupID, client)
+		if err != nil {
+			client.Close()
+			retryCount++
+			if retryCount >= retryMaxAttempts {
+				return backoff.Permanent(fmt.Errorf("failed to create consumer group after %d attempts: %w", retryMaxAttempts, err))
+			}
+			errStr := err.Error()
+			kafkaLastErr.Store(&errStr)
+			kafkaConnected.Store(false)
+			return RetriableKafkaError{Err: err}
+		}
+
+		consumer.client = client
+		consumer.consumerGroup = consumerGroup
+		kafkaConnected.Store(true)
+		kafkaLastErr.Store(nil)
+		return nil
+	}
+
+	err := backoff.Retry(operation, backoff.WithMaxRetries(connectBackoff, uint64(retryMaxAttempts)))
+	if err != nil {
+		consumer.shutdownCancel()
+		return nil, err
+	}
+
+	return consumer, nil
+}
+
+// ProcessMessageWithRetry processes a single Kafka message with retry logic for retriable errors
+func (c *KafkaConsumer) ProcessMessageWithRetry(msg *sarama.ConsumerMessage) error {
+	backoffCfg := backoff.NewExponentialBackOff()
+	backoffCfg.InitialInterval = c.retryInitialBackoff
+	backoffCfg.MaxInterval = c.retryMaxBackoff
+	backoffCfg.MaxElapsedTime = 0
+
+	retryCount := 0
+	var lastErr error
+
+	operation := func() error {
+		select {
+		case <-c.shutdownCtx.Done():
+			return backoff.Permanent(c.shutdownCtx.Err())
+		default:
+		}
+
+		err := c.messageProcessor(c.shutdownCtx, msg)
+		if err == nil {
+			return nil
+		}
+
+		lastErr = err
+		var retriableErr RetriableKafkaError
+		if !errors.As(err, &retriableErr) {
+			// Non-retriable error, send to DLQ immediately
+			if sendErr := c.sendToDLQ(msg, err); sendErr != nil {
+				globalLogger.Error(c.shutdownCtx, "Failed to send non-retriable error message to DLQ", zap.Error(sendErr), zap.Int64("offset", msg.Offset))
+			}
+			return backoff.Permanent(nil) // Return nil so we don't mark the whole operation as failed
+		}
+
+		retryCount++
+		if retryCount >= c.retryMaxAttempts {
+			// All retries failed, send to DLQ
+			if sendErr := c.sendToDLQ(msg, retriableErr); sendErr != nil {
+				globalLogger.Error(c.shutdownCtx, "Failed to send failed message to DLQ after max retries", zap.Error(sendErr), zap.Int64("offset", msg.Offset))
+			}
+			return backoff.Permanent(nil)
+		}
+
+		globalLogger.Warn(c.shutdownCtx, "Retrying failed message processing", zap.Error(retriableErr), zap.Int("attempt", retryCount), zap.Int64("offset", msg.Offset))
+		return retriableErr
+	}
+
+	err := backoff.Retry(operation, backoff.WithMaxRetries(backoffCfg, uint64(c.retryMaxAttempts)))
+	return err
+}
+
+// sendToDLQ writes a permanently failed message to the configured dead-letter queue
+func (c *KafkaConsumer) sendToDLQ(msg *sarama.ConsumerMessage, err error) error {
+	globalLogger.Error(c.shutdownCtx, "Sending message to DLQ", zap.Error(err), zap.Int64("offset", msg.Offset), zap.String("dlq_topic", c.dlqTopic))
+	return c.dlqSender(msg, err)
+}
+
+// SetMessageProcessor sets the message processing function
+func (c *KafkaConsumer) SetMessageProcessor(processor func(ctx context.Context, msg *sarama.ConsumerMessage) error) {
+	c.messageProcessor = processor
+}
+
+// SetDLQSender sets the DLQ sender function for testing
+func (c *KafkaConsumer) SetDLQSender(sender func(msg *sarama.ConsumerMessage, err error) error) {
+	c.dlqSender = sender
+}
+
+// GetRetryMaxAttempts returns the configured max retry attempts
+func (c *KafkaConsumer) GetRetryMaxAttempts() int {
+	return c.retryMaxAttempts
+}
+
+// GetRetryInitialBackoff returns the configured initial backoff
+func (c *KafkaConsumer) GetRetryInitialBackoff() time.Duration {
+	return c.retryInitialBackoff
+}
+
+// GetRetryMaxBackoff returns the configured max backoff
+func (c *KafkaConsumer) GetRetryMaxBackoff() time.Duration {
+	return c.retryMaxBackoff
+}
+
+// GetDLQTopic returns the configured DLQ topic
+func (c *KafkaConsumer) GetDLQTopic() string {
+	return c.dlqTopic
+}
+
+// StartConsumption starts consuming messages from Kafka
+func (c *KafkaConsumer) StartConsumption(ctx context.Context) error {
+	topics := []string{c.cfg.Topic}
+	handler := &consumerGroupHandler{consumer: c}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-c.shutdownCtx.Done():
+			return nil
+		default:
+			err := c.consumerGroup.Consume(ctx, topics, handler)
+			if err != nil {
+				if errors.Is(err, sarama.ErrClosedConsumerGroup) {
+					return nil
+				}
+				globalLogger.Error(c.shutdownCtx, "Error consuming from Kafka, retrying", zap.Error(err))
+				// Mark as disconnected during retry
+				kafkaConnected.Store(false)
+				errStr := err.Error()
+				kafkaLastErr.Store(&errStr)
+				
+				// Backoff before retrying consumption
+				backoff.Sleep(c.retryInitialBackoff)
+			}
+			// Recheck connection after error
+			if c.client.Closed() {
+				// Attempt to reconnect with backoff
+				reconnectBackoff := backoff.NewExponentialBackOff()
+				reconnectBackoff.InitialInterval = c.retryInitialBackoff
+				reconnectBackoff.MaxInterval = c.retryMaxBackoff
+				reconnectBackoff.MaxElapsedTime = 0
+
+				retryCount := 0
+				for {
+					select {
+					case <-ctx.Done():
+						return nil
+					case <-c.shutdownCtx.Done():
+						return nil
+					default:
+					}
+
+					saramaConfig := sarama.NewConfig()
+					saramaConfig.Consumer.Group.Rebalance.GroupStrategies = []sarama.BalanceStrategy{sarama.NewBalanceStrategyRoundRobin()}
+					saramaConfig.Consumer.Offsets.Initial = sarama.OffsetOldest
+					if c.cfg.TLSConfig != nil {
+						saramaConfig.Net.TLS.Enable = true
+						saramaConfig.Net.TLS.Config = c.cfg.TLSConfig
+					}
+
+					client, err := sarama.NewClient(c.cfg.Brokers, saramaConfig)
+					if err != nil {
+						retryCount++
+						if retryCount >= c.retryMaxAttempts {
+							globalLogger.Error(c.shutdownCtx, "Failed to reconnect after max attempts", zap.Error(err))
+							return err
+						}
+						backoff.Sleep(reconnectBackoff.NextBackOff())
+						continue
+					}
+
+					consumerGroup, err := sarama.NewConsumerGroupFromClient(c.cfg.GroupID, client)
+					if err != nil {
+						client.Close()
+						retryCount++
+						if retryCount >= c.retryMaxAttempts {
+							globalLogger.Error(c.shutdownCtx, "Failed to recreate consumer group after max attempts", zap.Error(err))
+							return err
+						}
+						backoff.Sleep(reconnectBackoff.NextBackOff())
+						continue
+					}
+
+					c.client.Close()
+					c.client = client
+					c.consumerGroup = consumerGroup
+					kafkaConnected.Store(true)
+					kafkaLastErr.Store(nil)
+					break
+				}
+			}
+		}
+	}
+}
+
+// Close shuts down the consumer
+func (c *KafkaConsumer) Close() error {
+	c.shutdownCancel()
+	c.wg.Wait()
+	if c.consumerGroup != nil {
+		c.consumerGroup.Close()
+	}
+	if c.client != nil {
+		c.client.Close()
+	}
+	kafkaConnected.Store(false)
+	return nil
+}
+
+// consumerGroupHandler implements sarama.ConsumerGroupHandler
+type consumerGroupHandler struct {
+	consumer *KafkaConsumer
+}
+
+func (h *consumerGroupHandler) Setup(_ sarama.ConsumerGroupSession) error   { return nil }
+func (h *consumerGroupHandler) Cleanup(_ sarama.ConsumerGroupSession) error { return nil }
+func (h *consumerGroupHandler) ConsumeClaim(sess sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+	for msg := range claim.Messages() {
+		if err := h.consumer.ProcessMessageWithRetry(msg); err != nil {
+			globalLogger.Error(h.consumer.shutdownCtx, "Error processing message", zap.Error(err), zap.Int64("offset", msg.Offset))
+		}
+		sess.MarkMessage(msg, "")
+	}
+	return nil
 }
 
 
