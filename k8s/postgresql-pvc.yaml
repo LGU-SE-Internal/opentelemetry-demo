@@ -1,9 +1,11 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: postgresql-data
+  name: postgresql-pvc
   labels:
     app.kubernetes.io/name: postgresql
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
 spec:
   accessModes:
     - ReadWriteOnce
