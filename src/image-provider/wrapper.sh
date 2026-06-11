@@ -4,55 +4,56 @@
 
 set -e
 
-TLS_CERT_PATH=${IMAGE_PROVIDER_TLS_CERT_PATH:-}
-TLS_KEY_PATH=${IMAGE_PROVIDER_TLS_KEY_PATH:-}
-TLS_CA_CERT_PATH=${IMAGE_PROVIDER_TLS_CA_CERT_PATH:-}
-
 # Function to throw TLS configuration error
 tls_config_error() {
     echo "TLSConfigurationError: $1" >&2
     exit 1
 }
 
+# Map spec environment variables to nginx template variables
+CERT_PATH="${IMAGE_PROVIDER_TLS_CERT_PATH:-}"
+KEY_PATH="${IMAGE_PROVIDER_TLS_KEY_PATH:-}"
+CA_CERT_PATH="${IMAGE_PROVIDER_TLS_CA_CERT_PATH:-}"
+
 # Validate TLS configuration
-if [ -n "$TLS_CERT_PATH" ] || [ -n "$TLS_KEY_PATH" ]; then
+if [ -n "$CERT_PATH" ] || [ -n "$KEY_PATH" ]; then
     # Check both cert and key are provided
-    if [ -z "$TLS_CERT_PATH" ] || [ -z "$TLS_KEY_PATH" ]; then
+    if [ -z "$CERT_PATH" ] || [ -z "$KEY_PATH" ]; then
         tls_config_error "Missing required TLS parameter: both IMAGE_PROVIDER_TLS_CERT_PATH and IMAGE_PROVIDER_TLS_KEY_PATH must be provided when enabling TLS"
     fi
 
     # Check cert file exists and is readable
-    if [ ! -f "$TLS_CERT_PATH" ] || [ ! -r "$TLS_CERT_PATH" ]; then
-        tls_config_error "Certificate file not found or unreadable: $TLS_CERT_PATH"
+    if [ ! -f "$CERT_PATH" ] || [ ! -r "$CERT_PATH" ]; then
+        tls_config_error "Certificate file not found or unreadable: $CERT_PATH"
     fi
 
     # Check key file exists and is readable
-    if [ ! -f "$TLS_KEY_PATH" ] || [ ! -r "$TLS_KEY_PATH" ]; then
-        tls_config_error "Private key file not found or unreadable: $TLS_KEY_PATH"
+    if [ ! -f "$KEY_PATH" ] || [ ! -r "$KEY_PATH" ]; then
+        tls_config_error "Private key file not found or unreadable: $KEY_PATH"
     fi
 
     # Validate cert and key match
-    CERT_MODULUS=$(openssl x509 -noout -modulus -in "$TLS_CERT_PATH" 2>/dev/null || tls_config_error "Invalid TLS certificate format")
-    KEY_MODULUS=$(openssl rsa -noout -modulus -in "$TLS_KEY_PATH" 2>/dev/null || tls_config_error "Invalid TLS private key format")
+    CERT_MODULUS=$(openssl x509 -noout -modulus -in "$CERT_PATH" 2>/dev/null || tls_config_error "Invalid TLS certificate format")
+    KEY_MODULUS=$(openssl rsa -noout -modulus -in "$KEY_PATH" 2>/dev/null || tls_config_error "Invalid TLS private key format")
     
     if [ "$CERT_MODULUS" != "$KEY_MODULUS" ]; then
         tls_config_error "TLS certificate and private key are mismatched"
     fi
 
     # Check if certificate is expired
-    if ! openssl x509 -checkend 0 -noout -in "$TLS_CERT_PATH" >/dev/null 2>&1; then
+    if ! openssl x509 -checkend 0 -noout -in "$CERT_PATH" >/dev/null 2>&1; then
         tls_config_error "TLS certificate is expired"
     fi
 
     # Validate CA cert if provided
-    if [ -n "$TLS_CA_CERT_PATH" ]; then
-        if [ ! -f "$TLS_CA_CERT_PATH" ] || [ ! -r "$TLS_CA_CERT_PATH" ]; then
-            tls_config_error "CA certificate file not found or unreadable: $TLS_CA_CERT_PATH"
+    if [ -n "$CA_CERT_PATH" ]; then
+        if [ ! -f "$CA_CERT_PATH" ] || [ ! -r "$CA_CERT_PATH" ]; then
+            tls_config_error "CA certificate file not found or unreadable: $CA_CERT_PATH"
         fi
 
         # Check CA cert is valid
-        if ! openssl x509 -in "$TLS_CA_CERT_PATH" -noout >/dev/null 2>&1; then
-            tls_config_error "Invalid or corrupted CA certificate file: $TLS_CA_CERT_PATH"
+        if ! openssl x509 -in "$CA_CERT_PATH" -noout >/dev/null 2>&1; then
+            tls_config_error "Invalid or corrupted CA certificate file: $CA_CERT_PATH"
         fi
     fi
 fi
@@ -65,97 +66,28 @@ export SSL_CLIENT_CERTIFICATE=""
 export SSL_VERIFY_CLIENT="off"
 export SSL_PROTOCOLS=""
 
-if [ -n "$TLS_CERT_PATH" ]; then
+if [ -n "$CERT_PATH" ]; then
     export ENABLE_TLS="true"
-    export SSL_CERTIFICATE="$TLS_CERT_PATH"
-    export SSL_CERTIFICATE_KEY="$TLS_KEY_PATH"
+    export SSL_CERTIFICATE="$CERT_PATH"
+    export SSL_CERTIFICATE_KEY="$KEY_PATH"
     export SSL_PROTOCOLS="TLSv1.2 TLSv1.3;"
 
-    if [ -n "$TLS_CA_CERT_PATH" ]; then
-        export SSL_CLIENT_CERTIFICATE="$TLS_CA_CERT_PATH"
+    if [ -n "$CA_CERT_PATH" ]; then
+        export SSL_CLIENT_CERTIFICATE="$CA_CERT_PATH"
         export SSL_VERIFY_CLIENT="on;"
     fi
 fi
 
-envsubst '$ENABLE_TLS $SSL_CERTIFICATE $SSL_CERTIFICATE_KEY $SSL_CLIENT_CERTIFICATE $SSL_VERIFY_CLIENT $SSL_PROTOCOLS' < /nginx.conf.template > /tmp/nginx.conf
-
-# Start nginx
-exec nginx -c /tmp/nginx.conf -g 'daemon off;'
-}
-
-# Map spec environment variables to nginx template variables
-CERT_PATH="${IMAGE_PROVIDER_TLS_CERT_PATH}"
-KEY_PATH="${IMAGE_PROVIDER_TLS_KEY_PATH}"
-CA_CERT_PATH="${IMAGE_PROVIDER_TLS_CA_CERT_PATH}"
-
-# Validate TLS configuration
-if [ -n "$CERT_PATH" ] || [ -n "$KEY_PATH" ]; then
-    # Check both cert and key are provided
-    if [ -z "$CERT_PATH" ] || [ -z "$KEY_PATH" ]; then
-        tls_config_error "Both IMAGE_PROVIDER_TLS_CERT_PATH and IMAGE_PROVIDER_TLS_KEY_PATH must be provided when TLS is enabled"
-    fi
-
-    # Check cert file exists and is readable
-    if [ ! -f "$CERT_PATH" ] || [ ! -r "$CERT_PATH" ]; then
-        tls_config_error "TLS certificate file $CERT_PATH is missing or unreadable"
-    fi
-
-    # Check key file exists and is readable
-    if [ ! -f "$KEY_PATH" ] || [ ! -r "$KEY_PATH" ]; then
-        tls_config_error "TLS private key file $KEY_PATH is missing or unreadable"
-    fi
-
-    # Validate cert and key match
-    if ! openssl x509 -noout -modulus -in "$CERT_PATH" > /tmp/cert_modulus 2>&1; then
-        tls_config_error "Invalid TLS certificate file: $CERT_PATH"
-    fi
-    if ! openssl rsa -noout -modulus -in "$KEY_PATH" > /tmp/key_modulus 2>&1; then
-        tls_config_error "Invalid TLS private key file: $KEY_PATH"
-    fi
-    if ! diff /tmp/cert_modulus /tmp/key_modulus > /dev/null 2>&1; then
-        tls_config_error "TLS certificate and private key are mismatched"
-    fi
-    rm -f /tmp/cert_modulus /tmp/key_modulus
-
-    # Validate certificate is not expired
-    if ! openssl x509 -checkend 0 -noout -in "$CERT_PATH" > /dev/null 2>&1; then
-        tls_config_error "TLS certificate is expired"
-    fi
-
-    # Set nginx TLS variables
-    export TLS_ENABLED="true"
-    export TLS_CERT_PATH="$CERT_PATH"
-    export TLS_KEY_PATH="$KEY_PATH"
-    export TLS_MIN_VERSION="TLSv1.2"
-
-    # Handle mTLS if CA cert is provided
-    if [ -n "$CA_CERT_PATH" ]; then
-        # Check CA cert exists and is readable
-        if [ ! -f "$CA_CERT_PATH" ] || [ ! -r "$CA_CERT_PATH" ]; then
-            tls_config_error "CA certificate file $CA_CERT_PATH is missing or unreadable"
-        fi
-
-        # Validate CA cert is valid
-        if ! openssl x509 -noout -in "$CA_CERT_PATH" > /dev/null 2>&1; then
-            tls_config_error "Invalid CA certificate file: $CA_CERT_PATH"
-        fi
-
-        export MTLS_ENABLED="true"
-        export MTLS_CA_CERT_PATH="$CA_CERT_PATH"
-    else
-        export MTLS_ENABLED="false"
-    fi
-else
-    # No TLS configured, use plaintext only
-    export TLS_ENABLED="false"
-    export MTLS_ENABLED="false"
+# Set initial configuration
+NGINX_TEMPLATE_PATH="/nginx.conf.template"
+if [ -f "./nginx.conf.template" ]; then
+    NGINX_TEMPLATE_PATH="./nginx.conf.template"
 fi
 
-# Set initial configuration
-envsubst '$OTEL_COLLECTOR_HOST $OTEL_COLLECTOR_PORT_GRPC $OTEL_SERVICE_NAME $NGINX_RATE_LIMIT_RPS $NGINX_PER_IMAGE_RATE_LIMIT_RPS $TLS_ENABLED $TLS_CERT_PATH $TLS_KEY_PATH $TLS_MIN_VERSION $TLS_CIPHER_SUITES $MTLS_ENABLED $MTLS_CA_CERT_PATH' < /nginx.conf.template > /etc/nginx/nginx.conf
+envsubst '$OTEL_COLLECTOR_HOST $OTEL_COLLECTOR_PORT_GRPC $OTEL_SERVICE_NAME $NGINX_RATE_LIMIT_RPS $NGINX_PER_IMAGE_RATE_LIMIT_RPS $ENABLE_TLS $SSL_CERTIFICATE $SSL_CERTIFICATE_KEY $SSL_CLIENT_CERTIFICATE $SSL_VERIFY_CLIENT $SSL_PROTOCOLS' < "$NGINX_TEMPLATE_PATH" > /tmp/nginx.conf
 
 # Test nginx configuration is valid
-if ! nginx -t > /dev/null 2>&1; then
+if ! nginx -t -c /tmp/nginx.conf > /dev/null 2>&1; then
     tls_config_error "Invalid nginx configuration generated from TLS settings"
 fi
 
@@ -163,13 +95,13 @@ fi
 handle_shutdown() {
     echo "Received shutdown signal, entering 30s grace period..."
     # Add shutdown_time variable to nginx config to trigger shutdown state
-    sed -i '1i set $shutdown_time "'"$(date +%s)"'";' /etc/nginx/nginx.conf
+    sed -i '1i set $shutdown_time "'"$(date +%s)"'";' /tmp/nginx.conf
     # Reload nginx to apply the shutdown state
-    nginx -s reload
+    nginx -s reload -c /tmp/nginx.conf
     # Wait for worker_shutdown_timeout (30s) before exiting
     sleep 30
     # Stop nginx gracefully
-    nginx -s stop
+    nginx -s stop -c /tmp/nginx.conf
     exit 0
 }
 
@@ -177,9 +109,8 @@ handle_shutdown() {
 trap handle_shutdown SIGTERM SIGINT
 
 # Start nginx in foreground
-nginx -g "daemon off;" &
+nginx -g "daemon off;" -c /tmp/nginx.conf &
 NGINX_PID=$!
 
 # Wait for nginx process
 wait $NGINX_PID
-
