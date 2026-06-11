@@ -14,8 +14,11 @@ import java.net.InetSocketAddress
 import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 
-class RateLimitServerInterceptor : ServerInterceptor {
-    private val rateLimitRps: Int = System.getenv("FRAUD_DETECTION_RATE_LIMIT_RPS")?.toIntOrNull() ?: 100
+class RateLimitServerInterceptor(
+    private val rateLimitRps: Int = System.getenv("FRAUD_DETECTION_RATE_LIMIT_RPS")?.toIntOrNull() 
+        ?: System.getProperty("FRAUD_DETECTION_RATE_LIMIT_RPS")?.toIntOrNull() 
+        ?: 100
+) : ServerInterceptor {
     private val rateLimitDisabled: Boolean = rateLimitRps <= 0
     private val ipBuckets: ConcurrentHashMap<String, Bucket> = ConcurrentHashMap()
 
