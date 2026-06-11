@@ -7,8 +7,8 @@ package oteldemo.problempattern;
 
 import java.lang.management.MemoryMXBean;
 import java.lang.management.MemoryUsage;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.slf4j.Logger;
 
 
 /**
@@ -16,7 +16,7 @@ import org.apache.logging.log4j.Logger;
 */
 public class MemoryUtils {
 
-    private static final Logger logger = LogManager.getLogger(MemoryUtils.class.getName());
+    private static final Logger logger = LoggerFactory.getLogger(MemoryUtils.class.getName());
 
     private static final long NO_HEAP_LIMIT = -1;
 

@@ -8,15 +8,15 @@ package oteldemo.problempattern;
 import java.lang.management.ManagementFactory;
 import java.util.concurrent.TimeUnit;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.slf4j.Logger;
 
 /**
  * The GarbageCollectionTrigger class is responsible for triggering manual garbage collection
 * at specified intervals to simulate memory pressure and measure the impact on performance.
 */
 public class GarbageCollectionTrigger {
-    private static final Logger logger = LogManager.getLogger(GarbageCollectionTrigger.class.getName());
+    private static final Logger logger = LoggerFactory.getLogger(GarbageCollectionTrigger.class.getName());
 
     private final long gc_delay;
     private final int finalize_delay;
