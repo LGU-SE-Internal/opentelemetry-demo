@@ -71,16 +71,20 @@ import psycopg2
 import time
 from dataclasses import dataclass
 
+server: Optional[grpc.aio.Server] = None
+db_connection_pool: Optional[Any] = None
+otel_providers: Optional[OTelProviders] = None
+
 @dataclass
 class OTelProviders:
-    trace_provider: Any
-    metric_provider: Any
-    log_provider: Any
+    trace: Any
+    metric: Any
+    log: Any
 
 # Graceful shutdown implementation
 def handle_shutdown_signal(signum: int, frame: Optional[FrameType]) -> None:
     """Handle SIGINT/SIGTERM signals to trigger graceful shutdown"""
-    global shutdown_initiated
+    global shutdown_initiated, server, db_connection_pool, otel_providers
     if shutdown_initiated:
         logger.warning("Received second shutdown signal, forcing immediate exit")
         exit(1)
@@ -88,7 +92,14 @@ def handle_shutdown_signal(signum: int, frame: Optional[FrameType]) -> None:
     signal_name = signal.Signals(signum).name
     logger.info(f"Shutdown initiated by {signal_name} signal")
     shutdown_initiated = True
-    shutdown_event.set()
+    
+    if server is None or db_connection_pool is None or otel_providers is None:
+        logger.warning("Service not fully initialized, exiting immediately")
+        exit(0)
+    
+    # Run graceful shutdown synchronously
+    exit_code = run_graceful_shutdown(server, db_connection_pool, otel_providers)
+    exit(exit_code)
 
 def run_graceful_shutdown(server: grpc.Server, db_pool: Any, otel_providers: OTelProviders) -> int:
     """
@@ -100,54 +111,51 @@ def run_graceful_shutdown(server: grpc.Server, db_pool: Any, otel_providers: OTe
     Returns exit code 0 on success, 1 on timeout/failure
     """
     import asyncio
-    loop = asyncio.get_event_loop()
     
     # Step 1: Stop accepting new connections
     logger.info("Stopping gRPC server from accepting new connections")
-    loop.run_until_complete(server.stop(grace=None))
+    stop_future = server.stop(grace=10)
     
     # Step 2: Wait for in-flight requests to complete (max 10s)
     logger.info("Waiting for in-flight requests to complete (timeout: 10s)")
     try:
-        loop.run_until_complete(asyncio.wait_for(server.wait_for_termination(), timeout=10))
+        asyncio.run(asyncio.wait_for(stop_future, timeout=10))
         logger.info("All in-flight requests completed successfully")
         timeout_occurred = False
     except asyncio.TimeoutError:
         logger.warning("Shutdown timeout elapsed, forcibly terminating remaining requests")
-        loop.run_until_complete(server.stop(grace=0))
+        asyncio.run(server.stop(grace=0))
         timeout_occurred = True
     
     # Step 3: Clean up database connections
     logger.info("Closing all open database connections")
-    # For psycopg2 basic connections, if using a pool, close all connections here
-    # For this implementation, we'll assume any open connections are closed when pool is closed
     if hasattr(db_pool, 'closeall'):
         db_pool.closeall()
     logger.info("Database connections closed successfully")
     
     # Step 4: Flush and shut down OTel providers
     # Trace provider
-    if hasattr(otel_providers.trace_provider, 'force_flush'):
+    if hasattr(otel_providers.trace, 'force_flush'):
         logger.info("Flushing OpenTelemetry trace provider")
-        otel_providers.trace_provider.force_flush(timeout_millis=5000)
-    if hasattr(otel_providers.trace_provider, 'shutdown'):
-        otel_providers.trace_provider.shutdown()
+        otel_providers.trace.force_flush(timeout_millis=5000)
+    if hasattr(otel_providers.trace, 'shutdown'):
+        otel_providers.trace.shutdown()
     logger.info("OpenTelemetry trace provider flushed and shut down")
     
     # Metric provider
-    if hasattr(otel_providers.metric_provider, 'force_flush'):
+    if hasattr(otel_providers.metric, 'force_flush'):
         logger.info("Flushing OpenTelemetry metric provider")
-        otel_providers.metric_provider.force_flush(timeout_millis=5000)
-    if hasattr(otel_providers.metric_provider, 'shutdown'):
-        otel_providers.metric_provider.shutdown()
+        otel_providers.metric.force_flush(timeout_millis=5000)
+    if hasattr(otel_providers.metric, 'shutdown'):
+        otel_providers.metric.shutdown()
     logger.info("OpenTelemetry metric provider flushed and shut down")
     
     # Log provider
-    if hasattr(otel_providers.log_provider, 'force_flush'):
+    if hasattr(otel_providers.log, 'force_flush'):
         logger.info("Flushing OpenTelemetry log provider")
-        otel_providers.log_provider.force_flush(timeout_millis=5000)
-    if hasattr(otel_providers.log_provider, 'shutdown'):
-        otel_providers.log_provider.shutdown()
+        otel_providers.log.force_flush(timeout_millis=5000)
+    if hasattr(otel_providers.log, 'shutdown'):
+        otel_providers.log.shutdown()
     logger.info("OpenTelemetry log provider flushed and shut down")
     
     logger.info("Graceful shutdown completed")
@@ -740,31 +748,6 @@ def fetch_product_info(product_id):
 def must_map_env(key: str):
     value = os.environ.get(key)
     if value is None:
-        raise Exception(f'{key} environment variable must be set')
-    return value
-
-def check_feature_flag(flag_name: str):
-    # Initialize OpenFeature
-    client = api.get_client()
-    return client.get_boolean_value(flag_name, False)
-
-def handle_shutdown_signal(signum: int, frame: Optional[FrameType]) -> None:
-    global shutdown_initiated
-    if shutdown_initiated:
-        logger.info("Shutdown already in progress, ignoring duplicate signal")
-        return
-    shutdown_initiated = True
-    signal_name = signal.Signals(signum).name
-    logger.info(f"Received shutdown signal ({signal_name}), starting graceful shutdown sequence")
-    # Trigger the graceful shutdown coroutine
-    asyncio.create_task(graceful_shutdown(server, db_connection_pool, pc_channel))
-
-async def graceful_shutdown(
-    server: grpc.aio.Server,
-    db_connection_pool: Any,
-    product_catalog_channel: grpc.aio.Channel,
-    timeout: int = 30
-) -> None:
     exit_code = 0
     try:
         # Stop accepting new connections and wait for in-flight requests to complete
