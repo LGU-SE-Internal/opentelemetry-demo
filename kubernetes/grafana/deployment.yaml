@@ -20,39 +20,39 @@ spec:
         runAsGroup: 472
         fsGroup: 472
       containers:
-      - name: grafana
-        image: grafana/grafana:10.4.0
-        ports:
-        - containerPort: 3000
-          name: http
-        livenessProbe:
-          httpGet:
-            path: /api/health
-            port: 3000
-          initialDelaySeconds: 30
-          periodSeconds: 10
-          failureThreshold: 3
-        readinessProbe:
-          httpGet:
-            path: /api/health
-            port: 3000
-          initialDelaySeconds: 10
-          periodSeconds: 5
-          failureThreshold: 3
-        resources:
-          requests:
-            cpu: "100m"
-            memory: "256Mi"
-          limits:
-            cpu: "500m"
-            memory: "512Mi"
-        securityContext:
-          allowPrivilegeEscalation: false
-          privileged: false
-        volumeMounts:
-        - name: grafana-storage
-          mountPath: /var/lib/grafana
+        - name: grafana
+          image: grafana/grafana:10.4.0
+          ports:
+            - containerPort: 3000
+              name: http
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+          volumeMounts:
+            - name: grafana-storage
+              mountPath: /var/lib/grafana
       volumes:
-      - name: grafana-storage
-        persistentVolumeClaim:
-          claimName: grafana-pvc
+        - name: grafana-storage
+          persistentVolumeClaim:
+            claimName: grafana-pvc
