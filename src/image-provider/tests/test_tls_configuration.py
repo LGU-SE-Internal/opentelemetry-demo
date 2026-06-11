@@ -12,7 +12,7 @@ TLS_CERT_PATH_VAR = "IMAGE_PROVIDER_TLS_CERT_PATH"
 TLS_KEY_PATH_VAR = "IMAGE_PROVIDER_TLS_KEY_PATH"
 TLS_CA_CERT_PATH_VAR = "IMAGE_PROVIDER_TLS_CA_CERT_PATH"
 LISTEN_PORT = 8080
-SERVICE_ENTRYPOINT = "python main.py"  # Assuming standard entrypoint
+SERVICE_ENTRYPOINT = "./wrapper.sh"  # nginx wrapper entrypoint
 
 def generate_test_certs(cert_path, key_path, ca_cert_path=None, is_ca=False):
     """Helper to generate self-signed test certificates using openssl"""

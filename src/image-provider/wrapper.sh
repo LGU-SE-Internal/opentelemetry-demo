@@ -1,9 +1,86 @@
 #!/bin/sh
+# Copyright The OpenTelemetry Authors
+# SPDX-License-Identifier: Apache-2.0
 
-# Custom error type for TLS configuration issues
+set -e
+
+TLS_CERT_PATH=${IMAGE_PROVIDER_TLS_CERT_PATH:-}
+TLS_KEY_PATH=${IMAGE_PROVIDER_TLS_KEY_PATH:-}
+TLS_CA_CERT_PATH=${IMAGE_PROVIDER_TLS_CA_CERT_PATH:-}
+
+# Function to throw TLS configuration error
 tls_config_error() {
     echo "TLSConfigurationError: $1" >&2
     exit 1
+}
+
+# Validate TLS configuration
+if [ -n "$TLS_CERT_PATH" ] || [ -n "$TLS_KEY_PATH" ]; then
+    # Check both cert and key are provided
+    if [ -z "$TLS_CERT_PATH" ] || [ -z "$TLS_KEY_PATH" ]; then
+        tls_config_error "Missing required TLS parameter: both IMAGE_PROVIDER_TLS_CERT_PATH and IMAGE_PROVIDER_TLS_KEY_PATH must be provided when enabling TLS"
+    fi
+
+    # Check cert file exists and is readable
+    if [ ! -f "$TLS_CERT_PATH" ] || [ ! -r "$TLS_CERT_PATH" ]; then
+        tls_config_error "Certificate file not found or unreadable: $TLS_CERT_PATH"
+    fi
+
+    # Check key file exists and is readable
+    if [ ! -f "$TLS_KEY_PATH" ] || [ ! -r "$TLS_KEY_PATH" ]; then
+        tls_config_error "Private key file not found or unreadable: $TLS_KEY_PATH"
+    fi
+
+    # Validate cert and key match
+    CERT_MODULUS=$(openssl x509 -noout -modulus -in "$TLS_CERT_PATH" 2>/dev/null || tls_config_error "Invalid TLS certificate format")
+    KEY_MODULUS=$(openssl rsa -noout -modulus -in "$TLS_KEY_PATH" 2>/dev/null || tls_config_error "Invalid TLS private key format")
+    
+    if [ "$CERT_MODULUS" != "$KEY_MODULUS" ]; then
+        tls_config_error "TLS certificate and private key are mismatched"
+    fi
+
+    # Check if certificate is expired
+    if ! openssl x509 -checkend 0 -noout -in "$TLS_CERT_PATH" >/dev/null 2>&1; then
+        tls_config_error "TLS certificate is expired"
+    fi
+
+    # Validate CA cert if provided
+    if [ -n "$TLS_CA_CERT_PATH" ]; then
+        if [ ! -f "$TLS_CA_CERT_PATH" ] || [ ! -r "$TLS_CA_CERT_PATH" ]; then
+            tls_config_error "CA certificate file not found or unreadable: $TLS_CA_CERT_PATH"
+        fi
+
+        # Check CA cert is valid
+        if ! openssl x509 -in "$TLS_CA_CERT_PATH" -noout >/dev/null 2>&1; then
+            tls_config_error "Invalid or corrupted CA certificate file: $TLS_CA_CERT_PATH"
+        fi
+    fi
+fi
+
+# Generate nginx config from template
+export ENABLE_TLS="false"
+export SSL_CERTIFICATE=""
+export SSL_CERTIFICATE_KEY=""
+export SSL_CLIENT_CERTIFICATE=""
+export SSL_VERIFY_CLIENT="off"
+export SSL_PROTOCOLS=""
+
+if [ -n "$TLS_CERT_PATH" ]; then
+    export ENABLE_TLS="true"
+    export SSL_CERTIFICATE="$TLS_CERT_PATH"
+    export SSL_CERTIFICATE_KEY="$TLS_KEY_PATH"
+    export SSL_PROTOCOLS="TLSv1.2 TLSv1.3;"
+
+    if [ -n "$TLS_CA_CERT_PATH" ]; then
+        export SSL_CLIENT_CERTIFICATE="$TLS_CA_CERT_PATH"
+        export SSL_VERIFY_CLIENT="on;"
+    fi
+fi
+
+envsubst '$ENABLE_TLS $SSL_CERTIFICATE $SSL_CERTIFICATE_KEY $SSL_CLIENT_CERTIFICATE $SSL_VERIFY_CLIENT $SSL_PROTOCOLS' < /nginx.conf.template > /tmp/nginx.conf
+
+# Start nginx
+exec nginx -c /tmp/nginx.conf -g 'daemon off;'
 }
 
 # Map spec environment variables to nginx template variables

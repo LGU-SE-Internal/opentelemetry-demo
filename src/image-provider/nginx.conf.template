@@ -71,6 +71,8 @@ error_page 429 @rate_limit_exceeded;
 
     include mime.types;
     sendfile on;
+
+    $ENABLE_TLS == "false" ? '
     server {
         listen 8080;
         listen [::]:8080;
@@ -157,11 +159,10 @@ error_page 429 @rate_limit_exceeded;
             return 429 "Too Many Requests - Please try again later";
         }
     }
-
-    ${TLS_ENABLED:+${TLS_ENABLED,,} == "true" ? '
+    ' : '
     server {
-        listen 8443 ssl;
-        listen [::]:8443 ssl;
+        listen 8080 ssl;
+        listen [::]:8080 ssl;
 
         resolver 127.0.0.11;
         autoindex off;
@@ -172,16 +173,16 @@ error_page 429 @rate_limit_exceeded;
         root /static;
         gzip_static on;
 
-        ssl_certificate ${TLS_CERT_PATH};
-        ssl_certificate_key ${TLS_KEY_PATH};
-        ssl_protocols ${TLS_MIN_VERSION:-TLSv1.2} ${TLS_MIN_VERSION:-TLSv1.2} == "TLSv1.2" ? "TLSv1.3" : "";
-        ssl_ciphers ${TLS_CIPHER_SUITES:-ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384};
+        ssl_certificate $SSL_CERTIFICATE;
+        ssl_certificate_key $SSL_CERTIFICATE_KEY;
+        ssl_protocols $SSL_PROTOCOLS;
+        ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
         ssl_prefer_server_ciphers on;
 
-        ${MTLS_ENABLED:+${MTLS_ENABLED,,} == "true" ? '\
-        ssl_client_certificate ${MTLS_CA_CERT_PATH};\
-        ssl_verify_client on;\
-        ' : ''}
+        $SSL_CLIENT_CERTIFICATE != "" ? '\
+        ssl_client_certificate $SSL_CLIENT_CERTIFICATE;\
+        ssl_verify_client $SSL_VERIFY_CLIENT;\
+        ' : '';
 
         error_page 495 496 497 =400 /400_bad_request;
         location /400_bad_request {
@@ -255,6 +256,6 @@ error_page 429 @rate_limit_exceeded;
             default_type text/plain;
             return 429 "Too Many Requests - Please try again later";
         }
-    }\
-    ' : ''}
+    }
+    '
 }
