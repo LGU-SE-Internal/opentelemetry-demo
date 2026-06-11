@@ -23,6 +23,64 @@ if System.get_env("PHX_SERVER") do
   config :flagd_ui, FlagdUiWeb.Endpoint, server: true
 end
 
+# TLS Configuration - applies to all environments
+tls_enabled = System.get_env("FLAGD_UI_TLS_ENABLED") == "true"
+tls_cert_path = System.get_env("FLAGD_UI_TLS_CERT_PATH") || ""
+tls_key_path = System.get_env("FLAGD_UI_TLS_KEY_PATH") || ""
+mtls_enabled = System.get_env("FLAGD_UI_MTLS_ENABLED") == "true"
+mtls_ca_path = System.get_env("FLAGD_UI_MTLS_CA_PATH") || ""
+
+# Validate mTLS is not enabled without TLS
+if mtls_enabled and not tls_enabled do
+  raise "mTLS cannot be enabled without TLS being enabled (set FLAGD_UI_TLS_ENABLED=true)"
+end
+
+https_opts = nil
+
+if tls_enabled do
+  if tls_cert_path == "" or tls_key_path == "" do
+    raise "TLS enabled but FLAGD_UI_TLS_CERT_PATH and FLAGD_UI_TLS_KEY_PATH must be provided"
+  end
+
+  # Validate certificate file exists
+  unless File.exists?(tls_cert_path) do
+    raise "TLS certificate not found at path #{tls_cert_path}"
+  end
+
+  # Validate private key file exists
+  unless File.exists?(tls_key_path) do
+    raise "TLS private key not found at path #{tls_key_path}"
+  end
+
+  # Base HTTPS config
+  https_opts = [
+    ip: {0, 0, 0, 0, 0, 0, 0, 0},
+    cipher_suite: :strong,
+    keyfile: tls_key_path,
+    certfile: tls_cert_path,
+    tls_versions: [:"tlsv1.2", :"tlsv1.3"]
+  ]
+
+  # Add mTLS config if enabled
+  https_opts = if mtls_enabled do
+    if mtls_ca_path == "" do
+      raise "mTLS enabled but FLAGD_UI_MTLS_CA_PATH must be provided"
+    end
+
+    unless File.exists?(mtls_ca_path) do
+      raise "mTLS CA bundle not found at path #{mtls_ca_path}"
+    end
+
+    https_opts ++ [
+      cacertfile: mtls_ca_path,
+      verify: :verify_peer,
+      fail_if_no_peer_cert: true
+    ]
+  else
+    https_opts
+  end
+end
+
 if config_env() == :prod do
   # The secret key base is used to sign/encrypt cookies and other secrets.
   # A default value is used in config/dev.exs and config/test.exs but you
@@ -45,67 +103,16 @@ if config_env() == :prod do
   host = System.get_env("PHX_HOST") || "example.com"
   port = String.to_integer(System.get_env("FLAGD_UI_PORT") || "4000")
 
-  # TLS Configuration
-  tls_enabled = System.get_env("FLAGD_UI_TLS_ENABLED") == "true"
-  tls_cert_path = System.get_env("FLAGD_UI_TLS_CERT_PATH") || ""
-  tls_key_path = System.get_env("FLAGD_UI_TLS_KEY_PATH") || ""
-  mtls_enabled = System.get_env("FLAGD_UI_TLS_MTLS_ENABLED") == "true"
-  tls_ca_cert_path = System.get_env("FLAGD_UI_TLS_CA_CERT_PATH") || ""
-
-  if tls_enabled do
-    if tls_cert_path == "" or tls_key_path == "" do
-      raise "TLS enabled but required configuration parameters (FLAGD_UI_TLS_CERT_PATH, FLAGD_UI_TLS_KEY_PATH) are missing"
-    end
-
-    # Validate certificate and key files exist and are readable
-    unless File.exists?(tls_cert_path) and File.readable?(tls_cert_path) do
-      raise "Invalid TLS certificate file: #{tls_cert_path} does not exist or is not readable"
-    end
-
-    unless File.exists?(tls_key_path) and File.readable?(tls_key_path) do
-      raise "Invalid TLS private key file: #{tls_key_path} does not exist or is not readable"
-    end
-
-    # Base HTTPS config
-    https_opts = [
-      ip: {0, 0, 0, 0, 0, 0, 0, 0},
-      port: port,
-      cipher_suite: :strong,
-      keyfile: tls_key_path,
-      certfile: tls_cert_path,
-      tls_versions: [:"tlsv1.2", :"tlsv1.3"]
-    ]
-
-    # Add mTLS config if enabled
-    https_opts = if mtls_enabled do
-      if tls_ca_cert_path == "" do
-        raise "mTLS enabled but required FLAGD_UI_TLS_CA_CERT_PATH parameter is missing"
-      end
-
-      unless File.exists?(tls_ca_cert_path) and File.readable?(tls_ca_cert_path) do
-        raise "Invalid CA certificate file: #{tls_ca_cert_path} does not exist or is not readable"
-      end
-
-      https_opts ++ [
-        cacertfile: tls_ca_cert_path,
-        verify: :verify_peer,
-        fail_if_no_peer_cert: true
-      ]
-    else
-      https_opts
-    end
-  end
-
   config :flagd_ui, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 
   endpoint_config = [
-    url: [host: host, port: if tls_enabled, do: 443, else: port, scheme: if tls_enabled, do: "https", else: "http"],
+    url: [host: host, port: port, scheme: if tls_enabled, do: "https", else: "http"],
     check_origin: false,
     secret_key_base: secret_key_base
   ]
 
   endpoint_config = if tls_enabled do
-    Keyword.put(endpoint_config, :https, https_opts)
+    Keyword.put(endpoint_config, :https, Keyword.put(https_opts, :port, port))
   else
     Keyword.put(endpoint_config, :http, [
       ip: {0, 0, 0, 0, 0, 0, 0, 0},
