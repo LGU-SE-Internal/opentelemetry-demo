@@ -1,4 +1,5 @@
 import * as crypto from 'crypto';
+import { logs } from '@opentelemetry/api-logs';
 import {
   CertificatePinningConfig,
   PinValidationMetrics,
@@ -8,6 +9,8 @@ import {
   PinMismatchError,
   PinnedPublicKey,
 } from './types';
+
+const logger = logs.getLogger('frontend', '1.0.0');
 
 let currentConfig: CertificatePinningConfig | null = null;
 const metricsStore: PinValidationMetrics[] = [];
@@ -146,7 +149,7 @@ export async function validateCertificatePin(
     if (foundExpiredPin) {
       errorType = 'PIN_EXPIRED';
       // Allow request if within grace period
-      console.warn(`Certificate pin for ${domain} expired, but within grace period`);
+      logger.warn(`Certificate pin for ${domain} expired, but within grace period`, { domain });
       return true;
     }
 
@@ -154,10 +157,10 @@ export async function validateCertificatePin(
     if (currentConfig.enforcePinning) {
       throw new PinMismatchError(domain);
     }
-    console.warn(`Certificate pin mismatch for ${domain}, enforcePinning is disabled`);
+    logger.warn(`Certificate pin mismatch for ${domain}, enforcePinning is disabled`, { domain, enforcePinning: currentConfig.enforcePinning });
     return true;
   } catch (error) {
-    console.error(`Certificate pin validation failed for ${domain}:`, error);
+    logger.error(`Certificate pin validation failed for ${domain}:`, { domain, error });
     if (currentConfig.enforcePinning) {
       throw error;
     }
@@ -198,9 +201,9 @@ export async function updatePinConfig(newConfig: CertificatePinningConfig): Prom
     currentConfig = { ...newConfig };
     // Notify listeners
     remoteConfigUpdateListeners.forEach(listener => listener(currentConfig));
-    console.log('Certificate pinning config updated successfully');
+    logger.info('Certificate pinning config updated successfully');
   } catch (error) {
-    console.error('Failed to update certificate pinning config:', error);
+    logger.error('Failed to update certificate pinning config:', { error });
     // Keep existing config if new one is invalid
     if (error instanceof InvalidPinConfigError) {
       throw error;

@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { v4 } from 'uuid';
+import { logs } from '@opentelemetry/api-logs';
+
+const logger = logs.getLogger('frontend', '1.0.0');
 
 interface ISession {
   userId: string;
@@ -26,7 +29,7 @@ const SessionGateway = () => ({
           return parsed;
         }
       } catch (e) {
-        console.warn('Failed to parse session from localStorage', e);
+        logger.warn('Failed to parse session from localStorage', { error: e });
       }
     }
     localStorage.setItem(sessionKey, JSON.stringify(defaultSession));

@@ -3,6 +3,9 @@ import type { NextRequest } from "next/server";
 import { rateLimit } from 'next-rate-limit';
 import { AddToCartSchema, GetCartSchema, CheckoutSchema, ProductSearchSchema, GetProductSchema } from "./middleware/validationSchemas";
 import { z, ZodError } from "zod";
+import { logs } from '@opentelemetry/api-logs';
+
+const logger = logs.getLogger('frontend', '1.0.0');
 
 // Rate limit configuration
 const MAX_REQUESTS = parseInt(process.env.FRONTEND_RATE_LIMIT_MAX_REQUESTS || '100', 10);
@@ -76,15 +79,14 @@ export async function middleware(request: NextRequest) {
     const retryAfter = Math.ceil((reset - Date.now()) / 1000);
     
     // Log structured rate limit violation event
-    console.log(JSON.stringify({
+    logger.info('Rate limit violation', {
       event: 'rate_limit_violation',
-      timestamp: new Date().toISOString(),
       client_ip: clientIp,
       endpoint: pathname,
       rate_limit_threshold: MAX_REQUESTS,
       window_length_seconds: WINDOW_SECONDS,
       retry_after_seconds: retryAfter
-    }));
+    });
 
     // Return 429 response
     return NextResponse.json(
