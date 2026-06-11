@@ -191,19 +191,6 @@ func (e NonRetriableKafkaError) Unwrap() error {
 	return e.Err
 }
 
-// NonRetriableKafkaError wraps errors that should not be retried
-type NonRetriableKafkaError struct {
-	Err error
-}
-
-func (e NonRetriableKafkaError) Error() string {
-	return fmt.Sprintf("non-retriable kafka error: %v", e.Err)
-}
-
-func (e NonRetriableKafkaError) Unwrap() error {
-	return e.Err
-}
-
 // Health status tracking
 var (
 	kafkaConnected atomic.Bool
@@ -216,7 +203,6 @@ type HealthResponse struct {
 	Check         string `json:"check"`
 	KafkaConnected *bool  `json:"kafka_connected,omitempty"`
 	Error         string `json:"error,omitempty"`
-}
 }
 
 
@@ -1098,15 +1084,15 @@ func main() {
 				zap.Int("health_port_value", parsedPort),
 			)
 			os.Exit(1)
+			}
+			healthPort = parsedPort
 		}
-	healthPort = parsedPort
-}
 
-// Start health server
-	if err := startHealthServer(healthPort); err != nil {
-		globalLogger.Error(ctx, "Failed to start health server", zap.Error(err))
-		os.Exit(1)
-	}
+		// Start health server
+		if err := startHealthServer(healthPort); err != nil {
+			globalLogger.Error(ctx, "Failed to start health server", zap.Error(err))
+			os.Exit(1)
+		}
 
 	// Get and process Kafka topics from environment variable
 	topicsStr := os.Getenv("KAFKA_COLLECTOR_KAFKA_TOPICS")
