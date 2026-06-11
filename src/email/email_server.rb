@@ -18,6 +18,16 @@ require "concurrent"
 require "opentelemetry-api"
 require "logger"
 
+# Rate Limit Configuration
+class RateLimitConfig
+  attr_reader :max_requests, :window_ms
+
+  def initialize
+    @max_requests = ENV.fetch("EMAIL_SERVICE_RATE_LIMIT_MAX_REQUESTS", 100).to_i
+    @window_ms = ENV.fetch("EMAIL_SERVICE_RATE_LIMIT_WINDOW_MS", 60000).to_i
+  end
+end
+
 # DLQ Error Types
 class DLQConfigurationError < StandardError; end
 class DLQWriteError < StandardError; end
@@ -27,6 +37,19 @@ METER = OpenTelemetry.meter_provider.meter("email.service.dlq")
 INGEST_COUNTER = METER.create_counter("email_dlq.ingest_count", description: "Number of failed emails ingested into DLQ", unit: "1")
 QUEUE_LENGTH_GAUGE = METER.create_up_down_counter("email_dlq.queue_length", description: "Current number of entries in DLQ", unit: "1")
 RETRY_COUNTER = METER.create_counter("email_dlq.retry_count", description: "Number of DLQ entries successfully retried and delivered", unit: "1")
+
+# Rate Limit Metrics
+RATE_LIMIT_METER = OpenTelemetry.meter_provider.meter("email.service.ratelimit")
+RATE_LIMIT_VIOLATIONS_COUNTER = RATE_LIMIT_METER.create_counter(
+  "email_service_rate_limit_violations",
+  description: "Total number of requests rejected due to rate limiting",
+  unit: "{requests}"
+)
+RATE_LIMIT_ACTIVE_COUNT_GAUGE = RATE_LIMIT_METER.create_up_down_counter(
+  "email_service_rate_limit_active_request_count",
+  description: "Current number of requests from a client IP in the active window",
+  unit: "{requests}"
+)
 
 # DLQ Backend Interface
 module DLQBackend
@@ -914,6 +937,86 @@ def send_email(data)
   # https://opentelemetry.io/docs/instrumentation/ruby/manual/#creating-new-spans 
 end
 
+# Fixed Window Rate Limiter Implementation
+class FixedWindowRateLimiter
+  def initialize(config)
+    @config = config
+    @request_counts = Concurrent::Hash.new { |h, k| h[k] = Concurrent::Hash.new(0) }
+    @window_start_times = Concurrent::Hash.new { |h, k| h[k] = Concurrent::Hash.new(0) }
+  end
+
+  def allow_request?(client_ip, grpc_method)
+    current_time = Time.now.to_i * 1000
+    window_start = @window_start_times[client_ip][grpc_method]
+
+    # Reset window if current time is beyond window end
+    if current_time - window_start >= @config.window_ms
+      old_count = @request_counts[client_ip][grpc_method]
+      @request_counts[client_ip][grpc_method] = 0
+      @window_start_times[client_ip][grpc_method] = current_time
+      # Update gauge: subtract old count, add 0
+      RATE_LIMIT_ACTIVE_COUNT_GAUGE.add(-old_count, attributes: { client_ip: client_ip, grpc_method: grpc_method }) if old_count > 0
+    end
+
+    current_count = @request_counts[client_ip][grpc_method]
+    if current_count < @config.max_requests
+      @request_counts[client_ip][grpc_method] += 1
+      # Increment gauge
+      RATE_LIMIT_ACTIVE_COUNT_GAUGE.add(1, attributes: { client_ip: client_ip, grpc_method: grpc_method })
+      return true
+    end
+
+    # Rate limit exceeded
+    RATE_LIMIT_VIOLATIONS_COUNTER.add(1, attributes: { client_ip: client_ip, grpc_method: grpc_method })
+    # Emit OTel log
+    logger = OpenTelemetry.logger
+    logger.info(
+      "Rate limit exceeded",
+      event_name: "rate_limit_violation",
+      client_ip: client_ip,
+      grpc_method: grpc_method,
+      rate_limit_max: @config.max_requests,
+      rate_limit_window_ms: @config.window_ms,
+      violation_timestamp: current_time
+    )
+    false
+  end
+end
+
+# gRPC Rate Limit Interceptor
+class RateLimitInterceptor < GRPC::ServerInterceptor
+  def initialize(rate_limiter)
+    @rate_limiter = rate_limiter
+  end
+
+  def request_response(request, call, method, &block)
+    client_ip = extract_client_ip(call)
+    grpc_method = method.to_s
+
+    unless @rate_limiter.allow_request?(client_ip, grpc_method)
+      raise GRPC::ResourceExhausted.new("Rate limit exceeded. Try again later.")
+    end
+
+    yield
+  end
+
+  alias_method :client_streamer, :request_response
+  alias_method :server_streamer, :request_response
+  alias_method :bidi_streamer, :request_response
+
+  private
+
+  def extract_client_ip(call)
+    # Check X-Forwarded-For header first for proxied requests
+    xff = call.metadata['x-forwarded-for']
+    if xff
+      return xff.split(',').first.strip
+    end
+    # Fall back to peer address
+    call.peer.split(':').first
+  end
+end
+
 # Signal handlers for graceful shutdown
 def handle_shutdown_signal(signal)
   return if $shutting_down
@@ -971,6 +1074,18 @@ end
 
 Signal.trap('SIGINT') { handle_shutdown_signal('SIGINT') }
 Signal.trap('SIGTERM') { handle_shutdown_signal('SIGTERM') }
+
+# Initialize rate limiting
+rate_limit_config = RateLimitConfig.new
+rate_limiter = FixedWindowRateLimiter.new(rate_limit_config)
+rate_limit_interceptor = RateLimitInterceptor.new(rate_limiter)
+
+# Initialize gRPC server with interceptors
+server = GRPC::RpcServer.new(
+  interceptors: [rate_limit_interceptor]
+)
+server.add_http2_port('0.0.0.0:8080', :this_port_is_insecure)
+server.handle(EmailService::Server.new)
 
 # Add gRPC Health Check implementation
 require "grpc/health/checker"
