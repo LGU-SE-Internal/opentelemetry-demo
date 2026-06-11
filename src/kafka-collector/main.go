@@ -430,6 +430,26 @@ func NewKafkaConsumerWithRetry(cfg KafkaConsumerConfig) (*KafkaConsumer, error) 
 	}, nil
 }
 
+// GetRetryMaxAttempts returns the configured maximum retry attempts
+func (c *KafkaConsumer) GetRetryMaxAttempts() int {
+	return c.retryMaxAttempts
+}
+
+// GetRetryInitialBackoff returns the configured initial backoff duration
+func (c *KafkaConsumer) GetRetryInitialBackoff() time.Duration {
+	return c.retryInitialBackoff
+}
+
+// GetRetryMaxBackoff returns the configured maximum backoff duration
+func (c *KafkaConsumer) GetRetryMaxBackoff() time.Duration {
+	return c.retryMaxBackoff
+}
+
+// GetDLQTopic returns the configured dead-letter queue topic name
+func (c *KafkaConsumer) GetDLQTopic() string {
+	return c.dlqTopic
+}
+
 // isRetriableError checks if a Kafka error is eligible for retry
 func isRetriableError(err error) bool {
 	var saramaErr sarama.KError
