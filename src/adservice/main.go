@@ -98,9 +98,7 @@ func NewRetryableDB(db DBPool, config RetryConfig, metrics RetryMetrics) *Retrya
 		config:  config,
 		metrics: metrics,
 	}
-}
-
-// isTransientError checks if an error is a transient PostgreSQL error eligible for retry
+// isTransientError checks if the given error is a transient PostgreSQL error eligible for retry
 func isTransientError(err error) bool {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
@@ -109,152 +107,142 @@ func isTransientError(err error) bool {
 	return false
 }
 
-// retryOperation runs the given operation with exponential backoff retry logic
+// retryOperation executes the given operation with retry logic according to the RetryConfig
 func (rdb *RetryableDB) retryOperation(ctx context.Context, opType string, operation func() error) error {
 	if rdb.config.MaxRetries == 0 {
 		return operation()
 	}
 
-	// Configure exponential backoff
-	bo := backoff.NewExponentialBackOff()
-	bo.InitialInterval = rdb.config.InitialBackoff
-	bo.MaxInterval = rdb.config.MaxBackoff
-	bo.MaxElapsedTime = 0 // We control max retries manually
-	bo.Reset()
+	// Create exponential backoff
+	eb := backoff.NewExponentialBackOff()
+	eb.InitialInterval = rdb.config.InitialBackoff
+	eb.MaxInterval = rdb.config.MaxBackoff
+	eb.MaxElapsedTime = 0 // We handle max retries ourselves
+	eb.Reset()
 
 	var lastErr error
 	for attempt := 0; attempt <= rdb.config.MaxRetries; attempt++ {
+		// Check if context is canceled before running operation
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
 		err := operation()
 		if err == nil {
 			return nil
 		}
 
-		// Check if context is canceled before proceeding
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-
 		lastErr = err
 
-		// Don't retry if not transient error or max retries reached
-		if !isTransientError(err) || attempt == rdb.config.MaxRetries {
+		// Don't retry if context is already canceled
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+
+		// Don't retry if error is not transient
+		if !isTransientError(err) {
+			return err
+		}
+
+		// If this was the last attempt, no more retries
+		if attempt == rdb.config.MaxRetries {
 			break
 		}
 
 		// Increment retry attempts metric
-		var pgErr *pgconn.PgError
-		errorCode := "unknown"
-		if errors.As(err, &pgErr) {
-			errorCode = pgErr.Code
+		if rdb.metrics.RetryAttempts != nil {
+			rdb.metrics.RetryAttempts.Add(ctx, 1,
+				metric.WithAttributes(
+					attribute.String("error_code", func() string {
+						var pgErr *pgconn.PgError
+						if errors.As(err, &pgErr) {
+							return pgErr.Code
+						}
+						return "unknown"
+					}()),
+					attribute.String("operation_type", opType),
+				),
+			)
 		}
-		rdb.metrics.RetryAttempts.Add(ctx, 1,
+
+		// Wait for backoff or context cancellation
+		nextBackoff := eb.NextBackOff()
+		if nextBackoff == backoff.Stop {
+			break
+		}
+
+		timer := time.NewTimer(nextBackoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+
+	// All retries failed, increment failure metric
+	if rdb.metrics.RetryFailures != nil {
+		rdb.metrics.RetryFailures.Add(ctx, 1,
 			metric.WithAttributes(
-				attribute.String("error_code", errorCode),
+				attribute.String("error_code", func() string {
+					var pgErr *pgconn.PgError
+					if errors.As(lastErr, &pgErr) {
+						return pgErr.Code
+					}
+					return "unknown"
+				}()),
 				attribute.String("operation_type", opType),
 			),
 		)
-
-		// Wait for next backoff interval, or context cancellation
-		nextBackoff := bo.NextBackOff()
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(nextBackoff):
-		}
 	}
-
-	// Increment retry failures metric after all retries failed
-	var pgErr *pgconn.PgError
-	errorCode := "unknown"
-	if errors.As(lastErr, &pgErr) {
-		errorCode = pgErr.Code
-	}
-	rdb.metrics.RetryFailures.Add(ctx, 1,
-		metric.WithAttributes(
-			attribute.String("error_code", errorCode),
-			attribute.String("operation_type", opType),
-		),
-	)
 
 	return lastErr
 }
 
-// Ping wraps the underlying Ping method with retry logic
+// Ping executes a ping operation with retry logic
 func (rdb *RetryableDB) Ping(ctx context.Context) error {
 	return rdb.retryOperation(ctx, "ping", func() error {
 		return rdb.db.Ping(ctx)
 	})
 }
 
-// Exec wraps the underlying Exec method with retry logic
+// Exec executes an exec operation with retry logic
 func (rdb *RetryableDB) Exec(ctx context.Context, query string, args ...interface{}) (pgconn.CommandTag, error) {
-	var res pgconn.CommandTag
+	var result pgconn.CommandTag
 	err := rdb.retryOperation(ctx, "exec", func() error {
 		var innerErr error
-		res, innerErr = rdb.db.Exec(ctx, query, args...)
+		result, innerErr = rdb.db.Exec(ctx, query, args...)
 		return innerErr
 	})
-	return res, err
+	return result, err
 }
 
-// Query wraps the underlying Query method with retry logic
+// Query executes a query operation with retry logic
 func (rdb *RetryableDB) Query(ctx context.Context, query string, args ...interface{}) (pgx.Rows, error) {
-	var rows pgx.Rows
+	var result pgx.Rows
 	err := rdb.retryOperation(ctx, "query", func() error {
 		var innerErr error
-		rows, innerErr = rdb.db.Query(ctx, query, args...)
+		result, innerErr = rdb.db.Query(ctx, query, args...)
 		return innerErr
 	})
-	return rows, err
+	return result, err
 }
 
-// QueryRow wraps the underlying QueryRow method with retry logic
+// QueryRow executes a query row operation with retry logic
 func (rdb *RetryableDB) QueryRow(ctx context.Context, query string, args ...interface{}) pgx.Row {
-	var row pgx.Row
+	var result pgx.Row
+	// QueryRow never returns error directly, error is stored in the row object
 	_ = rdb.retryOperation(ctx, "query_row", func() error {
-		row = rdb.db.QueryRow(ctx, query, args...)
-		return row.Err()
+		result = rdb.db.QueryRow(ctx, query, args...)
+		// Get error from row
+		return result.Scan()
 	})
-	return row
-}
-var (
-	limiters = make(map[string]*clientLimiter)
-	mu       sync.Mutex
-	cleanupInterval = 1 * time.Minute
-	limiterTimeout  = 3 * time.Minute
-)
-
-// getClientIP extracts client IP from X-Forwarded-For header or peer address
-func getClientIP(ctx context.Context, peerAddr string) string {
-	if md, ok := metadata.FromIncomingContext(ctx); ok {
-		if xff := md.Get("X-Forwarded-For"); len(xff) > 0 && xff[0] != "" {
-			ips := strings.Split(xff[0], ",")
-			if len(ips) > 0 {
-				return strings.TrimSpace(ips[0])
-			}
-		}
-	}
-	// Fall back to peer address, remove port
-	if host, _, err := net.SplitHostPort(peerAddr); err == nil {
-		return host
-	}
-	return peerAddr
+	// Return the row even if there was an error, to maintain original behavior
+	return result
 }
 
-// getLimiter returns the rate limiter for the given client IP, creating one if needed
-func getLimiter(clientIP string, rps rate.Limit, burst int) *rate.Limiter {
-	mu.Lock()
-	defer mu.Unlock()
-
-	if limiter, exists := limiters[clientIP]; exists {
-		limiter.lastSeen = time.Now()
-		return limiter.limiter
-	}
-
-	limiter := rate.NewLimiter(rps, burst)
-	limiters[clientIP] = &clientLimiter{
-		limiter:  limiter,
-		lastSeen: time.Now(),
 	}
 	return limiter
 }
