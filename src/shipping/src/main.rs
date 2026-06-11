@@ -324,42 +324,39 @@ fn load_endpoint_rate_limits() -> HashMap<String, (NonZeroU32, NonZeroU32)> {
 // Build rate limiting interceptor for gRPC
 fn build_rate_limit_interceptor(
     rate_limit_counter: Counter<u64>,
-) -> impl Fn(Request<()>) -> Result<Request<()>, Status> + Clone {
-    let limits = load_endpoint_rate_limits();
-    let mut governors: HashMap<String, (NonZeroU32, NonZeroU32, Arc<Governor<GrpcEndpointKeyExtractor>>)> = HashMap::new();
+) -> RateLimitInterceptor {
+    // Read rate limit configuration from environment variable
+    let rpm = match env::var("SHIPPING_SERVICE_RATE_LIMIT_RPM") {
+        Ok(val) => match val.parse::<i32>() {
+            Ok(v) => v,
+            Err(_) => {
+                warn!("Invalid SHIPPING_SERVICE_RATE_LIMIT_RPM value, using default 100");
+                100
+            }
+        },
+        Err(_) => 100,
+    };
 
-    for (endpoint, (rps, burst)) in limits {
-        let config = GovernorConfigBuilder::default()
-            .per_second(rps.get() as u64)
-            .burst_size(burst.get())
-            .key_extractor(GrpcEndpointKeyExtractor)
-            .finish()
-            .unwrap();
-        governors.insert(endpoint, (rps, burst, Arc::new(Governor::new(&config))));
+    // If rate limit is <= 0, disable rate limiting entirely
+    if rpm <= 0 {
+        return RateLimitInterceptor {
+            governor: None,
+            rate_limited_counter: rate_limit_counter,
+        };
     }
 
-    move |mut req: Request<()>| {
-        let path = req.path().to_string();
-        if let Some((rps, burst, governor)) = governors.get(&path) {
-            match governor.check(&req) {
-                Ok(_) => Ok(req),
-                Err(GovernorError::TooManyRequests { .. }) => {
-                    let msg = format!(
-                        "Rate limit exceeded for endpoint {}: limit is {} requests per second, burst {} capacity",
-                        path, rps, burst
-                    );
-                    // Increment metric
-                    rate_limit_counter.add(1, &[
-                        opentelemetry::KeyValue::new("endpoint", path.clone()),
-                        opentelemetry::KeyValue::new("limit_rps", rps.to_string()),
-                    ]);
-                    Err(Status::new(Code::ResourceExhausted, msg))
-                }
-                Err(_) => Err(Status::internal("Rate limit check failed")),
-            }
-        } else {
-            Ok(req)
-        }
+    // Convert RPM to requests per second for governor configuration
+    let requests_per_minute = NonZeroU32::new(rpm as u32).unwrap();
+    let config = GovernorConfigBuilder::default()
+        .per_minute(requests_per_minute.get() as u64)
+        .burst_size(requests_per_minute.get())
+        .key_extractor(ClientIpExtractor)
+        .finish()
+        .unwrap();
+
+    RateLimitInterceptor {
+        governor: Some(Governor::new(&config)),
+        rate_limited_counter: rate_limit_counter,
     }
 }
 
