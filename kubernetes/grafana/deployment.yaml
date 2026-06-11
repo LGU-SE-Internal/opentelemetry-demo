@@ -19,56 +19,40 @@ spec:
         runAsUser: 472
         runAsGroup: 472
         fsGroup: 472
-        seccompProfile:
-          type: RuntimeDefault
       containers:
-      - name: grafana
-        image: grafana/grafana:10.4.0
-        ports:
-        - containerPort: 3000
-          name: http
-        livenessProbe:
-          httpGet:
-            path: /api/health
-            port: 3000
-          initialDelaySeconds: 30
-          periodSeconds: 10
-          failureThreshold: 3
-        readinessProbe:
-          httpGet:
-            path: /api/health
-            port: 3000
-          initialDelaySeconds: 10
-          periodSeconds: 5
-          failureThreshold: 3
-        resources:
-          requests:
-            cpu: "100m"
-            memory: "256Mi"
-          limits:
-            cpu: "500m"
-            memory: "512Mi"
-        securityContext:
-          allowPrivilegeEscalation: false
-          privileged: false
-          seccompProfile:
-            type: RuntimeDefault
-          readOnlyRootFilesystem: true
-          capabilities:
-            drop:
-            - ALL
-        volumeMounts:
-        - name: grafana-storage
-          mountPath: /var/lib/grafana
-        - name: tmp
-          mountPath: /tmp
-        - name: var-log-grafana
-          mountPath: /var/log/grafana
+        - name: grafana
+          image: grafana/grafana:10.4.0
+          ports:
+            - containerPort: 3000
+              name: http
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+          volumeMounts:
+            - name: grafana-storage
+              mountPath: /var/lib/grafana
       volumes:
-      - name: grafana-storage
-        persistentVolumeClaim:
-          claimName: grafana-pvc
-      - name: tmp
-        emptyDir: {}
-      - name: var-log-grafana
-        emptyDir: {}
+        - name: grafana-storage
+          persistentVolumeClaim:
+            claimName: grafana-pvc
