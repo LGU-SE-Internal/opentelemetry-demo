@@ -21,6 +21,7 @@
 #include "logger_common.h"
 #include "meter_common.h"
 #include "tracer_common.h"
+#include "currency_service_credentials.h"
 
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/server.h>
@@ -723,81 +724,13 @@ void RunServer(uint16_t port)
   HealthServer healthService;
   ServerBuilder builder;
 
-  // Read TLS configuration environment variables
-  const char* tls_enabled_env = std::getenv("CURRENCY_SERVICE_TLS_ENABLED");
-  bool tls_enabled = (tls_enabled_env != nullptr) && (std::string(tls_enabled_env) == "true");
-
-  const char* mtls_enabled_env = std::getenv("CURRENCY_SERVICE_MTLS_ENABLED");
-  bool mtls_enabled = (mtls_enabled_env != nullptr) && (std::string(mtls_enabled_env) == "true");
-
-  const char* tls_cert_path = std::getenv("CURRENCY_SERVICE_TLS_CERT_PATH");
-  const char* tls_key_path = std::getenv("CURRENCY_SERVICE_TLS_KEY_PATH");
-  const char* tls_ca_path = std::getenv("CURRENCY_SERVICE_TLS_CA_CERT_PATH");
-  
   std::shared_ptr<grpc::ServerCredentials> server_creds;
-  
-  if (tls_enabled) {
-    // Validate TLS configuration
-    if (tls_cert_path == nullptr || tls_key_path == nullptr) {
-      logger->Error("Missing required TLS configuration: both certificate and private key paths must be set when TLS is enabled");
-      exit(1);
-    }
-    
-    if (mtls_enabled && tls_ca_path == nullptr) {
-      logger->Error("Missing required mTLS configuration: CA certificate path must be set when mTLS is enabled");
-      exit(1);
-    }
-    
-    // Check all files exist
-    if (!file_exists(tls_cert_path)) {
-      logger->Error("TLS certificate file " + std::string(tls_cert_path) + " is missing or unreadable");
-      exit(1);
-    }
-    if (!file_exists(tls_key_path)) {
-      logger->Error("TLS private key file " + std::string(tls_key_path) + " is missing or unreadable");
-      exit(1);
-    }
-    if (mtls_enabled && !file_exists(tls_ca_path)) {
-      logger->Error("mTLS CA certificate file " + std::string(tls_ca_path) + " is missing or unreadable");
-      exit(1);
-    }
-    
-    // Read certificate files
-    std::string cert_data = read_file(tls_cert_path);
-    std::string key_data = read_file(tls_key_path);
-    
-    if (cert_data.empty() || key_data.empty()) {
-      logger->Error("Invalid TLS certificate or private key: empty file content");
-      exit(1);
-    }
-    
-    grpc::SslServerCredentialsOptions ssl_opts;
-    grpc::SslServerCredentialsOptions::PemKeyCertPair key_cert_pair;
-    key_cert_pair.private_key = key_data;
-    key_cert_pair.cert_chain = cert_data;
-    ssl_opts.pem_key_cert_pairs.push_back(key_cert_pair);
-    
-    if (mtls_enabled) {
-      // mTLS mode: require client certificate verification
-      std::string ca_data = read_file(tls_ca_path);
-      if (ca_data.empty()) {
-        logger->Error("Invalid CA certificate: empty file content");
-        exit(1);
-      }
-      ssl_opts.pem_root_certs = ca_data;
-      ssl_opts.client_certificate_request = GRPC_SSL_REQUEST_AND_REQUIRE_CLIENT_CERTIFICATE_AND_VERIFY;
-      logger->Info("mTLS enabled for gRPC server");
-    } else {
-      // Standard TLS: no client certificate verification
-      ssl_opts.client_certificate_request = GRPC_SSL_DONT_REQUEST_CLIENT_CERTIFICATE;
-      logger->Info("TLS enabled for gRPC server");
-    }
-    
-    server_creds = grpc::SslServerCredentials(ssl_opts);
-  } else {
-    // Fallback to insecure mode for backward compatibility
-    server_creds = grpc::InsecureServerCredentials();
-    logger->Info("Using insecure gRPC server credentials (no TLS configured)");
+
+  try {
+    server_creds = BuildCurrencyServiceCredentials();
+  } catch (const std::runtime_error& e) {
+    logger->Error("INVALID_CONFIGURATION: Failed to load gRPC server credentials: " + std::string(e.what()));
+    exit(1);
   }
 
   builder.RegisterService(&currencyService);
