@@ -62,7 +62,8 @@ namespace
   // Shutdown related globals
   std::atomic<bool> g_shutdown_initiated{false};
   std::atomic<int> g_received_signal{0};
-  std::chrono::seconds g_shutdown_timeout{10};
+  std::chrono::seconds g_shutdown_timeout{30};
+  std::atomic<bool> g_shutdown_timed_out{false};
   std::shared_ptr<Server> g_server;
   std::unique_ptr<httplib::Server> g_http_server;
   std::atomic<bool> g_is_healthy{true};
@@ -635,14 +636,18 @@ void PerformGracefulShutdown(std::shared_ptr<grpc::Server> server) {
 }
 
 // Registers signal handlers for SIGINT and SIGTERM to trigger graceful shutdown
-void RegisterShutdownSignalHandlers(std::shared_ptr<grpc::Server> server) {
-  g_server = server;
+void RegisterShutdownSignalHandlers() {
   std::signal(SIGINT, [](int signal) {
     PerformGracefulShutdown(g_server);
   });
   std::signal(SIGTERM, [](int signal) {
     PerformGracefulShutdown(g_server);
   });
+}
+
+bool WaitForShutdownComplete(std::chrono::seconds timeout) {
+  // Return true if shutdown completed without timeout, false if timed out
+  return !g_shutdown_timed_out.load();
 }
 
 // Old signal handler kept for reference, will be removed
