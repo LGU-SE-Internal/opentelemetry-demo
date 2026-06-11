@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-proxy
+  labels:
+    app.kubernetes.io/name: frontend-proxy
+    app.kubernetes.io/part-of: opentelemetry-demo
+    app.kubernetes.io/component: proxy
+spec:
+  type: {{ .Values.frontendProxy.service.type | default "ClusterIP" }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+    - name: admin
+      port: 9901
+      targetPort: admin
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: frontend-proxy
