@@ -19,13 +19,21 @@ exporters:
   otlp_grpc/jaeger:
     endpoint: "jaeger:4317"
     tls:
-      insecure: true
+      insecure: ${env:OTELCOL_TLS_JAEGER_INSECURE:-true}
+      ca_file: ${env:OTELCOL_TLS_CA_FILE:-}
+      cert_file: ${env:OTELCOL_TLS_CLIENT_CERT_FILE:-}
+      key_file: ${env:OTELCOL_TLS_CLIENT_KEY_FILE:-}
+      insecure_skip_verify: ${env:OTELCOL_TLS_JAEGER_INSECURE_SKIP_VERIFY:-false}
     queue_settings:
       queue_size: ${env:OTEL_COLLECTOR_EXPORTER_QUEUE_SIZE:-1000}
   otlp_http/prometheus:
     endpoint: "http://prometheus:9090/api/v1/otlp"
     tls:
-      insecure: true
+      insecure: ${env:OTELCOL_TLS_PROMETHEUS_INSECURE:-true}
+      ca_file: ${env:OTELCOL_TLS_CA_FILE:-}
+      cert_file: ${env:OTELCOL_TLS_CLIENT_CERT_FILE:-}
+      key_file: ${env:OTELCOL_TLS_CLIENT_KEY_FILE:-}
+      insecure_skip_verify: ${env:OTELCOL_TLS_PROMETHEUS_INSECURE_SKIP_VERIFY:-false}
     queue_settings:
       queue_size: ${env:OTEL_COLLECTOR_EXPORTER_QUEUE_SIZE:-1000}
   opensearch:
@@ -34,13 +42,21 @@ exporters:
     http:
       endpoint: "http://opensearch:9200"
       tls:
-        insecure: true
+        insecure: ${env:OTELCOL_TLS_OPENSEARCH_INSECURE:-true}
+        ca_file: ${env:OTELCOL_TLS_CA_FILE:-}
+        cert_file: ${env:OTELCOL_TLS_CLIENT_CERT_FILE:-}
+        key_file: ${env:OTELCOL_TLS_CLIENT_KEY_FILE:-}
+        insecure_skip_verify: ${env:OTELCOL_TLS_OPENSEARCH_INSECURE_SKIP_VERIFY:-false}
     queue_settings:
       queue_size: ${env:OTEL_COLLECTOR_EXPORTER_QUEUE_SIZE:-1000}
   otlp_grpc/firepit:
     endpoint: "firepit:4317"
     tls:
-      insecure: true
+      insecure: ${env:OTELCOL_TLS_FIREPIT_INSECURE:-true}
+      ca_file: ${env:OTELCOL_TLS_CA_FILE:-}
+      cert_file: ${env:OTELCOL_TLS_CLIENT_CERT_FILE:-}
+      key_file: ${env:OTELCOL_TLS_CLIENT_KEY_FILE:-}
+      insecure_skip_verify: ${env:OTELCOL_TLS_FIREPIT_INSECURE_SKIP_VERIFY:-false}
     queue_settings:
       queue_size: ${env:OTEL_COLLECTOR_EXPORTER_QUEUE_SIZE:-1000}
 
