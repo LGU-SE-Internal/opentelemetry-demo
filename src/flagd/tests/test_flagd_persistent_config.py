@@ -32,7 +32,7 @@ def test_ac4_non_root_user_has_permissions(k8s_client, flagd_namespace):
     v1, _ = k8s_client
     pods = v1.list_namespaced_pod(
         namespace=flagd_namespace,
-        label_selector="app=flagd"
+        label_selector="app.kubernetes.io/name=flagd"
     )
     assert len(pods.items) > 0, "No flagd pods found"
     pod_name = pods.items[0].metadata.name
@@ -71,7 +71,7 @@ def test_ac5_fallback_to_default_config_when_no_custom_file(k8s_client, flagd_na
     v1, _ = k8s_client
     pods = v1.list_namespaced_pod(
         namespace=flagd_namespace,
-        label_selector="app=flagd"
+        label_selector="app.kubernetes.io/name=flagd"
     )
     pod_name = pods.items[0].metadata.name
     
@@ -86,7 +86,7 @@ def test_ac6_fallback_to_default_when_custom_file_unreadable(k8s_client, flagd_n
     v1, _ = k8s_client
     pods = v1.list_namespaced_pod(
         namespace=flagd_namespace,
-        label_selector="app=flagd"
+        label_selector="app.kubernetes.io/name=flagd"
     )
     pod_name = pods.items[0].metadata.name
     
@@ -143,7 +143,7 @@ def test_ac2_custom_flags_survive_pod_restart(k8s_client, flagd_namespace):
     v1, _ = k8s_client
     pods = v1.list_namespaced_pod(
         namespace=flagd_namespace,
-        label_selector="app=flagd"
+        label_selector="app.kubernetes.io/name=flagd"
     )
     pod_name = pods.items[0].metadata.name
     
