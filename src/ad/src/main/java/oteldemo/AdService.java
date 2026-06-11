@@ -404,11 +404,9 @@ public final class AdService {
         .addShutdownHook(
             new Thread(
                 () -> {
-                  // Use stderr here since the logger may have been reset by its JVM shutdown hook.
-                  System.err.println(
-                      "*** shutting down gRPC ads server since JVM is shutting down");
+                  logger.info("*** shutting down gRPC ads server since JVM is shutting down");
                   AdService.this.stop();
-                  System.err.println("*** server shut down");
+                  logger.info("*** server shut down");
                 }));
     healthMgr.setStatus("", ServingStatus.SERVING);
     // Mark service as ready after all initialization is complete
