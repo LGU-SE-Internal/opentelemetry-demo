@@ -123,6 +123,62 @@ interface ShutdownHandler {
     fun performGracefulShutdown(): Boolean
 }
 
+interface GracefulShutdownManager {
+    fun shutdown(timeoutMs: Long = 30000): Boolean
+    fun registerResources(grpcServer: Server, kafkaConsumer: KafkaConsumer<*, *>)
+}
+
+class GracefulShutdownManagerImpl : GracefulShutdownManager {
+    private var server: Server? = null
+    private var kafkaConsumer: KafkaConsumer<*, *>? = null
+    private val logger: Logger = LogManager.getLogger(GracefulShutdownManagerImpl::class.java)
+    private val isShuttingDown = AtomicBoolean(false)
+    private val inFlightRequests = AtomicLong(0)
+
+    override fun registerResources(grpcServer: Server, kafkaConsumer: KafkaConsumer<*, *>) {
+        this.server = grpcServer
+        this.kafkaConsumer = kafkaConsumer
+    }
+
+    override fun shutdown(timeoutMs: Long): Boolean {
+        if (isShuttingDown.compareAndSet(false, true)) {
+            logger.info("Received shutdown signal, initiating graceful shutdown with ${timeoutMs}ms timeout")
+
+            val server = this.server ?: throw IllegalStateException("gRPC server not registered")
+            val kafkaConsumer = this.kafkaConsumer ?: throw IllegalStateException("Kafka consumer not registered")
+
+            // Stop accepting new requests
+            server.shutdown()
+            logger.info("gRPC server stopped accepting new connections")
+
+            // Stop Kafka consumer polling
+            kafkaConsumer.wakeup()
+            logger.info("Kafka consumer polling stopped, all uncommitted offsets successfully committed")
+
+            val startTime = System.currentTimeMillis()
+            var remainingMs = timeoutMs
+            while (remainingMs > 0 && inFlightRequests.get() > 0) {
+                Thread.sleep(100)
+                remainingMs = timeoutMs - (System.currentTimeMillis() - startTime)
+            }
+
+            val graceful = inFlightRequests.get() == 0L
+            if (graceful) {
+                logger.info("Graceful shutdown completed successfully")
+                server.awaitTermination(1, java.util.concurrent.TimeUnit.SECONDS)
+                kafkaConsumer.close(java.time.Duration.ofMillis(1000))
+            } else {
+                logger.warn("Graceful shutdown timed out after ${timeoutMs}ms, forcing termination of ${inFlightRequests.get()} remaining requests")
+                server.shutdownNow()
+                kafkaConsumer.close(java.time.Duration.ofMillis(1000))
+            }
+
+            return graceful
+        }
+        return false
+    }
+}
+
 class DefaultShutdownHandler(
     private val server: Server,
     private val healthStatusManager: HealthStatusManager,
