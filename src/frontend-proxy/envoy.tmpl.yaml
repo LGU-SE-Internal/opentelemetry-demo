@@ -34,40 +34,38 @@
 {{ $outlierDetectionEjectionTimeMs := getenv "ENVOY_OUTLIER_DETECTION_EJECTION_TIME_MS" "30000" | toInt }}
 
 {{/* Parse rate limit configuration from environment variables */}}
-{{ $rateLimitGroups := dict }}
-{{ range $envKey, $envValue := getenv }}
-  {{ if hasPrefix $envKey "FRONTEND_PROXY_RATE_LIMIT_" }}
-    {{ $parts := split $envKey "_" }}
-    {{ if ge (len $parts) 6 }}
-      {{ $group := index $parts 4 | lower }}
-      {{ $type := index $parts 5 | lower }}
-      {{ if not (hasKey $rateLimitGroups $group) }}
-        {{ $_ := set $rateLimitGroups $group (dict "rps" 0 "burst" 0) }}
-      {{ end }}
-      {{ $groupConfig := index $rateLimitGroups $group }}
-      {{ if eq $type "rps" }}
-        {{ $_ := set $groupConfig "rps" ($envValue | toInt) }}
-      {{ else if eq $type "burst" }}
-        {{ $_ := set $groupConfig "burst" ($envValue | toInt) }}
-      {{ end }}
-    {{ end }}
+{{ $rateLimitEnabled := eq (getenv "RATE_LIMIT_ENABLED" "false") "true" }}
+
+{{/* Helper function to clamp rate limit values to valid range 0-10000 */}}
+{{ $clampRPM := func $val $default }}
+  {{ $intVal := toInt $val }}
+  {{ if or (lt $intVal 0) (gt $intVal 10000) }}
+    {{ return $default }}
   {{ end }}
+  {{ return $intVal }}
 {{ end }}
 
-{{/* Default groups: public and health */}}
-{{ if not (hasKey $rateLimitGroups "public") }}
-  {{ $_ := set $rateLimitGroups "public" (dict "rps" 0 "burst" 0) }}
-{{ end }}
-{{ if not (hasKey $rateLimitGroups "health") }}
-  {{ $_ := set $rateLimitGroups "health" (dict "rps" 0 "burst" 0) }}
-{{ end }}
+{{/* Get rate limit values with defaults, clamp to valid range */}}
+{{ $publicRPM := $clampRPM (getenv "RATE_LIMIT_PUBLIC_ROUTES_RPM" "60") 60 }}
+{{ $healthRPM := $clampRPM (getenv "RATE_LIMIT_HEALTH_ROUTES_RPM" "300") 300 }}
+{{ $checkoutRPM := $clampRPM (getenv "RATE_LIMIT_CHECKOUT_ROUTES_RPM" "20") 20 }}
 
-{{/* Set default burst to rps if not explicitly set */}}
-{{ range $group, $config := $rateLimitGroups }}
-  {{ if eq $config.burst 0 }}
-    {{ $_ := set $config "burst" $config.rps }}
-  {{ end }}
-{{ end }}
+{{/* Convert RPM to requests per second for Envoy config */}}
+{{ $publicRPS := div $publicRPM 60 }}
+{{ $healthRPS := div $healthRPM 60 }}
+{{ $checkoutRPS := div $checkoutRPM 60 }}
+
+{{/* Set burst equal to RPM to allow full minute quota in bursts if needed */}}
+{{ $publicBurst := $publicRPM }}
+{{ $healthBurst := $healthRPM }}
+{{ $checkoutBurst := $checkoutRPM }}
+
+{{/* Rate limit groups configuration */}}
+{{ $rateLimitGroups := dict
+  "public" (dict "rpm" $publicRPM "rps" $publicRPS "burst" $publicBurst "match_prefixes" list "/api/products" "/api/categories" "/api/search")
+  "health" (dict "rpm" $healthRPM "rps" $healthRPS "burst" $healthBurst "match_prefixes" list "/health" "/ready" "/live")
+  "checkout" (dict "rpm" $checkoutRPM "rps" $checkoutRPS "burst" $checkoutBurst "match_prefixes" list "/api/cart" "/api/checkout" "/api/payment")
+}}
 
 static_resources:
   listeners:
@@ -392,11 +390,15 @@ static_resources:
                           header:
                             key: "Content-Type"
                             value: "application/json"
+                        - append: false
+                          header:
+                            key: "Retry-After"
+                            value: "%RESPONSE_HEADER_x-ratelimit-reset%"
                       response_body:
                         inline_string: |
                           {
-                            "error": "Too Many Requests",
-                            "message": "Rate limit exceeded. Try again later."
+                            "error": "Too many requests",
+                            "retry_after": %RESPONSE_HEADER_x-ratelimit-reset%
                           }
                       token_bucket:
                         max_tokens: 1000000
@@ -405,17 +407,30 @@ static_resources:
                       filter_enabled:
                         runtime_key: local_rate_limit_enabled
                         default_value:
-                          numerator: 0
+                          numerator: {{ if $rateLimitEnabled }}100{{ else }}0{{ end }}
                           denominator: HUNDRED
                       filter_enforced:
                         runtime_key: local_rate_limit_enforced
                         default_value:
-                          numerator: 0
+                          numerator: {{ if $rateLimitEnabled }}100{{ else }}0{{ end }}
                           denominator: HUNDRED
                       add_response_headers:
                         - name: x-local-rate-limit
                           append: false
                       enable_x_ratelimit_headers: DRAFT_VERSION_03
+                      response_headers_to_add_when_not_enforced:
+                        - append: false
+                          header:
+                            key: "X-RateLimit-Limit"
+                            value: "%LOCAL_RATE_LIMIT_LIMIT%"
+                        - append: false
+                          header:
+                            key: "X-RateLimit-Remaining"
+                            value: "%LOCAL_RATE_LIMIT_REMAINING%"
+                        - append: false
+                          header:
+                            key: "X-RateLimit-Reset"
+                            value: "%LOCAL_RATE_LIMIT_RESET%"
                   - name: envoy.filters.http.router
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
