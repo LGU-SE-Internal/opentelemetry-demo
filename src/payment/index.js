@@ -8,10 +8,16 @@ const express = require('express')
 const fs = require('fs')
 const path = require('path')
 const { RateLimiterMemory } = require('rate-limiter-flexible')
+const luhn = require('luhn')
+const iso4217 = require('iso4217')
 
 const charge = require('./charge')
 const logger = require('./logger')
 const cardValidator = require('simple-card-validator')
+
+// Initialize Express app for health checks
+const app = express()
+app.use(express.json())
 
 // Supported currencies (ISO 4217 3-letter codes)
 const SUPPORTED_CURRENCIES = ['USD', 'EUR', 'GBP', 'JPY', 'CAD', 'AUD', 'CHF', 'CNY', 'SEK', 'NZD']
@@ -211,22 +217,6 @@ function getServerCredentials() {
   )
 }
 
-// Luhn algorithm check for credit card number validity
-function luhnCheck(cardNumber) {
-  let sum = 0;
-  let shouldDouble = false;
-  for (let i = cardNumber.length - 1; i >= 0; i--) {
-    let digit = parseInt(cardNumber[i], 10);
-    if (shouldDouble) {
-      digit *= 2;
-      if (digit > 9) digit -= 9;
-    }
-    sum += digit;
-    shouldDouble = !shouldDouble;
-  }
-  return sum % 10 === 0;
-}
-
 async function chargeServiceHandler(call, callback) {
   const span = opentelemetry.trace.getActiveSpan();
 
@@ -293,24 +283,30 @@ async function chargeServiceHandler(call, callback) {
       throw err;
     }
 
-    // AC-2: Validate amount units non-negative
-    if (amount.units < 0) {
-      const err = new Error("Amount units must be non-negative");
+    // AC-2: Validate amount is positive (greater than 0)
+    const totalAmount = parseFloat(amount.units) + parseFloat(amount.nanos) / 1e9;
+    if (totalAmount <= 0) {
+      const err = new Error("Amount must be greater than 0");
       err.code = grpc.status.INVALID_ARGUMENT;
       throw err;
     }
 
-    // AC-3: Validate amount nanos range
+    // Validate amount nanos range
     if (amount.nanos < 0 || amount.nanos > 999999999) {
       const err = new Error("Amount nanos must be between 0 and 999999999");
       err.code = grpc.status.INVALID_ARGUMENT;
       throw err;
     }
 
-    // AC-3: Validate currency code format
+    // AC-3: Validate currency code format and valid ISO 4217 code
     const currencyCodeRegex = /^[A-Z]{3}$/;
     if (!currencyCodeRegex.test(currency_code)) {
       const err = new Error(`Currency ${currency_code} is invalid: must be 3-letter uppercase ISO 4217 code`);
+      err.code = grpc.status.INVALID_ARGUMENT;
+      throw err;
+    }
+    if (!iso4217[currency_code]) {
+      const err = new Error(`Currency ${currency_code} is not a valid ISO 4217 currency code`);
       err.code = grpc.status.INVALID_ARGUMENT;
       throw err;
     }
@@ -329,14 +325,14 @@ async function chargeServiceHandler(call, callback) {
       err.code = grpc.status.INVALID_ARGUMENT;
       throw err;
     }
-    // AC-5: Validate credit card number length
+    // AC-5: Validate credit card number length (13-19 digits for supported networks)
     const cardNumberDigits = credit_card_number;
-    if (cardNumberDigits.length != 13 && cardNumberDigits.length != 15 && cardNumberDigits.length != 16) {
-      const err = new Error("Invalid credit card number length: must be 13, 15, or 16 digits");
+    if (cardNumberDigits.length < 13 || cardNumberDigits.length > 19) {
+      const err = new Error("Invalid credit card number length: must be 13-19 digits for supported card networks");
       err.code = grpc.status.INVALID_ARGUMENT;
       throw err;
     }
-    if (!luhnCheck(cardNumberDigits)) {
+    if (!luhn.validate(cardNumberDigits)) {
       const err = new Error("Invalid credit_card_number: fails Luhn check");
       err.code = grpc.status.INVALID_ARGUMENT;
       throw err;
@@ -360,17 +356,27 @@ async function chargeServiceHandler(call, callback) {
       throw err;
     }
 
-    // AC-7: Validate CVV format
+    // Validate CVV format and length based on card network
     const cvvNonDigits = credit_card_cvv.replace(/\d/g, '');
     if (cvvNonDigits.length > 0) {
       const err = new Error("Invalid credit_card_cvv: must be numeric string");
       err.code = grpc.status.INVALID_ARGUMENT;
       throw err;
     }
-    if (credit_card_cvv.length < 3 || credit_card_cvv.length > 4) {
-      const err = new Error("Invalid CVV length: must be 3 or 4 digits");
-      err.code = grpc.status.INVALID_ARGUMENT;
-      throw err;
+    // Check if card is Amex (starts with 34 or 37)
+    const isAmex = /^3[47]/.test(cardNumberDigits);
+    if (isAmex) {
+      if (credit_card_cvv.length !== 4) {
+        const err = new Error("Invalid CVV length: American Express cards require 4-digit CVV");
+        err.code = grpc.status.INVALID_ARGUMENT;
+        throw err;
+      }
+    } else {
+      if (credit_card_cvv.length !== 3) {
+        const err = new Error("Invalid CVV length: Visa, Mastercard, Discover cards require 3-digit CVV");
+        err.code = grpc.status.INVALID_ARGUMENT;
+        throw err;
+      }
     }
 
     span?.setAttributes({
@@ -1023,14 +1029,17 @@ async function closeGracefully(signal) {
       duration_ms: durationMs,
       timestamp: new Date().toISOString()
     });
-    process.exit(1);
   }
+}
+
+function getServer() {
+  return server;
 }
 
 module.exports = {
   getServerCredentials,
+  getServer,
   app: app,
   rateLimitInterceptor,
-  configuredRateLimit,
-  rateLimiter
+  getLimitRpsForEndpoint
 }
