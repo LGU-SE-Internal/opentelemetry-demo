@@ -4,7 +4,8 @@
  * Copied with modification from src/frontend/utils/Request.ts
  */
 import getFrontendProxyURL from "@/utils/Settings";
-import { withResilience } from "@/utils/resilience";
+import { withRetry } from "@/resilience/retry-wrapper";
+import { RetryConfiguration } from "@/resilience/retry-config";
 
 interface IRequestParams {
   url: string;
@@ -13,6 +14,7 @@ interface IRequestParams {
   queryParams?: Record<string, any>;
   headers?: Record<string, string>;
   retryable?: boolean;
+  retryConfig?: Partial<RetryConfiguration>;
 }
 
 const request = async <T>({
@@ -24,6 +26,7 @@ const request = async <T>({
     "content-type": "application/json",
   },
   retryable,
+  retryConfig,
 }: IRequestParams): Promise<T> => {
   const proxyURL = await getFrontendProxyURL();
   const requestURL = `${proxyURL}${url}?${new URLSearchParams(queryParams).toString()}`;
@@ -54,7 +57,11 @@ const request = async <T>({
     return undefined as unknown as T;
   };
 
-  return withResilience(performRequest, isIdempotent, undefined, { url: requestURL, method });
+  if (!isIdempotent) {
+    return performRequest();
+  }
+
+  return withRetry(performRequest, retryConfig);
 };
 
 export default request;
