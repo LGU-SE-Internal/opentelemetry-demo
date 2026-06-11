@@ -89,6 +89,59 @@ requests_tracking = {}
 shutdown_lock = threading.Lock()
 shutdown_event = threading.Event()
 
+# Payload limit configuration
+LLM_MAX_REQUEST_BYTES = int(os.environ.get('LLM_MAX_REQUEST_BYTES', 1048576))  # 1MB default
+LLM_MAX_MESSAGE_CONTENT_LENGTH = int(os.environ.get('LLM_MAX_MESSAGE_CONTENT_LENGTH', 4096))  # 4k default
+
+class PayloadTooLargeError(Exception):
+    """Exception raised when request payload or message content exceeds allowed limits."""
+    pass
+
+def validate_request_body_size(request_body: bytes, max_allowed_bytes: int) -> None:
+    """Validate that request body size does not exceed maximum allowed limit."""
+    if len(request_body) > max_allowed_bytes:
+        raise PayloadTooLargeError(f"Request body size exceeds maximum allowed limit of {max_allowed_bytes} bytes")
+
+def validate_message_content_length(messages: list[dict], max_allowed_length: int) -> None:
+    """Validate that all message content strings do not exceed maximum allowed length."""
+    for msg in messages:
+        content = msg.get('content', '')
+        if isinstance(content, str) and len(content) > max_allowed_length:
+            raise PayloadTooLargeError(f"Message content exceeds maximum allowed length of {max_allowed_length} characters")
+
+@app.errorhandler(PayloadTooLargeError)
+def handle_payload_too_large(error):
+    """Handle PayloadTooLargeError by returning OpenAI-compatible 413 response."""
+    response = jsonify({
+        "error": {
+            "message": str(error),
+            "type": "payload_too_large",
+            "param": None,
+            "code": "payload_too_large"
+        }
+    })
+    response.status_code = 413
+    return response
+
+@app.before_request
+def validate_request_size():
+    """Validate request body size before processing the request."""
+    # Skip validation for GET requests (no body)
+    if request.method in ['GET', 'HEAD', 'OPTIONS']:
+        return
+    
+    # Check Content-Length header first
+    content_length = request.content_length
+    if content_length is not None and content_length > LLM_MAX_REQUEST_BYTES:
+        raise PayloadTooLargeError(f"Request body size exceeds maximum allowed limit of {LLM_MAX_REQUEST_BYTES} bytes")
+    
+    # Read and validate actual body size (to handle cases where Content-Length is missing or incorrect)
+    # We need to read the body here and set it back on the request so it's available for later parsing
+    body = request.get_data()
+    validate_request_body_size(body, LLM_MAX_REQUEST_BYTES)
+    # Set the body back so that request.get_json() works later
+    request._cached_data = body
+
 def handle_shutdown(signal_num: int, frame: Optional[types.FrameType]) -> None:
     global shutdown_initiated
     with shutdown_lock:
@@ -311,6 +364,9 @@ def chat_completions():
                 "code": "invalid_input"
             }
         }), 400
+    
+    # Step 4a: Validate message content length limits
+    validate_message_content_length(messages, LLM_MAX_MESSAGE_CONTENT_LENGTH)
     
     # Step 5: Validate each message entry has content field of type string
     for idx, message in enumerate(messages):
