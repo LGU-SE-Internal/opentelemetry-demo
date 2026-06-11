@@ -59,13 +59,21 @@ func NewCircuitBreaker(cfg CircuitBreakerConfig) *gobreaker.CircuitBreaker {
 			return counts.Requests >= 2 && failureRatio >= float64(cfg.FailureThresholdPercent)/100
 		},
 		OnStateChange: func(name string, from gobreaker.State, to gobreaker.State) {
+			// Get existing circuit breaker for failure count
+			cbMu.RLock()
+			cb, exists := circuitBreakers[name]
+			var failureCount uint32
+			if exists {
+				failureCount = cb.Counts().TotalFailures
+			}
+			cbMu.RUnlock()
 			// Log structured JSON entry
 			logger.Info(
 				"circuit breaker state transition",
 				"service_name", name,
 				"previous_state", from.String(),
 				"new_state", to.String(),
-				"failure_count", gobreaker.NewCircuitBreaker(gobreaker.Settings{Name: name}).Counts().TotalFailures,
+				"failure_count", failureCount,
 				"timestamp", time.Now().Format(time.RFC3339),
 			)
 
