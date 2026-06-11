@@ -13,6 +13,8 @@ using System.Text.Json;
 using Polly;
 using Polly.CircuitBreaker;
 using System.Diagnostics.Metrics;
+using System.Threading.RateLimiting;
+using System.Collections.Concurrent;
 
 namespace Accounting;
 
@@ -62,6 +64,11 @@ internal class Consumer : IAsyncDisposable, IDisposable
     private readonly AsyncCircuitBreakerPolicy _circuitBreakerPolicy;
     private readonly Meter _meter;
     private string _currentCircuitState = "closed";
+    private readonly ConcurrentDictionary<int, RateLimiter> _partitionRateLimiters = new();
+    private readonly Counter<double> _throttledMessagesCounter;
+    private double _rateLimitPerPartitionPerSecond;
+    private int _rateLimitBurstPerPartition;
+    private string _consumerGroupId;
 
     // Configuration properties
     public int MaxRetryAttempts { get; }
@@ -202,6 +209,20 @@ internal class Consumer : IAsyncDisposable, IDisposable
                 new(0, new KeyValuePair<string, object?>("state", _currentCircuitState == "half_open" ? "closed" : "half_open"))
             },
             description: "Current state of the accounting service circuit breaker (closed/open/half_open)");
+        _throttledMessagesCounter = _meter.CreateCounter<double>(
+            "accounting_service_kafka_throttled_messages_total",
+            description: "Total number of messages that were delayed due to rate limiting");
+
+        // Load rate limit configuration
+        _rateLimitPerPartitionPerSecond = double.TryParse(
+            Environment.GetEnvironmentVariable("ACCOUNTING_SERVICE_KAFKA_RATE_LIMIT_PER_PARTITION_MESSAGES_PER_SECOND"),
+            out double rateLimit) ? rateLimit : 0;
+        _rateLimitBurstPerPartition = int.TryParse(
+            Environment.GetEnvironmentVariable("ACCOUNTING_SERVICE_KAFKA_RATE_LIMIT_BURST_PER_PARTITION"),
+            out int burstLimit) ? burstLimit : 10;
+        
+        // Get consumer group id for metrics
+        _consumerGroupId = "accounting";
 
        if (_logger.IsEnabled(LogLevel.Information))
        {
@@ -209,6 +230,15 @@ internal class Consumer : IAsyncDisposable, IDisposable
            _logger.LogInformation("Kafka consumer retry config: MaxRetries={MaxRetries}, InitialDelay={InitialDelay}ms, MaxDelay={MaxDelay}ms, DLQ={DlqTopic}", 
                MaxRetryAttempts, InitialRetryDelayMs, MaxRetryDelayMs, DlqTopicName);
            _logger.LogInformation("Shutdown timeout configured to {ShutdownTimeoutSeconds} seconds", ShutdownTimeoutSeconds);
+           if (_rateLimitPerPartitionPerSecond > 0)
+           {
+               _logger.LogInformation("Rate limiting enabled: {RateLimit} messages/sec per partition, burst limit {BurstLimit}",
+                   _rateLimitPerPartitionPerSecond, _rateLimitBurstPerPartition);
+           }
+           else
+           {
+               _logger.LogInformation("Rate limiting disabled");
+           }
        }
 
         _dbConnectionString = Environment.GetEnvironmentVariable("DB_CONNECTION_STRING");
@@ -241,6 +271,37 @@ internal class Consumer : IAsyncDisposable, IDisposable
                 {
                     using var activity = MyActivitySource.StartActivity("order-consumed",  ActivityKind.Internal);
                     var consumeResult = _consumer.Consume(cancellationToken);
+                    
+                    // Apply rate limiting if enabled
+                    if (_rateLimitPerPartitionPerSecond > 0)
+                    {
+                        var partitionId = consumeResult.Partition.Value;
+                        var rateLimiter = _partitionRateLimiters.GetOrAdd(partitionId, _ =>
+                            new TokenBucketRateLimiter(new TokenBucketRateLimiterOptions
+                            {
+                                TokenLimit = _rateLimitBurstPerPartition,
+                                QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                                QueueLimit = int.MaxValue,
+                                ReplenishmentPeriod = TimeSpan.FromSeconds(1 / _rateLimitPerPartitionPerSecond),
+                                TokensPerPeriod = 1,
+                                AutoReplenishment = true
+                            }));
+                        
+                        using var rateLease = await rateLimiter.AcquireAsync(1, cancellationToken);
+                        if (!rateLease.IsAcquired)
+                        {
+                            // This should not happen with QueueLimit = int.MaxValue
+                            _logger.LogWarning("Failed to acquire rate limit lease for partition {PartitionId}, delaying message processing", partitionId);
+                            await DelayFunction(TimeSpan.FromMilliseconds(100), cancellationToken);
+                        }
+                        else if (rateLease.TryGetMetadata("Delay", out object? delayObj) && delayObj is TimeSpan delay && delay > TimeSpan.Zero)
+                        {
+                            // Increment throttled metric if message was delayed
+                            _throttledMessagesCounter.Add(1,
+                                new KeyValuePair<string, object?>("partition", partitionId.ToString()),
+                                new KeyValuePair<string, object?>("consumer_group", _consumerGroupId));
+                        }
+                    }
                     
                     lock (_lockObj)
                     {
