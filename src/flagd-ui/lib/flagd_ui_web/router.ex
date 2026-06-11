@@ -11,15 +11,22 @@ defmodule FlagdUiWeb.Router do
     plug :put_root_layout, html: {FlagdUiWeb.Layouts, :root}
     plug :protect_from_forgery
     plug :put_secure_browser_headers
+    plug FlagdUI.Plugs.RateLimiter, type: :http_default
   end
 
   pipeline :api do
     plug :accepts, ["json"]
+    plug FlagdUI.Plugs.RateLimiter, type: :http_default
+  end
+
+  pipeline :health_api do
+    plug :accepts, ["json"]
+    plug FlagdUI.Plugs.RateLimiter, type: :http_health
   end
 
   # Health check endpoints, no authentication required
   scope "/health", FlagdUiWeb do
-    pipe_through :api
+    pipe_through :health_api
 
     get "/liveness", HealthController, :liveness
     get "/readiness", HealthController, :readiness
