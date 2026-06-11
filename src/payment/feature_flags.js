@@ -32,11 +32,12 @@ fallbackCallsCounter.inc({ service: 'paymentservice' }, 0); // Initialize to 0
 // Circuit breaker configuration
 const CIRCUIT_BREAKER_OPTIONS = {
   timeout: 10000, // 10s timeout per call
-  errorThresholdPercentage: 100, // Open when 100% of requests fail
+  errorThresholdPercentage: 50, // Open when 50% of requests fail
   rollingCountTimeout: 10000,
   rollingCountBuckets: 10,
   resetTimeout: 30000, // 30s reset timeout
-  volumeThreshold: 5, // 5 consecutive failures to open
+  volumeThreshold: 10, // Minimum 10 requests before threshold applies
+  halfOpenMaxRequests: 3, // Max 3 requests allowed in half-open state
   errorFilter: (error) => {
     // Count all errors as failures for circuit breaker
     return true;
