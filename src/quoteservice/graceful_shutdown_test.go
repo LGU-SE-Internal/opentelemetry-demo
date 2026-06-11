@@ -20,9 +20,9 @@ func TestAC1_SignalStopsNewRequests(t *testing.T) {
 	t.Parallel()
 
 	// Setup test resources
-	testHTTPServer := &http.Server{Addr: ":8080", Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})}
+		testHTTPServer := &http.Server{Addr: ":8080", Handler: HTTPShutdownMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))}
 	testGRPCServer := grpc.NewServer()
 	testDB, _ := sql.Open("postgres", "host=localhost port=5432 user=test password=test dbname=test sslmode=disable")
 	defer testDB.Close()
