@@ -13,6 +13,7 @@ import json
 import re
 import uuid
 import signal
+import time
 from concurrent import futures
 import threading
 from flask import Flask, Response
@@ -107,18 +108,117 @@ cached_ids = []
 first_run = True
 
 # Retry configuration from environment variables
-RETRY_MAX_ATTEMPTS = int(os.environ.get('RECOMMENDATION_SERVICE_PRODUCT_CATALOG_RETRY_MAX_ATTEMPTS', '3'))
+RETRY_MAX_ATTEMPTS = int(os.environ.get('RECOMMENDATION_SERVICE_PRODUCT_CATALOG_MAX_RETRY_ATTEMPTS', '3'))
 RETRY_ATTEMPTS = RETRY_MAX_ATTEMPTS # Alias for tests
-RETRY_INITIAL_BACKOFF_MS = int(os.environ.get('RECOMMENDATION_SERVICE_PRODUCT_CATALOG_RETRY_INITIAL_BACKOFF_MS', '100'))
-RETRY_BACKOFF_MULTIPLIER = float(os.environ.get('RECOMMENDATION_SERVICE_PRODUCT_CATALOG_RETRY_BACKOFF_MULTIPLIER', '2'))
-RETRY_MAX_BACKOFF_MS = int(os.environ.get('RECOMMENDATION_SERVICE_PRODUCT_CATALOG_RETRY_MAX_BACKOFF_MS', '2000'))
+RETRY_INITIAL_BACKOFF_MS = int(os.environ.get('RECOMMENDATION_SERVICE_PRODUCT_CATALOG_INITIAL_RETRY_BACKOFF_MS', '100'))
+RETRY_BACKOFF_MULTIPLIER = 2.0  # Exponential multiplier per spec
+RETRY_MAX_BACKOFF_MS = int(os.environ.get('RECOMMENDATION_SERVICE_PRODUCT_CATALOG_MAX_RETRY_BACKOFF_MS', '2000'))
 
 # Eligible retry status codes
 RETRYABLE_STATUS_CODES = {
     grpc.StatusCode.UNAVAILABLE,
-    grpc.StatusCode.RESOURCE_EXHAUSTED,
-    grpc.StatusCode.INTERNAL
+    grpc.StatusCode.DEADLINE_EXCEEDED,
+    grpc.StatusCode.INTERNAL,
+    grpc.StatusCode.RESOURCE_EXHAUSTED
 }
+
+# Idempotent product catalog methods that can be retried
+IDEMPOTENT_PRODUCT_CATALOG_METHODS = {"GetProduct", "ListProducts", "SearchProducts"}
+
+# Global metrics references (will be set during init)
+retry_attempts_counter = None
+retry_failures_counter = None
+
+# Structured logger reference (will be set during init)
+logger = None
+
+from typing import Callable, Any
+def retry_product_catalog_call(
+    func: Callable[..., Any],
+    *args,
+    **kwargs
+) -> Any:
+    """
+    Wraps product catalog gRPC calls with exponential backoff retry logic.
+    Args:
+        func: gRPC method to call
+        *args: Positional arguments for the gRPC method
+        **kwargs: Keyword arguments for the gRPC method
+    Returns:
+        Result of the gRPC call if successful
+    Raises:
+        Original gRPC error if retries are exhausted or error is non-retryable
+    """
+    method_name = func.__name__
+    
+    # No retries if max attempts is 0 or method is not idempotent
+    if RETRY_MAX_ATTEMPTS <= 0 or method_name not in IDEMPOTENT_PRODUCT_CATALOG_METHODS:
+        return func(*args, **kwargs)
+    
+    attempt = 0
+    backoff_ms = RETRY_INITIAL_BACKOFF_MS
+    
+    while True:
+        try:
+            return func(*args, **kwargs)
+        except grpc.RpcError as e:
+            status_code = e.code()
+            # Check if error is retryable
+            if status_code not in RETRYABLE_STATUS_CODES:
+                raise e
+            
+            attempt += 1
+            if attempt > RETRY_MAX_ATTEMPTS:
+                # Log retry exhausted
+                if logger:
+                    logger.error(
+                        f"Exhausted all {RETRY_MAX_ATTEMPTS} retry attempts for product catalog method {method_name}",
+                        extra={
+                            "event": "product_catalog_retry_exhausted",
+                            "method": method_name,
+                            "error_type": status_code.name,
+                            "total_attempts": attempt
+                        }
+                    )
+                # Increment failure metric
+                if retry_failures_counter:
+                    retry_failures_counter.add(
+                        1,
+                        {
+                            "method": method_name,
+                            "error_type": status_code.name
+                        }
+                    )
+                raise e
+            
+            # Increment retry attempt metric
+            if retry_attempts_counter:
+                retry_attempts_counter.add(
+                    1,
+                    {
+                        "method": method_name,
+                        "error_type": status_code.name
+                    }
+                )
+            
+            # Log retry attempt
+            if logger:
+                logger.info(
+                    f"Retrying product catalog method {method_name} (attempt {attempt}/{RETRY_MAX_ATTEMPTS}) after {backoff_ms}ms backoff",
+                    extra={
+                        "event": "product_catalog_retry_attempt",
+                        "method": method_name,
+                        "error_type": status_code.name,
+                        "attempt_number": attempt,
+                        "backoff_duration_ms": backoff_ms
+                    }
+                )
+            
+            # Wait for backoff duration
+            time.sleep(backoff_ms / 1000.0)
+            
+            # Calculate next backoff (exponential, capped at max)
+            backoff_ms = min(backoff_ms * RETRY_BACKOFF_MULTIPLIER, RETRY_MAX_BACKOFF_MS)
 
 # Circuit breaker configuration from environment variables
 PRODUCT_CATALOG_CIRCUIT_BREAKER_FAILURE_THRESHOLD = int(os.environ.get('PRODUCT_CATALOG_CIRCUIT_BREAKER_FAILURE_THRESHOLD', '5'))
@@ -609,6 +709,10 @@ if __name__ == "__main__":
     tracer = trace.get_tracer_provider().get_tracer(service_name)
     meter = metrics.get_meter_provider().get_meter(service_name)
     rec_svc_metrics = init_metrics(meter)
+    
+    # Set global retry metrics references
+    retry_attempts_counter = rec_svc_metrics["retry_attempts_counter"]
+    retry_failures_counter = rec_svc_metrics["retry_failures_counter"]
 
     # Initialize circuit breaker with metrics listener
     circuit_breaker_listener = CircuitBreakerMetricsListener(rec_svc_metrics)
