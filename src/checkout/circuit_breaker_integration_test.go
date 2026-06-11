@@ -18,68 +18,18 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// ErrCircuitOpen is returned when circuit is open
-var ErrCircuitOpen = gobreaker.ErrOpenState
-
-// CircuitBreakerConfig defines circuit breaker settings per downstream service
-type CircuitBreakerConfig struct {
-	ServiceName            string
-	FailureThresholdPercent int
-	OpenStateTimeout       time.Duration
-	HalfOpenMaxRequests    uint32
-	RollingWindowDuration  time.Duration
-}
-
-// CircuitBreakerClientInterceptor is the gRPC interceptor interface from spec
-func CircuitBreakerClientInterceptor(cb *gobreaker.CircuitBreaker) grpc.UnaryClientInterceptor {
-	panic("not implemented")
-}
-
-// GetAllGRPCClients returns all gRPC clients used by checkout service
-func GetAllGRPCClients() map[string]*grpc.ClientConn {
-	panic("not implemented")
-}
-
 // Mock invokers for testing
-func mockInvoker(_ context.Context, _ string, _, _ interface{}, _ *grpc.ClientConn, _ ...grpc.CallOption) error {
+func cbMockInvoker(_ context.Context, _ string, _, _ interface{}, _ *grpc.ClientConn, _ ...grpc.CallOption) error {
 	return nil
 }
 
-func mockInvokerAlwaysFails(_ context.Context, _ string, _, _ interface{}, _ *grpc.ClientConn, _ ...grpc.CallOption) error {
+func cbMockInvokerAlwaysFails(_ context.Context, _ string, _, _ interface{}, _ *grpc.ClientConn, _ ...grpc.CallOption) error {
 	return status.Error(codes.Unavailable, "service down")
 }
-
-func TestAC1_CircuitOpensAfter50PercentFailureIn10sWindow(t *testing.T) {
-	t.Parallel()
-	cfg := CircuitBreakerConfig{
-		ServiceName:            "test-payment",
-		FailureThresholdPercent: 50,
-		OpenStateTimeout:       30 * time.Second,
-		HalfOpenMaxRequests:    5,
-		RollingWindowDuration:  10 * time.Second,
-	}
-	cb := gobreaker.NewCircuitBreaker(gobreaker.Settings{
-		Name:        cfg.ServiceName,
-		MaxRequests: cfg.HalfOpenMaxRequests,
-		Interval:    cfg.RollingWindowDuration,
-		Timeout:     cfg.OpenStateTimeout,
-		ReadyToTrip: func(counts gobreaker.Counts) bool {
-			failureRatio := float64(counts.TotalFailures) / float64(counts.Requests)
-			return counts.Requests >= 2 && failureRatio >= float64(cfg.FailureThresholdPercent)/100
-		},
-	})
-
-	interceptor := CircuitBreakerClientInterceptor(cb)
-	ctx := context.Background()
-
-	// Send 1 success, 1 failure = 50% failure rate
-	err := interceptor(ctx, "/test.Method", nil, nil, nil, mockInvoker)
-	assert.NoError(t, err)
-	err = interceptor(ctx, "/test.Method", nil, nil, nil, mockInvokerAlwaysFails)
 	assert.Error(t, err)
 
 	// Third request should be rejected with ErrCircuitOpen
-	err = interceptor(ctx, "/test.Method", nil, nil, nil, mockInvoker)
+	err = interceptor(ctx, "/test.Method", nil, nil, nil, cbMockInvoker)
 	assert.Equal(t, ErrCircuitOpen, err)
 	assert.Equal(t, gobreaker.StateOpen, cb.State())
 }
@@ -107,8 +57,8 @@ func TestAC2_HalfOpenStateTransition(t *testing.T) {
 	ctx := context.Background()
 
 	// Trip circuit first
-	_ = interceptor(ctx, "/test.Method", nil, nil, nil, mockInvoker)
-	_ = interceptor(ctx, "/test.Method", nil, nil, nil, mockInvokerAlwaysFails)
+	_ = interceptor(ctx, "/test.Method", nil, nil, nil, cbMockInvoker)
+	_ = interceptor(ctx, "/test.Method", nil, nil, nil, cbMockInvokerAlwaysFails)
 	assert.Equal(t, gobreaker.StateOpen, cb.State())
 
 	// Wait for open timeout
@@ -121,11 +71,11 @@ func TestAC2_HalfOpenStateTransition(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		var err error
 		if i < successCount {
-			err = interceptor(ctx, "/test.Method", nil, nil, nil, mockInvoker)
+			err = interceptor(ctx, "/test.Method", nil, nil, nil, cbMockInvoker)
 		} else if i < successCount + failureCount {
-			err = interceptor(ctx, "/test.Method", nil, nil, nil, mockInvokerAlwaysFails)
+			err = interceptor(ctx, "/test.Method", nil, nil, nil, cbMockInvokerAlwaysFails)
 		} else {
-			err = interceptor(ctx, "/test.Method", nil, nil, nil, mockInvoker)
+			err = interceptor(ctx, "/test.Method", nil, nil, nil, cbMockInvoker)
 			if err == ErrCircuitOpen { break }
 		}
 		if err != ErrCircuitOpen { allowed++ }
@@ -134,8 +84,8 @@ func TestAC2_HalfOpenStateTransition(t *testing.T) {
 	assert.Equal(t, gobreaker.StateClosed, cb.State())
 
 	// Re-trip and test 2: <80% success -> reopen
-	_ = interceptor(ctx, "/test.Method", nil, nil, nil, mockInvoker)
-	_ = interceptor(ctx, "/test.Method", nil, nil, nil, mockInvokerAlwaysFails)
+	_ = interceptor(ctx, "/test.Method", nil, nil, nil, cbMockInvoker)
+	_ = interceptor(ctx, "/test.Method", nil, nil, nil, cbMockInvokerAlwaysFails)
 	assert.Equal(t, gobreaker.StateOpen, cb.State())
 	time.Sleep(1100 * time.Millisecond)
 
@@ -145,11 +95,11 @@ func TestAC2_HalfOpenStateTransition(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		var err error
 		if i < successCount {
-			err = interceptor(ctx, "/test.Method", nil, nil, nil, mockInvoker)
+			err = interceptor(ctx, "/test.Method", nil, nil, nil, cbMockInvoker)
 		} else if i < successCount + failureCount {
-			err = interceptor(ctx, "/test.Method", nil, nil, nil, mockInvokerAlwaysFails)
+			err = interceptor(ctx, "/test.Method", nil, nil, nil, cbMockInvokerAlwaysFails)
 		} else {
-			err = interceptor(ctx, "/test.Method", nil, nil, nil, mockInvoker)
+			err = interceptor(ctx, "/test.Method", nil, nil, nil, cbMockInvoker)
 			if err == ErrCircuitOpen { break }
 		}
 		if err != ErrCircuitOpen { allowed++ }
@@ -188,8 +138,8 @@ func TestAC3_StateTransitionLogs(t *testing.T) {
 	ctx := context.Background()
 
 	// Trigger closed -> open
-	_ = interceptor(ctx, "/test.Method", nil, nil, nil, mockInvoker)
-	_ = interceptor(ctx, "/test.Method", nil, nil, nil, mockInvokerAlwaysFails)
+	_ = interceptor(ctx, "/test.Method", nil, nil, nil, cbMockInvoker)
+	_ = interceptor(ctx, "/test.Method", nil, nil, nil, cbMockInvokerAlwaysFails)
 	assert.Contains(t, logOutput.String(), `"service_name":"test-currency"`)
 	assert.Contains(t, logOutput.String(), `"previous_state":"closed"`)
 	assert.Contains(t, logOutput.String(), `"new_state":"open"`)
@@ -256,7 +206,7 @@ func TestAC6_CircuitBreakerLatencyOverhead(t *testing.T) {
 
 	start := time.Now()
 	for i := 0; i < 1000; i++ {
-		_ = interceptor(ctx, "/test.Method", nil, nil, nil, mockInvoker)
+		_ = interceptor(ctx, "/test.Method", nil, nil, nil, cbMockInvoker)
 	}
 	avg := time.Since(start) / 1000
 	assert.LessOrEqual(t, avg, 1*time.Millisecond, "average overhead per request should be <=1ms, got %v", avg)

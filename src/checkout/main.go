@@ -657,9 +657,10 @@ var (
 	backoffMultiplier    = 2.0
 	maxRetryAttempts     = 2
 	totalRetryTimeout    = 2 * time.Second
-	cbFailureThreshold   = uint32(5)
-	cbCoolingPeriod      = 10 * time.Second
-	cbSuccessThreshold   = uint32(3)
+	cbFailureThresholdPercent = 50
+	cbOpenStateTimeout = 30 * time.Second
+	cbHalfOpenMaxRequests = uint32(5)
+	cbRollingWindowDuration = 10 * time.Second
 )
 
 // getCircuitBreaker returns a circuit breaker for the given service name, creating it if necessary
@@ -676,33 +677,41 @@ func getCircuitBreaker(svcName string) *gobreaker.CircuitBreaker {
 	// Double check after acquiring write lock
 	if cb, exists := circuitBreakers[svcName]; exists {
 		return cb
-	}
-
 	settings := gobreaker.Settings{
 		Name:        svcName,
-		MaxRequests: cbSuccessThreshold,
-		Interval:    0,
-		Timeout:     cbCoolingPeriod,
+		MaxRequests: cbHalfOpenMaxRequests,
+		Interval:    cbRollingWindowDuration,
+		Timeout:     cbOpenStateTimeout,
 		ReadyToTrip: func(counts gobreaker.Counts) bool {
-			return counts.ConsecutiveFailures >= cbFailureThreshold
+			failureRatio := float64(counts.TotalFailures) / float64(counts.Requests)
+			return counts.Requests >= 2 && failureRatio >= float64(cbFailureThresholdPercent)/100
 		},
 		OnStateChange: func(name string, from gobreaker.State, to gobreaker.State) {
-			logger.Info("circuit breaker state changed",
-				slog.String("service", name),
-				slog.String("from_state", from.String()),
-				slog.String("to_state", to.String()))
-			// Add trace event if context is available
-			if span := trace.SpanFromContext(context.Background()); span.IsRecording() {
-				span.AddEvent("circuit_breaker_state_change",
-					trace.WithAttributes(
-						attribute.String("service.name", name),
-						attribute.String("old_state", from.String()),
-						attribute.String("new_state", to.String()),
-					))
+			// Log structured JSON entry
+			logger.Info(
+				"circuit breaker state transition",
+				"service_name", name,
+				"previous_state", from.String(),
+				"new_state", to.String(),
+				"failure_count", gobreaker.NewCircuitBreaker(gobreaker.Settings{Name: name}).Counts().TotalFailures,
+				"timestamp", time.Now().Format(time.RFC3339),
+			)
+
+			// Update prometheus metrics
+			circuitBreakerStateGauge.WithLabelValues(name).Set(float64(to))
+
+			var eventType string
+			switch to {
+			case gobreaker.StateClosed:
+				eventType = "closed"
+			case gobreaker.StateOpen:
+				eventType = "open"
+			case gobreaker.StateHalfOpen:
+				eventType = "half_open"
 			}
+			circuitBreakerEventsCounter.WithLabelValues(name, eventType).Inc()
 		},
 	}
-
 	cb = gobreaker.NewCircuitBreaker(settings)
 	circuitBreakers[svcName] = cb
 	return cb
@@ -719,35 +728,34 @@ func circuitBreakerUnaryInterceptor(svcName string) grpc.UnaryClientInterceptor 
 				attribute.String("method", method),
 			))
 
-		_, err := cb.Execute(func() (interface{}, error) {
-			err := invoker(ctx, method, req, reply, cc, opts...)
-			if err != nil {
-				st, ok := status.FromError(err)
-				if ok {
-					span.SetAttributes(attribute.Int("grpc.status_code", int(st.Code())))
-					// Only count retryable status codes as failures for circuit breaker
-					for _, rc := range retryableStatusCodes {
-						if st.Code() == rc {
-							return nil, err
+			_, err := cb.Execute(func() (interface{}, error) {
+				err := invoker(ctx, method, req, reply, cc, opts...)
+				if err != nil {
+					st, ok := status.FromError(err)
+					if ok {
+						span.SetAttributes(attribute.Int("grpc.status_code", int(st.Code())))
+						// Only count retryable status codes as failures for circuit breaker
+						for _, rc := range retryableStatusCodes {
+							if st.Code() == rc {
+								return nil, err
+							}
 						}
+						// Non-retryable errors are not counted as failures
+						return nil, nil
 					}
-					// Non-retryable errors are not counted as failures
-					return nil, nil
+					return nil, err
 				}
-				return nil, err
+				return nil, nil
+			})
+
+			if err == gobreaker.ErrOpenState {
+				circuitBreakerEventsCounter.WithLabelValues(svcName, "failure_rejected").Inc()
+				return ErrCircuitOpen
 			}
-			return nil, nil
-		})
 
-		if err == gobreaker.ErrOpenState {
-			span.AddEvent("circuit_breaker_open", trace.WithAttributes(attribute.String("service.name", svcName)))
-			span.SetStatus(otelcodes.Error, "circuit breaker is open")
-			return status.Error(codes.Unavailable, fmt.Sprintf("circuit breaker open for service %s", svcName))
+			return err
 		}
-
-		return err
 	}
-}
 
 // mustCreateClient creates a gRPC client for the given target address with retry and circuit breaker interceptors
 func mustCreateClient(addr string, svcName string) *grpc.ClientConn {
