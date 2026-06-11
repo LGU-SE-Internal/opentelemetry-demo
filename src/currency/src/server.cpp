@@ -873,5 +873,5 @@ int main(int argc, char **argv) {
     refresh_thread.join();
   }
 
-  return 0;
+  return g_shutdown_timed_out.load() ? 1 : 0;
 }
