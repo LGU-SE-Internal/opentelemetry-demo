@@ -1,11 +1,11 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: productreviewservice
+  name: product-reviews
   labels:
-    app.kubernetes.io/name: productreviewservice
+    app.kubernetes.io/name: product-reviews
     app.kubernetes.io/part-of: opentelemetry-demo
-    app.kubernetes.io/component: service
+    app.kubernetes.io/component: backend
   annotations:
     prometheus.io/scrape: "true"
     prometheus.io/port: "8080"
@@ -15,6 +15,6 @@ spec:
   ports:
   - port: 8080
     targetPort: 8080
-    name: grpc
+    name: http
   selector:
-    app.kubernetes.io/name: productreviewservice
+    app.kubernetes.io/name: product-reviews
