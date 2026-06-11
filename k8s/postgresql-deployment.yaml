@@ -106,6 +106,7 @@ spec:
               mountPath: /var/run/postgresql
       volumes:
         - name: postgresql-data
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: postgresql-pvc
         - name: postgresql-run
           emptyDir: {}
