@@ -5,8 +5,9 @@ FROM docker.io/nginxinc/nginx-unprivileged:1.29.0-alpine3.22-otel@sha256:5a41b64
 
 USER root
 
-# Create SSL directory with correct permissions for nginx user
-RUN mkdir -p /etc/nginx/ssl && \
+# Install openssl for certificate validation
+RUN apk add --no-cache openssl && \
+    mkdir -p /etc/nginx/ssl && \
     chown -R nginx:nginx /etc/nginx/ssl && \
     chmod 750 /etc/nginx/ssl
 
