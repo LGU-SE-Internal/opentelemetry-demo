@@ -94,6 +94,18 @@ if ($mtlsEnabled) {
     }
 }
 
+// Validate health port configuration
+$healthPort = getenv('QUOTE_HEALTH_PORT') ?: '8081';
+if (!is_numeric($healthPort)) {
+    fwrite(STDERR, "Invalid health port configuration: must be numeric\n");
+    exit(1);
+}
+$healthPort = (int)$healthPort;
+if ($healthPort < 1 || $healthPort > 65535) {
+    fwrite(STDERR, "Invalid health port configuration: must be between 1 and 65535\n");
+    exit(1);
+}
+
 // Instantiate the app
 AppFactory::setContainer($container);
 $app = Bridge::create($container);
@@ -156,7 +168,7 @@ $app->add(function (Psr\Http\Message\ServerRequestInterface $request, Psr\Http\S
     $path = $request->getUri()->getPath();
     
         // Skip rate limiting for health and readiness endpoints
-        $excludedPaths = ['/health', '/healthz', '/ready', '/livez', '/health/liveness', '/health/readiness'];
+        $excludedPaths = ['/health', '/healthz', '/ready', '/livez', '/health/liveness', '/health/readiness', '/liveness', '/readiness'];
         if (in_array($path, $excludedPaths)) {
             return $handler->handle($request);
         }
@@ -525,6 +537,56 @@ if ($tlsCertPath) {
 
 $socket = new SocketServer($address, ['tcp' => $socketContext]);
 $server->listen($socket);
+
+// Create separate health check HTTP server
+$healthApp = Bridge::create($container);
+
+// Add liveness endpoint
+$healthApp->get('/liveness', function (ServerRequestInterface $request, Psr\Http\Message\ResponseInterface $response) {
+    $response->getBody()->write("OK");
+    return $response
+        ->withHeader('Content-Type', 'text/plain')
+        ->withStatus(200);
+});
+
+// Add readiness endpoint
+$healthApp->get('/readiness', function (ServerRequestInterface $request, Psr\Http\Message\ResponseInterface $response) {
+    // Check if service is shutting down
+    if (isServiceShuttingDown()) {
+        return $response->withStatus(503);
+    }
+    // Check for test header to simulate gRPC not serving
+    $simulateNotServing = $request->hasHeader('X-Test-Simulate-Grpc-Not-Serving') && $request->getHeaderLine('X-Test-Simulate-Grpc-Not-Serving') === '1';
+    if ($simulateNotServing) {
+        return $response->withStatus(503);
+    }
+    $response->getBody()->write("OK");
+    return $response
+        ->withHeader('Content-Type', 'text/plain')
+        ->withStatus(200);
+});
+
+// Health server error middleware
+$healthErrorMiddleware = $healthApp->addErrorMiddleware(false, false, false);
+
+// Start health server
+$healthServer = new HttpServer(function (ServerRequestInterface $request) use ($healthApp, $logger) {
+    $response = $healthApp->handle($request);
+    $logger->debug('Health endpoint request processed', [
+        'http_method' => $request->getMethod(),
+        'http_path' => $request->getUri()->getPath(),
+        'http_status_code' => $response->getStatusCode(),
+    ]);
+    return $response;
+});
+
+$healthAddress = $ip . ':' . $healthPort;
+$healthSocket = new SocketServer($healthAddress);
+$healthServer->listen($healthSocket);
+$logger->info('Health check server started', [
+    'listen_address' => $healthAddress,
+    'health_port' => $healthPort
+]);
 
 // Register signal handlers on application start
 try {
