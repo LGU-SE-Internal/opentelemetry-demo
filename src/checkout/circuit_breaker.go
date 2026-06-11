@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -113,7 +114,48 @@ func CircuitBreakerClientInterceptor(cb *gobreaker.CircuitBreaker) grpc.UnaryCli
 // Global gRPC clients map for test access
 var grpcClients = make(map[string]*grpc.ClientConn)
 
+// Global circuit breakers per service
+var (
+	circuitBreakers = make(map[string]*gobreaker.CircuitBreaker)
+	cbMu            sync.RWMutex
+)
+
 // GetAllGRPCClients returns all gRPC clients used by checkout service for test verification
 func GetAllGRPCClients() map[string]*grpc.ClientConn {
 	return grpcClients
+}
+
+// GetCircuitBreakerForService returns the circuit breaker instance for a given service, creating it with default config if it doesn't exist
+func GetCircuitBreakerForService(svcName string) *gobreaker.CircuitBreaker {
+	cbMu.RLock()
+	cb, exists := circuitBreakers[svcName]
+	cbMu.RUnlock()
+	if exists {
+		return cb
+	}
+
+	cbMu.Lock()
+	defer cbMu.Unlock()
+	// Double check in case it was created while waiting for lock
+	if cb, exists := circuitBreakers[svcName]; exists {
+		return cb
+	}
+
+	// Default configuration as per spec
+	cfg := CircuitBreakerConfig{
+		ServiceName:             svcName,
+		FailureThresholdPercent: 50,
+		OpenStateTimeout:        30 * time.Second,
+		HalfOpenMaxRequests:     5,
+		RollingWindowDuration:   10 * time.Second,
+	}
+	cb = NewCircuitBreaker(cfg)
+	circuitBreakers[svcName] = cb
+	return cb
+}
+
+// circuitBreakerUnaryInterceptor returns a gRPC unary client interceptor for the specified service
+func circuitBreakerUnaryInterceptor(svcName string) grpc.UnaryClientInterceptor {
+	cb := GetCircuitBreakerForService(svcName)
+	return CircuitBreakerClientInterceptor(cb)
 }
