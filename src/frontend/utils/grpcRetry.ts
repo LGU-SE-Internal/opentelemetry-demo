@@ -51,7 +51,7 @@ const loadConfig = (): GrpcRetryConfig => {
   };
 };
 
-export const config: GrpcRetryConfig = loadConfig();
+export let config: GrpcRetryConfig = loadConfig();
 
 // Initialize OpenTelemetry metrics
 const meter = metrics.getMeter('frontend-grpc-retry');
@@ -83,6 +83,19 @@ export const metricsImpl: RetryMetrics = {
   }
 };
 
+// Allow overriding metrics for testing
+let currentMetrics: RetryMetrics = metricsImpl;
+
+export const setMetrics = (metrics: RetryMetrics) => {
+  currentMetrics = metrics;
+};
+
+// Reload config and clear circuit breakers (for testing)
+export const reloadConfig = () => {
+  config = loadConfig();
+  circuitBreakers.clear();
+};
+
 // Circuit breaker cache per service
 const circuitBreakers: Map<string, CircuitBreaker> = new Map();
 
@@ -100,7 +113,7 @@ const getCircuitBreaker = (serviceName: string): CircuitBreaker => {
   const breaker = new CircuitBreaker(async (fn: () => Promise<any>) => fn(), options);
 
   breaker.on('open', () => {
-    metricsImpl.incrementCircuitBreakerTripped(serviceName);
+    currentMetrics.incrementCircuitBreakerTripped(serviceName);
   });
 
   circuitBreakers.set(serviceName, breaker);
@@ -166,20 +179,20 @@ export async function withGrpcRetry<T>(
       const result = await breaker.fire(grpcCall);
       // If we succeeded after first attempt, count as successful retry
       if (attempt > 1) {
-        metricsImpl.incrementSuccessfulRetries(serviceName, methodName);
+        currentMetrics.incrementSuccessfulRetries(serviceName, methodName);
       }
       return result;
     } catch (error) {
       // Check if error is retryable and we have attempts left
       if (attempt < maxAttempts && isRetryableError(error)) {
-        metricsImpl.incrementRetryAttempts(serviceName, methodName);
+        currentMetrics.incrementRetryAttempts(serviceName, methodName);
         // Wait for backoff before next attempt
         await delay(attempt);
         attempt++;
       } else {
         // No more attempts or non-retryable error
         if (attempt > 1) {
-          metricsImpl.incrementFailedRetries(serviceName, methodName);
+          currentMetrics.incrementFailedRetries(serviceName, methodName);
         }
         throw error;
       }
