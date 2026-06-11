@@ -320,8 +320,8 @@ type KafkaConsumer struct {
 	retryInitialBackoff time.Duration
 	retryMaxBackoff     time.Duration
 	dlqTopic            string
-		messageProcessor    func(context.Context, *sarama.ConsumerMessage) error // For testing
-		dlqSender           func(*sarama.ConsumerMessage, error) error // For testing
+	messageProcessor    func(context.Context, *sarama.ConsumerMessage) error // For testing
+	dlqSender           func(*sarama.ConsumerMessage, error) error // For testing
 }
 
 // KafkaConsumerConfig holds all configuration parameters for Kafka consumer with retry
@@ -545,7 +545,9 @@ func NewKafkaConsumer(ctx context.Context, brokers []string, topics []string, co
 }
 
 // ProcessMessageWithRetry processes a single Kafka message with retry logic for retriable errors
-func (c *KafkaConsumer) ProcessMessageWithRetry(ctx context.Context, msg *sarama.ConsumerMessage) error {
+func (c *KafkaConsumer) ProcessMessageWithRetry(msg *sarama.ConsumerMessage) error {
+	// Create default context
+	ctx := context.Background()
 	// Check if shutdown is in progress first
 	if c.shutdownInProgress.Load() {
 		return errors.New("shutdown in progress, skipping message processing")
@@ -633,6 +635,30 @@ func (c *KafkaConsumer) SetMessageProcessor(processor func(context.Context, *sar
 // SetDLQSender sets a custom DLQ sender for testing
 func (c *KafkaConsumer) SetDLQSender(sender func(*sarama.ConsumerMessage, error) error) {
 	c.dlqSender = sender
+}
+
+// StartServer starts the kafka-collector server with health checks and consumer
+func StartServer(ctx context.Context, cfg KafkaConsumerConfig) error {
+	// Initialize logger
+	if err := InitGlobalLogger(); err != nil {
+		return err
+	}
+
+	// Start health server
+	healthPort := 13210
+	if err := startHealthServer(healthPort); err != nil {
+		return fmt.Errorf("failed to start health server: %w", err)
+	}
+
+	// Create consumer with retry
+	consumer, err := NewKafkaConsumerWithRetry(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to create consumer: %w", err)
+	}
+	defer consumer.Close()
+
+	// Start consumption
+	return consumer.StartConsumption(ctx)
 }
 
 // StartConsumption starts consuming messages from the configured topics (for testing)
