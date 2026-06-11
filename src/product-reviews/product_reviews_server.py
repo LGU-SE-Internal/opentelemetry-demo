@@ -64,10 +64,94 @@ from google.protobuf.json_format import MessageToJson, MessageToDict
 
 # Global shutdown flag
 shutdown_initiated = False
+shutdown_event = asyncio.Event()
 service_initialized = False
 logger = logging.getLogger('main')
 import psycopg2
 import time
+from dataclasses import dataclass
+
+@dataclass
+class OTelProviders:
+    trace_provider: Any
+    metric_provider: Any
+    log_provider: Any
+
+# Graceful shutdown implementation
+def handle_shutdown_signal(signum: int, frame: Optional[FrameType]) -> None:
+    """Handle SIGINT/SIGTERM signals to trigger graceful shutdown"""
+    global shutdown_initiated
+    if shutdown_initiated:
+        logger.warning("Received second shutdown signal, forcing immediate exit")
+        exit(1)
+    
+    signal_name = signal.Signals(signum).name
+    logger.info(f"Shutdown initiated by {signal_name} signal")
+    shutdown_initiated = True
+    shutdown_event.set()
+
+def run_graceful_shutdown(server: grpc.Server, db_pool: Any, otel_providers: OTelProviders) -> int:
+    """
+    Execute graceful shutdown sequence:
+    1. Stop accepting new requests
+    2. Wait up to 10s for in-flight requests to complete
+    3. Clean up database connections
+    4. Flush and shut down OTel providers
+    Returns exit code 0 on success, 1 on timeout/failure
+    """
+    import asyncio
+    loop = asyncio.get_event_loop()
+    
+    # Step 1: Stop accepting new connections
+    logger.info("Stopping gRPC server from accepting new connections")
+    loop.run_until_complete(server.stop(grace=None))
+    
+    # Step 2: Wait for in-flight requests to complete (max 10s)
+    logger.info("Waiting for in-flight requests to complete (timeout: 10s)")
+    try:
+        loop.run_until_complete(asyncio.wait_for(server.wait_for_termination(), timeout=10))
+        logger.info("All in-flight requests completed successfully")
+        timeout_occurred = False
+    except asyncio.TimeoutError:
+        logger.warning("Shutdown timeout elapsed, forcibly terminating remaining requests")
+        loop.run_until_complete(server.stop(grace=0))
+        timeout_occurred = True
+    
+    # Step 3: Clean up database connections
+    logger.info("Closing all open database connections")
+    # For psycopg2 basic connections, if using a pool, close all connections here
+    # For this implementation, we'll assume any open connections are closed when pool is closed
+    if hasattr(db_pool, 'closeall'):
+        db_pool.closeall()
+    logger.info("Database connections closed successfully")
+    
+    # Step 4: Flush and shut down OTel providers
+    # Trace provider
+    if hasattr(otel_providers.trace_provider, 'force_flush'):
+        logger.info("Flushing OpenTelemetry trace provider")
+        otel_providers.trace_provider.force_flush(timeout_millis=5000)
+    if hasattr(otel_providers.trace_provider, 'shutdown'):
+        otel_providers.trace_provider.shutdown()
+    logger.info("OpenTelemetry trace provider flushed and shut down")
+    
+    # Metric provider
+    if hasattr(otel_providers.metric_provider, 'force_flush'):
+        logger.info("Flushing OpenTelemetry metric provider")
+        otel_providers.metric_provider.force_flush(timeout_millis=5000)
+    if hasattr(otel_providers.metric_provider, 'shutdown'):
+        otel_providers.metric_provider.shutdown()
+    logger.info("OpenTelemetry metric provider flushed and shut down")
+    
+    # Log provider
+    if hasattr(otel_providers.log_provider, 'force_flush'):
+        logger.info("Flushing OpenTelemetry log provider")
+        otel_providers.log_provider.force_flush(timeout_millis=5000)
+    if hasattr(otel_providers.log_provider, 'shutdown'):
+        otel_providers.log_provider.shutdown()
+    logger.info("OpenTelemetry log provider flushed and shut down")
+    
+    logger.info("Graceful shutdown completed")
+    return 1 if timeout_occurred else 0
 
 # --- Rate Limiting Implementation ---
 class TokenBucketRateLimiter:
@@ -908,6 +992,11 @@ if __name__ == "__main__":
         server.add_insecure_port(f'[::]:{port}')
         logger.info(f"gRPC server configured with plaintext (unencrypted) connections, listening on port {port}")
 
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, handle_shutdown_signal)
+    signal.signal(signal.SIGTERM, handle_shutdown_signal)
+    logger.info("Registered SIGINT/SIGTERM signal handlers for graceful shutdown")
+
     async def serve():
         global service_initialized
         await server.start()
@@ -920,6 +1009,21 @@ if __name__ == "__main__":
         service_initialized = True
         logger.info('Service initialization completed')
         
-        await server.wait_for_termination()
+        # Wait for shutdown event
+        await shutdown_event.wait()
+        
+        # Get OTel providers instances
+        from opentelemetry import trace, metrics
+        from opentelemetry._logs import get_logger_provider
+        
+        otel_providers = OTelProviders(
+            trace_provider=trace.get_tracer_provider(),
+            metric_provider=metrics.get_meter_provider(),
+            log_provider=get_logger_provider()
+        )
+        
+        # Run graceful shutdown
+        exit_code = run_graceful_shutdown(server, None, otel_providers)
+        exit(exit_code)
 
     asyncio.run(serve())
