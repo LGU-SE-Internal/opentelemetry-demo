@@ -1,6 +1,9 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  annotations:
+    seccomp.security.alpha.kubernetes.io/pod: runtime/default
+    container.apparmor.security.beta.kubernetes.io/jaeger: runtime/default
   name: jaeger
   labels:
     app.kubernetes.io/name: jaeger
@@ -13,6 +16,9 @@ spec:
       app.kubernetes.io/instance: opentelemetry-demo
   template:
     metadata:
+      annotations:
+        seccomp.security.alpha.kubernetes.io/pod: runtime/default
+        container.apparmor.security.beta.kubernetes.io/jaeger: runtime/default
       labels:
         app.kubernetes.io/name: jaeger
         app.kubernetes.io/instance: opentelemetry-demo
@@ -30,20 +36,20 @@ spec:
           args:
             - --storage.type=badger
             - --badger.ephemeral=false
-            - --badger.directory-key=/tmp/jaeger/keys
-            - --badger.directory-value=/tmp/jaeger/values
+            - --badger.directory-key=/data/keys
+            - --badger.directory-value=/data/values
           ports:
             - containerPort: 16686
               name: query
             - containerPort: 14269
               name: health
             - containerPort: 4317
-              name: otlp-grpc
-            - containerPort: 4318
-              name: otlp-http
           securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
+            privileged: false
             capabilities:
               drop:
                 - ALL
@@ -58,17 +64,17 @@ spec:
             httpGet:
               path: /health
               port: 14269
-            initialDelaySeconds: 5
-            periodSeconds: 5
+            initialDelaySeconds: 30
+            periodSeconds: 10
             failureThreshold: 3
           resources:
             requests:
-              cpu: 100m
-              memory: 256Mi
-            limits:
               cpu: 500m
               memory: 512Mi
+            limits:
+              cpu: 2000m
+              memory: 2Gi
           volumeMounts:
             - name: jaeger-storage
-              mountPath: /tmp/jaeger
+              mountPath: /data
               readOnly: false
