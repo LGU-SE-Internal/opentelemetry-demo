@@ -1,6 +1,8 @@
 defmodule FlagdUiWeb.HealthController do
   use FlagdUiWeb, :controller
 
+  alias FlagdUi.FlagdClient
+
   @moduledoc """
   Health check endpoints for Kubernetes liveness and readiness probes.
   """
@@ -9,54 +11,45 @@ defmodule FlagdUiWeb.HealthController do
   Liveness check endpoint: returns 200 OK if Elixir runtime is active.
   """
   def liveness(conn, _params) do
-    # Liveness check just verifies the runtime is up, no external checks
+    timestamp = DateTime.utc_now() |> DateTime.to_iso8601()
+
     conn
     |> put_status(:ok)
     |> json(%{
       status: "ok",
-      timestamp: DateTime.utc_now() |> DateTime.to_iso8601()
+      check: "liveness",
+      timestamp: timestamp
     })
-  rescue
-    _e ->
-      conn
-      |> put_status(:service_unavailable)
-      |> json(%{
-        status: "unhealthy",
-        timestamp: DateTime.utc_now() |> DateTime.to_iso8601(),
-        error: "Runtime failure detected"
-      })
   end
 
   @doc """
-  Readiness check endpoint: returns 200 OK if service is fully initialized and ready to serve traffic.
+  Readiness check endpoint: returns 200 OK if service can connect to flagd backend.
   """
   def readiness(conn, _params) do
-    # Check that all application dependencies are started
-    case Application.ensure_all_started(:flagd_ui) do
-      {:ok, _} ->
+    timestamp = DateTime.utc_now() |> DateTime.to_iso8601()
+
+    case FlagdClient.ping() do
+      :ok ->
         conn
         |> put_status(:ok)
         |> json(%{
           status: "ok",
-          timestamp: DateTime.utc_now() |> DateTime.to_iso8601()
+          check: "readiness",
+          flagd_connection: "healthy",
+          timestamp: timestamp
         })
-      {:error, {app, reason}} ->
+
+      {:error, reason} ->
         conn
         |> put_status(:service_unavailable)
         |> json(%{
-          status: "not_ready",
-          timestamp: DateTime.utc_now() |> DateTime.to_iso8601(),
-          reason: "Application #{app} failed to start: #{inspect(reason)}"
+          status: "unavailable",
+          check: "readiness",
+          flagd_connection: "unhealthy",
+          error: to_string(reason),
+          timestamp: timestamp
         })
     end
-  rescue
-    e ->
-      conn
-      |> put_status(:service_unavailable)
-      |> json(%{
-        status: "not_ready",
-        timestamp: DateTime.utc_now() |> DateTime.to_iso8601(),
-        reason: "Initialization failed: #{inspect(e)}"
-      })
   end
 end
+
