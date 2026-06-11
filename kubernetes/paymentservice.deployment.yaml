@@ -20,6 +20,10 @@ spec:
       labels:
         app.kubernetes.io/name: paymentservice
         app.kubernetes.io/part-of: opentelemetry-demo
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9464"
+        prometheus.io/path: "/metrics"
     spec:
       securityContext:
         runAsNonRoot: true
@@ -31,24 +35,28 @@ spec:
           ports:
             - containerPort: 50051
               name: grpc
+            - containerPort: 9464
+              name: metrics
           livenessProbe:
-            grpc:
+            httpGet:
+              path: /health
               port: 50051
-            initialDelaySeconds: 5
+            initialDelaySeconds: 30
             periodSeconds: 10
             failureThreshold: 3
           readinessProbe:
-            grpc:
+            httpGet:
+              path: /health
               port: 50051
             initialDelaySeconds: 5
-            periodSeconds: 10
-            failureThreshold: 3
+            periodSeconds: 5
+            failureThreshold: 2
           resources:
             requests:
               cpu: 100m
               memory: 128Mi
             limits:
-              cpu: 200m
+              cpu: 500m
               memory: 256Mi
           securityContext:
             runAsNonRoot: true
@@ -64,8 +72,16 @@ spec:
               value: "http://otelcol:4317"
             - name: OTEL_SERVICE_NAME
               value: "paymentservice"
-            - name: PAYMENT_SERVICE_PORT
+            - name: PORT
               value: "50051"
+            - name: TLS_ENABLED
+              value: "false"
+            - name: TLS_CERT_PATH
+              value: ""
+            - name: TLS_KEY_PATH
+              value: ""
+            - name: RATE_LIMIT_RPS
+              value: "100"
           volumeMounts:
             - name: tmp
               mountPath: /tmp
