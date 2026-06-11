@@ -171,102 +171,89 @@ impl Interceptor for RateLimitInterceptor {
 struct ShippingServiceImpl;
 
 lazy_static::lazy_static! {
-    static ref ZIP_CODE_REGEX: Regex = Regex::new(r"^\d{5}(-\d{4})?$").unwrap();
-    static ref TRACKING_ID_REGEX: Regex = Regex::new(r"^OTEL-DEMO-SHIP-[A-F0-9]{12}$").unwrap();
+    static ref ZIP_CODE_REGEX: Regex = Regex::new(r"^[A-Z0-9\s-]{3,10}$").unwrap();
+    static ref TRACKING_ID_REGEX: Regex = Regex::new(r"^SHIP-[A-Z0-9]{12}$").unwrap();
 }
 
 impl ShippingServiceImpl {
     // Validate GetQuoteRequest
     fn validate_get_quote_request(req: &GetQuoteRequest) -> Result<(), Status> {
-        // Validate address is present and all fields are non-empty (AC-4)
-        let address = req.address.as_ref().ok_or_else(|| Status::invalid_argument("shipping address is required"))?;
+        // Validate address is present and all fields are non-empty
+        let address = req.address.as_ref().ok_or_else(|| Status::invalid_argument("Missing required field: address"))?;
         if address.street_address.is_empty() {
-            return Err(Status::invalid_argument("shipping address street cannot be empty"));
+            return Err(Status::invalid_argument("Missing required field: address.street_address"));
         }
         if address.city.is_empty() {
-            return Err(Status::invalid_argument("shipping address city cannot be empty"));
+            return Err(Status::invalid_argument("Missing required field: address.city"));
         }
         if address.state.is_empty() {
-            return Err(Status::invalid_argument("shipping address state cannot be empty"));
+            return Err(Status::invalid_argument("Missing required field: address.state"));
         }
         if address.zip_code.is_empty() {
-            return Err(Status::invalid_argument("shipping address postal code cannot be empty"));
+            return Err(Status::invalid_argument("Missing required field: address.zip_code"));
         }
         if address.country.is_empty() {
-            return Err(Status::invalid_argument("shipping address country cannot be empty"));
+            return Err(Status::invalid_argument("Missing required field: address.country"));
         }
         
-        // Validate shipping distance > 0 (AC-1)
-        if req.shipping_distance <= 0.0 {
-            return Err(Status::invalid_argument("shipping distance must be greater than 0"));
+        // Validate weight value is strictly greater than 0
+        if req.weight <= 0.0 {
+            return Err(Status::invalid_argument("Weight must be greater than 0"));
         }
         
-        // Validate items are not empty
-        if req.items.is_empty() {
-            return Err(Status::invalid_argument("items list cannot be empty"));
-        }
-        
-        for (i, item) in req.items.iter().enumerate() {
-            // Validate item quantity >= 1 (AC-3)
-            if item.quantity < 1 {
-                return Err(Status::invalid_argument(format!(
-                    "item at index {} has invalid quantity {}: must be greater than or equal to 1",
-                    i, item.quantity
-                )));
-            }
-            // Validate item weight > 0 (AC-2)
-            if item.weight <= 0.0 {
-                return Err(Status::invalid_argument(format!(
-                    "item at index {} has invalid weight {}: must be greater than 0",
-                    i, item.weight
-                )));
-            }
-        }
         Ok(())
     }
 
     // Validate ShipOrderRequest
     fn validate_ship_order_request(req: &ShipOrderRequest) -> Result<(), Status> {
+        // Validate items list is non-empty
         if req.items.is_empty() {
-            return Err(Status::invalid_argument("items list cannot be empty"));
+            return Err(Status::invalid_argument("Order items list cannot be empty"));
         }
-        let address = req.address.as_ref().ok_or_else(|| Status::invalid_argument("address is required"))?;
-        // Check all address fields are non-empty
-        if address.street.is_empty() {
-            return Err(Status::invalid_argument("address field street cannot be empty"));
+        
+        // Validate address is present and all fields are non-empty
+        let address = req.address.as_ref().ok_or_else(|| Status::invalid_argument("Address field address cannot be empty"))?;
+        if address.street_address.is_empty() {
+            return Err(Status::invalid_argument("Address field street_address cannot be empty"));
         }
         if address.city.is_empty() {
-            return Err(Status::invalid_argument("address field city cannot be empty"));
+            return Err(Status::invalid_argument("Address field city cannot be empty"));
         }
         if address.state.is_empty() {
-            return Err(Status::invalid_argument("address field state cannot be empty"));
+            return Err(Status::invalid_argument("Address field state cannot be empty"));
         }
         if address.zip_code.is_empty() {
-            return Err(Status::invalid_argument("address field zip_code cannot be empty"));
+            return Err(Status::invalid_argument("Address field zip_code cannot be empty"));
         }
         if address.country.is_empty() {
-            return Err(Status::invalid_argument("address field country cannot be empty"));
+            return Err(Status::invalid_argument("Address field country cannot be empty"));
         }
+        
         // Validate zip code format
         if !ZIP_CODE_REGEX.is_match(&address.zip_code) {
-            return Err(Status::invalid_argument(format!(
-                "invalid zip_code format: {}, expected 5-digit or 5-4 digit US ZIP",
-                address.zip_code
-            )));
+            return Err(Status::invalid_argument("Invalid zip code format"));
         }
+        
+        // Validate each item quantity is strictly greater than 0
+        for item in &req.items {
+            if item.quantity <= 0 {
+                return Err(Status::invalid_argument(format!(
+                    "Item {} has invalid quantity: must be greater than 0",
+                    item.item_id
+                )));
+            }
+        }
+        
         Ok(())
     }
 
     // Validate GetShippingRequest
     fn validate_get_shipping_request(req: &GetShippingRequest) -> Result<(), Status> {
         if req.tracking_id.is_empty() {
-            return Err(Status::invalid_argument("tracking_id cannot be empty"));
+            return Err(Status::invalid_argument("Tracking ID cannot be empty"));
         }
         if !TRACKING_ID_REGEX.is_match(&req.tracking_id) {
-            return Err(Status::invalid_argument(format!(
-                "invalid tracking_id format: {}, expected format OTEL-DEMO-SHIP-<12 hex characters>",
-                req.tracking_id
-            )));
+            return Err(Status::invalid_argument("Invalid tracking ID format: expected format SHIP-XXXXXXXXXXXX"));
         }
         Ok(())
     }
