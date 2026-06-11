@@ -711,7 +711,6 @@ if __name__ == "__main__":
     rec_svc_metrics = init_metrics(meter)
     
     # Set global retry metrics references
-    global retry_attempts_counter, retry_failures_counter
     retry_attempts_counter = rec_svc_metrics["retry_attempts_counter"]
     retry_failures_counter = rec_svc_metrics["retry_failures_counter"]
 
