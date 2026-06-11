@@ -10,17 +10,27 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
+	"golang.org/x/time/rate"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/log/global"
+	"go.opentelemetry.io/otel/metric"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/reflection"
+	"google.golang.org/grpc/status"
 
 	_ "github.com/lib/pq"
 	pb "github.com/open-telemetry/opentelemetry-demo/pb/oteldemo"
@@ -28,6 +38,116 @@ import (
 
 var isShuttingDown atomic.Bool
 var otelLogger = global.GetLoggerProvider().Logger("adservice")
+var rateLimitedRequestsCounter metric.Int64Counter
+
+// clientLimiter holds a rate limiter for each client IP and tracks last seen time for cleanup
+type clientLimiter struct {
+	limiter    *rate.Limiter
+	lastSeen   time.Time
+}
+
+var (
+	limiters = make(map[string]*clientLimiter)
+	mu       sync.Mutex
+	cleanupInterval = 1 * time.Minute
+	limiterTimeout  = 3 * time.Minute
+)
+
+// getClientIP extracts client IP from X-Forwarded-For header or peer address
+func getClientIP(ctx context.Context, peerAddr string) string {
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		if xff := md.Get("X-Forwarded-For"); len(xff) > 0 && xff[0] != "" {
+			ips := strings.Split(xff[0], ",")
+			if len(ips) > 0 {
+				return strings.TrimSpace(ips[0])
+			}
+		}
+	}
+	// Fall back to peer address, remove port
+	if host, _, err := net.SplitHostPort(peerAddr); err == nil {
+		return host
+	}
+	return peerAddr
+}
+
+// getLimiter returns the rate limiter for the given client IP, creating one if needed
+func getLimiter(clientIP string, rps rate.Limit, burst int) *rate.Limiter {
+	mu.Lock()
+	defer mu.Unlock()
+
+	if limiter, exists := limiters[clientIP]; exists {
+		limiter.lastSeen = time.Now()
+		return limiter.limiter
+	}
+
+	limiter := rate.NewLimiter(rps, burst)
+	limiters[clientIP] = &clientLimiter{
+		limiter:  limiter,
+		lastSeen: time.Now(),
+	}
+	return limiter
+}
+
+// startLimiterCleanup periodically removes old limiters that haven't been used recently
+func startLimiterCleanup() {
+	ticker := time.NewTicker(cleanupInterval)
+	go func() {
+		for range ticker.C {
+			mu.Lock()
+			for ip, limiter := range limiters {
+				if time.Since(limiter.lastSeen) > limiterTimeout {
+					delete(limiters, ip)
+				}
+			}
+			mu.Unlock()
+		}
+	}()
+}
+
+// unaryRateLimitInterceptor applies rate limiting to unary gRPC requests
+func unaryRateLimitInterceptor(rps rate.Limit, burst int) grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+		peer, ok := peer.FromContext(ctx)
+		clientIP := "unknown"
+		if ok {
+			clientIP = getClientIP(ctx, peer.Addr.String())
+		}
+
+		limiter := getLimiter(clientIP, rps, burst)
+		if !limiter.Allow() {
+			// Increment rate limited metric
+			if rateLimitedRequestsCounter != nil {
+				rateLimitedRequestsCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("client_ip", clientIP)))
+			}
+			return nil, status.Error(codes.ResourceExhausted, "Rate limit exceeded. Try again later.")
+		}
+
+		return handler(ctx, req)
+	}
+}
+
+// streamRateLimitInterceptor applies rate limiting to streaming gRPC requests
+func streamRateLimitInterceptor(rps rate.Limit, burst int) grpc.StreamServerInterceptor {
+	return func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		ctx := ss.Context()
+		peer, ok := peer.FromContext(ctx)
+		clientIP := "unknown"
+		if ok {
+			clientIP = getClientIP(ctx, peer.Addr.String())
+		}
+
+		limiter := getLimiter(clientIP, rps, burst)
+		if !limiter.Allow() {
+			// Increment rate limited metric
+			if rateLimitedRequestsCounter != nil {
+				rateLimitedRequestsCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("client_ip", clientIP)))
+			}
+			return status.Error(codes.ResourceExhausted, "Rate limit exceeded. Try again later.")
+		}
+
+		return handler(srv, ss)
+	}
+}
 
 // Config holds all service configuration values
 type Config struct {
@@ -43,6 +163,9 @@ type Config struct {
 	DBSSLRootCert string
 	DBSSLCert     string
 	DBSSLKey      string
+	// Rate limit configuration
+	RateLimitRPS   float64
+	RateLimitBurst int
 }
 
 var allowedSSLMode = map[string]bool{
@@ -59,14 +182,16 @@ var allowedSSLMode = map[string]bool{
 // - Any integer port value is <1 or >65535
 func LoadConfig() (Config, error) {
 	cfg := Config{
-		ServicePort: 9555,
-		HealthPort:  8080,
-		DBHost:      "localhost",
-		DBPort:      5432,
-		DBUser:      "postgres",
-		DBPassword:  "postgres",
-		DBName:      "ads",
-		DBSSLMode:   "disable",
+		ServicePort:     9555,
+		HealthPort:      8080,
+		DBHost:          "localhost",
+		DBPort:          5432,
+		DBUser:          "postgres",
+		DBPassword:      "postgres",
+		DBName:          "ads",
+		DBSSLMode:       "disable",
+		RateLimitRPS:    10.0,
+		RateLimitBurst:  20,
 	}
 
 	// Read service port from environment
@@ -91,6 +216,30 @@ func LoadConfig() (Config, error) {
 			return cfg, fmt.Errorf("AD_SERVICE_HEALTH_PORT must be between 1 and 65535, got %d", port)
 		}
 		cfg.HealthPort = port
+	}
+
+	// Read rate limit RPS from environment
+	if rpsStr := os.Getenv("AD_SERVICE_RATE_LIMIT_RPS"); rpsStr != "" {
+		rps, err := strconv.ParseFloat(rpsStr, 64)
+		if err != nil {
+			return cfg, fmt.Errorf("invalid AD_SERVICE_RATE_LIMIT_RPS: %w", err)
+		}
+		if rps <= 0 {
+			return cfg, fmt.Errorf("AD_SERVICE_RATE_LIMIT_RPS must be positive, got %f", rps)
+		}
+		cfg.RateLimitRPS = rps
+	}
+
+	// Read rate limit burst from environment
+	if burstStr := os.Getenv("AD_SERVICE_RATE_LIMIT_BURST"); burstStr != "" {
+		burst, err := strconv.Atoi(burstStr)
+		if err != nil {
+			return cfg, fmt.Errorf("invalid AD_SERVICE_RATE_LIMIT_BURST: %w", err)
+		}
+		if burst <= 0 {
+			return cfg, fmt.Errorf("AD_SERVICE_RATE_LIMIT_BURST must be positive, got %d", burst)
+		}
+		cfg.RateLimitBurst = burst
 	}
 
 	// Read database host from environment
@@ -211,16 +360,32 @@ func readinessHandler(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-func main() {
-		// Load configuration
-		cfg, err := LoadConfig()
-		if err != nil {
-			otelLogger.Emit(context.Background(), log.Record{
-				Severity: log.SeverityError,
-				Body:     log.StringValue(fmt.Sprintf("Failed to load configuration: %v", err)),
-			})
-			os.Exit(1)
-		}
+	// Load configuration
+	cfg, err := LoadConfig()
+	if err != nil {
+		otelLogger.Emit(context.Background(), log.Record{
+			Severity: log.SeverityError,
+			Body:     log.StringValue(fmt.Sprintf("Failed to load configuration: %v", err)),
+		})
+		os.Exit(1)
+	}
+
+	// Initialize rate limit metric
+	meter := global.MeterProvider().Meter("adservice")
+	rateLimitedRequestsCounter, err = meter.Int64Counter(
+		"adservice_rate_limited_requests_total",
+		metric.WithDescription("Total number of requests that were rejected due to rate limiting per client IP"),
+	)
+	if err != nil {
+		otelLogger.Emit(context.Background(), log.Record{
+			Severity: log.SeverityError,
+			Body:     log.StringValue(fmt.Sprintf("Failed to create rate limit metric: %v", err)),
+		})
+		os.Exit(1)
+	}
+
+	// Start limiter cleanup goroutine
+	startLimiterCleanup()
 
 	// Create gRPC health server first so we can set status during DB initialization
 	healthServer := health.NewServer()
@@ -274,9 +439,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Create rate limit interceptors
+	rateLimit := rate.Limit(cfg.RateLimitRPS)
+	burst := cfg.RateLimitBurst
+	unaryRateLimiter := unaryRateLimitInterceptor(rateLimit, burst)
+	streamRateLimiter := streamRateLimitInterceptor(rateLimit, burst)
+
+	// Chain interceptors: rate limit runs first, then otel
 	s := grpc.NewServer(
-		grpc.UnaryInterceptor(otelgrpc.UnaryServerInterceptor()),
-		grpc.StreamInterceptor(otelgrpc.StreamServerInterceptor()),
+		grpc.ChainUnaryInterceptor(
+			unaryRateLimiter,
+			otelgrpc.UnaryServerInterceptor(),
+		),
+		grpc.ChainStreamInterceptor(
+			streamRateLimiter,
+			otelgrpc.StreamServerInterceptor(),
+		),
 	)
 	pb.RegisterAdServiceServer(s, &adService{db: dbConn})
 	reflection.Register(s)
