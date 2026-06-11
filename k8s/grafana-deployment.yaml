@@ -109,7 +109,12 @@ spec:
         configMap:
           name: grafana-config
       - name: grafana-storage
+        {{- if .Values.grafana.persistence.enabled }}
+        persistentVolumeClaim:
+          claimName: {{ .Values.grafana.persistence.existingClaim | default "grafana-storage" }}
+        {{- else }}
         emptyDir: {}
+        {{- end }}
       - name: grafana-provisioning-dashboards
         configMap:
           name: grafana-provisioning-dashboards

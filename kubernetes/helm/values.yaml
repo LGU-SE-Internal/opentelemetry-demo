@@ -6,3 +6,9 @@ jaeger:
       - ReadWriteOnce
   retention:
     ttl: "7d"
+grafana:
+  persistence:
+    enabled: true
+    storageClassName: ""
+    size: 10Gi
+    existingClaim: "grafana-storage"
