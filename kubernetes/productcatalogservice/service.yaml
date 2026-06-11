@@ -1,20 +1,19 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: opentelemetry-demo-productcatalogservice
-  namespace: opentelemetry-demo
+  name: product-catalog
   labels:
-    app.kubernetes.io/name: productcatalogservice
+    app.kubernetes.io/name: product-catalog
     app.kubernetes.io/part-of: opentelemetry-demo
     app.kubernetes.io/component: service
 spec:
   type: ClusterIP
   selector:
-    app.kubernetes.io/name: productcatalogservice
+    app.kubernetes.io/name: product-catalog
   ports:
-  - name: grpc
+  - name: http
     port: 8080
     targetPort: 8080
-  - name: http
+  - name: grpc
     port: 8081
     targetPort: 8081
