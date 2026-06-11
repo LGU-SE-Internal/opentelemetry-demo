@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: kafka-pvc
+  name: kafka-data
   labels:
     app: kafka
 spec:
