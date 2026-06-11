@@ -144,7 +144,8 @@ def track_request_end(exc=None):
 
 # Rate limiting configuration
 def get_rate_limit():
-    return "100 per minute"
+    rate_limit = int(os.environ.get('RATE_LIMIT_REQUESTS_PER_MINUTE', 60))
+    return f"{rate_limit} per minute"
 
 # Initialize rate limiter
 limiter = Limiter(
@@ -164,9 +165,30 @@ limiter = Limiter(
 # Custom rate limit exceeded handler
 @app.errorhandler(429)
 def rate_limit_exceeded_handler(e):
-    retry_after = int(e.description.split()[-2]) if e.description and "Too Many Requests" in e.description else int(os.environ.get('RATE_LIMIT_WINDOW_SECONDS', 60))
+    # Calculate retry after time
+    retry_after = int(e.retry_after) if hasattr(e, 'retry_after') else 60
+    # Get required fields for logging
+    client_ip = get_remote_address()
+    request_endpoint = request.path
+    rate_limit_threshold = int(os.environ.get('RATE_LIMIT_REQUESTS_PER_MINUTE', 60))
+    violation_timestamp = datetime.utcnow().isoformat() + 'Z'
+    request_id = getattr(request, 'req_id', None)
+    
+    # Log violation
+    app.logger.warning(
+        "Rate limit exceeded",
+        extra={
+            'client_ip': client_ip,
+            'request_endpoint': request_endpoint,
+            'rate_limit_threshold': rate_limit_threshold,
+            'violation_timestamp': violation_timestamp,
+            'request_id': request_id
+        }
+    )
+    
     response = jsonify({
-        "error": "Rate limit exceeded",
+        "error": "Too Many Requests",
+        "message": "Rate limit exceeded. Try again later.",
         "retry_after": retry_after
     })
     response.status_code = 429
