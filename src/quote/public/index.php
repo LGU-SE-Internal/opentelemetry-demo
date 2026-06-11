@@ -142,9 +142,18 @@ $app->addBodyParsingMiddleware();
 
 // Rate Limiting Middleware
 $rateLimitStorage = [];
-$app->add(function (Psr\Http\Message\ServerRequestInterface $request, Psr\Http\Server\RequestHandlerInterface $handler) use (&$rateLimitStorage) {
+// Get OTel meter for rate limiting metrics
+$meter = null;
+if (class_exists('\OpenTelemetry\API\Globals') && method_exists('\OpenTelemetry\API\Globals', 'meterProvider')) {
+    try {
+        $meter = \OpenTelemetry\API\Globals::meterProvider()->getMeter('quote-service-rate-limiter');
+    } catch (Exception $e) {
+        // Log error but don't fail startup if metrics aren't available
+        error_log('Failed to initialize rate limiting metrics: ' . $e->getMessage());
+    }
+}
+$app->add(function (Psr\Http\Message\ServerRequestInterface $request, Psr\Http\Server\RequestHandlerInterface $handler) use (&$rateLimitStorage, $meter) {
     $path = $request->getUri()->getPath();
-    $method = $request->getMethod();
     
         // Skip rate limiting for health and readiness endpoints
         $excludedPaths = ['/health', '/healthz', '/ready', '/livez', '/health/liveness', '/health/readiness'];
@@ -152,14 +161,8 @@ $app->add(function (Psr\Http\Message\ServerRequestInterface $request, Psr\Http\S
             return $handler->handle($request);
         }
     
-    // Only apply rate limiting to quote calculation endpoints
-    $quoteEndpoints = ['/getquote', '/getQuote', '/api/calculate-quote'];
-    if (!($method === 'POST' && in_array($path, $quoteEndpoints))) {
-        return $handler->handle($request);
-    }
-    
     // Get rate limit configuration from environment variable
-    $rateLimitRpm = (int)getenv('QUOTE_SERVICE_RATE_LIMIT_RPM') ?: 10;
+    $rateLimitRpm = (int)getenv('QUOTE_SERVICE_RATE_LIMIT') ?: 100;
     
     // If rate limit is set to 0, disable rate limiting entirely
     if ($rateLimitRpm === 0) {
@@ -180,6 +183,7 @@ $app->add(function (Psr\Http\Message\ServerRequestInterface $request, Psr\Http\S
     $currentTime = time();
     $windowStart = floor($currentTime / 60) * 60;
     $windowKey = $clientIp . '|' . $windowStart;
+    $windowReset = $windowStart + 60;
     
     // Initialize counter for current window if not exists
     if (!isset($rateLimitStorage[$windowKey])) {
@@ -193,14 +197,36 @@ $app->add(function (Psr\Http\Message\ServerRequestInterface $request, Psr\Http\S
         }
     }
     
+    $currentCount = $rateLimitStorage[$windowKey];
+    $remaining = $rateLimitRpm - $currentCount - 1;
+    
     // Check if rate limit is exceeded
-    if ($rateLimitStorage[$windowKey] >= $rateLimitRpm) {
-        $retryAfter = $windowStart + 60 - $currentTime;
+    if ($currentCount >= $rateLimitRpm) {
+        $retryAfter = $windowReset - $currentTime;
+        
+        // Emit OTel metric for rate limited request if meter is available
+        if ($meter) {
+            try {
+                $counter = $meter->createCounter(
+                    'quote_service.rate_limited_requests',
+                    'requests',
+                    'Number of requests that were rejected due to rate limiting'
+                );
+                $counter->add(1, [
+                    'client_ip' => $clientIp,
+                    'endpoint' => $path,
+                    'status_code' => 429
+                ]);
+            } catch (Exception $e) {
+                // Ignore metric errors
+                error_log('Failed to emit rate limited metric: ' . $e->getMessage());
+            }
+        }
         
         $response = new Slim\Psr7\Response();
         $payload = json_encode([
             'error' => 'Too Many Requests',
-            'message' => 'You have exceeded the rate limit for quote calculation requests',
+            'message' => 'You have exceeded the allowed request limit. Please try again later.',
             'retry_after' => $retryAfter
         ]);
         $response->getBody()->write($payload);
@@ -208,13 +234,21 @@ $app->add(function (Psr\Http\Message\ServerRequestInterface $request, Psr\Http\S
         return $response
             ->withHeader('Content-Type', 'application/json')
             ->withHeader('Retry-After', (string)$retryAfter)
+            ->withHeader('X-RateLimit-Limit', (string)$rateLimitRpm)
+            ->withHeader('X-RateLimit-Remaining', '0')
+            ->withHeader('X-RateLimit-Reset', (string)$windowReset)
             ->withStatus(429);
     }
     
     // Increment counter and proceed with request
     $rateLimitStorage[$windowKey]++;
     
-    return $handler->handle($request);
+    // Add rate limit headers to successful response
+    $response = $handler->handle($request);
+    return $response
+        ->withHeader('X-RateLimit-Limit', (string)$rateLimitRpm)
+        ->withHeader('X-RateLimit-Remaining', (string)max(0, $remaining))
+        ->withHeader('X-RateLimit-Reset', (string)$windowReset);
 });
 
 // Add Error Middleware
