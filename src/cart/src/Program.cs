@@ -82,6 +82,12 @@ public partial class Program
 
 var builder = WebApplication.CreateBuilder(args);
 
+builder.Logging
+    .AddOpenTelemetry(options => options.AddOtlpExporter())
+    .AddConsole();
+var loggerFactory = builder.Services.BuildServiceProvider().GetRequiredService<ILoggerFactory>();
+var startupLogger = loggerFactory.CreateLogger<Program>();
+
 // TLS Configuration Validation
 bool tlsEnabled = bool.TryParse(builder.Configuration["CART_SERVICE_TLS_ENABLED"], out bool te) && te;
 string tlsCertPath = builder.Configuration["CART_SERVICE_TLS_CERT_PATH"] ?? string.Empty;
@@ -154,7 +160,7 @@ else if (mtlsEnabled)
 string valkeyAddress = builder.Configuration["VALKEY_ADDR"];
 if (string.IsNullOrEmpty(valkeyAddress))
 {
-    Console.WriteLine("VALKEY_ADDR environment variable is required.");
+    startupLogger.LogError("VALKEY_ADDR environment variable is required.");
     Environment.Exit(1);
 }
 
