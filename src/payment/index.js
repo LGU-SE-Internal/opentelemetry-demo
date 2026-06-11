@@ -870,11 +870,16 @@ app = express();
       await new Promise((resolve, reject) => {
         healthClient.check({ service: '' }, (err, response) => {
           if (err) return reject(err);
+          resolve(response);
+        });
+      });
       // Check if payment processor connectivity is healthy
       const healthy = await charge.isHealthy();
       if (!healthy) {
         throw new Error('Payment service is not ready to process payments');
       }
+      res.setHeader('Content-Type', 'application/json');
+      res.status(200).json({ status: 'ready', check: 'readiness' });
       span.setAttributes({
         'http.method': 'GET',
         'http.route': '/health/ready',
@@ -889,7 +894,8 @@ app = express();
       });
     } catch (err) {
       // If any check fails
-      res.status(503).json({ status: 'NOT_READY' });
+      res.setHeader('Content-Type', 'application/json');
+      res.status(503).json({ status: 'NOT_READY', error: err.message });
       
       span.setAttributes({
         'http.method': 'GET',
@@ -898,7 +904,7 @@ app = express();
         'error.message': err.message
       });
       
-      logger.info({
+      logger.error({
         method: 'GET',
         path: '/health/ready',
         status: 503,
