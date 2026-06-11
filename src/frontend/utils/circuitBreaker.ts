@@ -1,4 +1,7 @@
 import CircuitBreaker from 'opossum';
+import { logs } from '@opentelemetry/api-logs';
+
+const logger = logs.getLogger('frontend', '1.0.0');
 
 export enum CircuitState {
   CLOSED = 'CLOSED',
@@ -56,45 +59,37 @@ class CircuitBreakerImpl implements CircuitBreaker {
     }, opossumOptions);
 
     this.breaker.on('open', () => {
-      console.warn(JSON.stringify({
-        level: 'warn',
+      logger.warn('Circuit state changed', {
         event: 'circuit_state_change',
         service: this.config.serviceName,
         old_state: CircuitState.CLOSED,
-        new_state: CircuitState.OPEN,
-        timestamp: new Date().toISOString()
-      }));
+        new_state: CircuitState.OPEN
+      });
     });
 
     this.breaker.on('halfOpen', () => {
-      console.warn(JSON.stringify({
-        level: 'warn',
+      logger.warn('Circuit state changed', {
         event: 'circuit_state_change',
         service: this.config.serviceName,
         old_state: CircuitState.OPEN,
-        new_state: CircuitState.HALF_OPEN,
-        timestamp: new Date().toISOString()
-      }));
+        new_state: CircuitState.HALF_OPEN
+      });
     });
 
     this.breaker.on('close', () => {
-      console.warn(JSON.stringify({
-        level: 'warn',
+      logger.warn('Circuit state changed', {
         event: 'circuit_state_change',
         service: this.config.serviceName,
         old_state: CircuitState.HALF_OPEN,
-        new_state: CircuitState.CLOSED,
-        timestamp: new Date().toISOString()
-      }));
+        new_state: CircuitState.CLOSED
+      });
     });
 
     this.breaker.on('reject', () => {
-      console.info(JSON.stringify({
-        level: 'info',
+      logger.info('Circuit request rejected', {
         event: 'circuit_request_rejected',
-        service: this.config.serviceName,
-        timestamp: new Date().toISOString()
-      }));
+        service: this.config.serviceName
+      });
       throw new CircuitOpenError(this.config.serviceName);
     });
   }
