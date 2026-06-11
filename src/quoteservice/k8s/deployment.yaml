@@ -1,23 +1,27 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: quote-service
+  name: quoteservice
   labels:
-    app.kubernetes.io/name: quote-service
+    app.kubernetes.io/name: quoteservice
     app.kubernetes.io/component: service
     app.kubernetes.io/part-of: opentelemetry-demo
+    app: quoteservice
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: quote-service
+      app.kubernetes.io/name: quoteservice
       app.kubernetes.io/component: service
+      app.kubernetes.io/part-of: opentelemetry-demo
+      app: quoteservice
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: quote-service
+        app.kubernetes.io/name: quoteservice
         app.kubernetes.io/component: service
         app.kubernetes.io/part-of: opentelemetry-demo
+        app: quoteservice
     spec:
       serviceAccountName: quote-service
       securityContext:
@@ -25,8 +29,23 @@ spec:
         runAsUser: 10001
         runAsGroup: 10001
         readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - "ALL"
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - quoteservice
+            topologyKey: kubernetes.io/hostname
       containers:
-      - name: quote-service
+      - name: quoteservice
         image: ${QUOTE_SERVICE_IMAGE}:${QUOTE_SERVICE_TAG}
         ports:
         - containerPort: 8080
@@ -35,7 +54,7 @@ spec:
           name: grpc
         livenessProbe:
           httpGet:
-            path: /health/liveness
+            path: /health
             port: 8080
           initialDelaySeconds: 5
           periodSeconds: 10
@@ -43,10 +62,10 @@ spec:
           failureThreshold: 3
         readinessProbe:
           httpGet:
-            path: /health/readiness
+            path: /health
             port: 8080
-          initialDelaySeconds: 2
-          periodSeconds: 5
+          initialDelaySeconds: 5
+          periodSeconds: 10
           timeoutSeconds: 1
           failureThreshold: 3
         resources:
@@ -54,7 +73,7 @@ spec:
             cpu: "100m"
             memory: "128Mi"
           limits:
-            cpu: "200m"
+            cpu: "500m"
             memory: "256Mi"
         securityContext:
           runAsNonRoot: true
@@ -62,11 +81,7 @@ spec:
           runAsGroup: 10001
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
-          capabilities:
-            drop:
-              - "ALL"
-          seccompProfile:
-            type: RuntimeDefault
+          privileged: false
         env:
           - name: OTEL_SERVICE_NAME
             value: "quote-service"
