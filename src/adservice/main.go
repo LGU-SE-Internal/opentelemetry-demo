@@ -33,7 +33,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	_ "github.com/lib/pq"
-	pb "github.com/open-telemetry/opentelemetry-demo/pb/oteldemo"
+	pb "github.com/open-telemetry/opentelemetry-demo/pb/oteldemo/pb"
 )
 
 var isShuttingDown atomic.Bool
