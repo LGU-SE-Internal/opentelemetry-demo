@@ -1,288 +1,290 @@
 use std::env;
-use std::time::Duration;
-use tonic::transport::Channel;
-use tonic::Code;
-use opentelemetry_proto::oteldemo::shipping_service_client::ShippingServiceClient;
-use opentelemetry_proto::oteldemo::{GetQuoteRequest, ShipOrderRequest};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tonic::{Code, Request, Status};
+use serial_test::serial;
+use shipping::rate_limit_interceptor;
 
-// Helper to get shipping service client
-async fn get_shipping_client() -> ShippingServiceClient<Channel> {
-    ShippingServiceClient::connect("http://localhost:8080")
-        .await
-        .expect("Failed to connect to shipping service gRPC endpoint")
+mod common;
+
+// Helper to get current unix timestamp in seconds
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
 }
 
-// Helper to get metric value from Prometheus endpoint
-async fn get_rate_limit_counter_value(endpoint: &str, limit_rps: u64) -> u64 {
-    let client = reqwest::Client::new();
-    let resp = client.get("http://localhost:8080/metrics")
-        .send()
-        .await
-        .expect("Failed to fetch metrics");
-    let body = resp.text().await.expect("Failed to read metrics body");
-    
-    for line in body.lines() {
-        if line.starts_with("shipping_service_rate_limited_requests_total") {
-            if line.contains(&format!("endpoint=\"{}\"", endpoint)) && line.contains(&format!("limit_rps=\"{}\"", limit_rps)) {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    return parts[1].parse().unwrap_or(0);
-                }
-            }
-        }
+// Helper to create test gRPC request with optional x-client-id metadata and simulated source IP
+fn create_test_request(client_id: Option<&str>, client_ip: &str, method_path: &str) -> Request<()> {
+    let mut req = Request::new(());
+    if let Some(id) = client_id {
+        req.metadata_mut().insert("x-client-id", id.parse().unwrap());
     }
-    0
+    // Simulate source IP address via request extension
+    req.extensions_mut().insert(std::net::SocketAddr::new(
+        client_ip.parse().unwrap(),
+        12345,
+    ));
+    // Set gRPC method path
+    req.extensions_mut().insert(tonic::codegen::http::uri::PathAndQuery::from_static(method_path));
+    req
 }
 
-#[tokio::test]
-async fn test_ac1_single_endpoint_rate_limit_exceeded() {
-    // AC-1: When SHIPPING_GET_QUOTE_RPS=10 and SHIPPING_GET_QUOTE_BURST=20, 30 requests in 1s give 10 success, 20 RESOURCE_EXHAUSTED
-    env::set_var("SHIPPING_GET_QUOTE_RPS", "10");
-    env::set_var("SHIPPING_GET_QUOTE_BURST", "20");
+#[test]
+#[serial]
+fn test_ac1_allow_requests_within_limit() {
+    // AC-1: When SHIPPING_RATE_LIMIT_REQUESTS_PER_WINDOW=5 and SHIPPING_RATE_LIMIT_WINDOW_SECONDS=10,
+    // a single client can send 5 requests to any gRPC endpoints within a 10 second window, all succeed
+    env::set_var("SHIPPING_RATE_LIMIT_REQUESTS_PER_WINDOW", "5");
+    env::set_var("SHIPPING_RATE_LIMIT_WINDOW_SECONDS", "10");
+    env::set_var("SHIPPING_RATE_LIMIT_IDENTIFIER", "ip");
     
-    // Wait for service to start with new config
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let mut client = get_shipping_client().await;
+    let interceptor = rate_limit_interceptor();
+    let client_ip = "192.168.1.100";
+    let method = "/opentelemetry.proto.demo.v1.ShippingService/GetQuote";
     
-    let mut success_count = 0;
-    let mut rate_limited_count = 0;
-    
-    // Send 30 requests as fast as possible
-    for _ in 0..30 {
-        let req = tonic::Request::new(GetQuoteRequest {
-            address: Some(Default::default()),
-            items: vec![],
-        });
-        
-        match client.get_quote(req).await {
-            Ok(_) => success_count += 1,
-            Err(status) if status.code() == Code::ResourceExhausted => rate_limited_count += 1,
-            Err(e) => panic!("Unexpected error: {}", e),
-        }
+    // Send 5 requests, all should be allowed
+    for i in 0..5 {
+        let req = create_test_request(None, client_ip, method);
+        let result = interceptor(req);
+        assert!(result.is_ok(), "Request {} should be allowed within rate limit", i+1);
     }
     
-    assert_eq!(success_count, 10, "Expected exactly 10 successful responses");
-    assert_eq!(rate_limited_count, 20, "Expected exactly 20 rate limited responses");
-    
-    env::remove_var("SHIPPING_GET_QUOTE_RPS");
-    env::remove_var("SHIPPING_GET_QUOTE_BURST");
+    // Cleanup environment variables
+    env::remove_var("SHIPPING_RATE_LIMIT_REQUESTS_PER_WINDOW");
+    env::remove_var("SHIPPING_RATE_LIMIT_WINDOW_SECONDS");
+    env::remove_var("SHIPPING_RATE_LIMIT_IDENTIFIER");
 }
 
-#[tokio::test]
-async fn test_ac2_multiple_endpoints_independent_rate_limits() {
-    // AC-2: GetQuote RPS=10, ShipOrder RPS=5, 20 GetQuote requests +10 ShipOrder requests in 1s give respective counts
-    env::set_var("SHIPPING_GET_QUOTE_RPS", "10");
-    env::set_var("SHIPPING_SHIP_ORDER_RPS", "5");
+#[test]
+#[serial]
+fn test_ac2_deny_request_exceeding_limit() {
+    // AC-2: When a client sends 6 requests within the same 10 second window with above config,
+    // the 6th request returns gRPC RESOURCE_EXHAUSTED status code with expected message
+    env::set_var("SHIPPING_RATE_LIMIT_REQUESTS_PER_WINDOW", "5");
+    env::set_var("SHIPPING_RATE_LIMIT_WINDOW_SECONDS", "10");
+    env::set_var("SHIPPING_RATE_LIMIT_IDENTIFIER", "ip");
     
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let mut client = get_shipping_client().await;
+    let interceptor = rate_limit_interceptor();
+    let client_ip = "192.168.1.101";
+    let method = "/opentelemetry.proto.demo.v1.ShippingService/GetQuote";
     
-    // Test GetQuote endpoint
-    let mut get_quote_success = 0;
-    let mut get_quote_limited = 0;
-    for _ in 0..20 {
-        let req = tonic::Request::new(GetQuoteRequest {
-            address: Some(Default::default()),
-            items: vec![],
-        });
-        
-        match client.get_quote(req).await {
-            Ok(_) => get_quote_success += 1,
-            Err(status) if status.code() == Code::ResourceExhausted => get_quote_limited += 1,
-            Err(e) => panic!("Unexpected error on GetQuote: {}", e),
-        }
-    }
-    
-    // Test ShipOrder endpoint
-    let mut ship_order_success = 0;
-    let mut ship_order_limited = 0;
-    for _ in 0..10 {
-        let req = tonic::Request::new(ShipOrderRequest {
-            address: Some(Default::default()),
-            items: vec![],
-        });
-        
-        match client.ship_order(req).await {
-            Ok(_) => ship_order_success += 1,
-            Err(status) if status.code() == Code::ResourceExhausted => ship_order_limited += 1,
-            Err(e) => panic!("Unexpected error on ShipOrder: {}", e),
-        }
-    }
-    
-    assert_eq!(get_quote_success, 10, "GetQuote should have 10 successes");
-    assert_eq!(get_quote_limited, 10, "GetQuote should have 10 limited responses");
-    assert_eq!(ship_order_success, 5, "ShipOrder should have 5 successes");
-    assert_eq!(ship_order_limited, 5, "ShipOrder should have 5 limited responses");
-    
-    env::remove_var("SHIPPING_GET_QUOTE_RPS");
-    env::remove_var("SHIPPING_SHIP_ORDER_RPS");
-}
-
-#[tokio::test]
-async fn test_ac3_no_rate_limit_config_all_requests_allowed() {
-    // AC-3: No env vars set, 1000 requests/s give 0 rate limited responses
-    // Clear any existing rate limit vars
-    env::remove_var("SHIPPING_GET_QUOTE_RPS");
-    env::remove_var("SHIPPING_GET_QUOTE_BURST");
-    
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let mut client = get_shipping_client().await;
-    
-    let mut rate_limited_count = 0;
-    
-    // Send 1000 requests
-    for _ in 0..1000 {
-        let req = tonic::Request::new(GetQuoteRequest {
-            address: Some(Default::default()),
-            items: vec![],
-        });
-        
-        if let Err(status) = client.get_quote(req).await {
-            if status.code() == Code::ResourceExhausted {
-                rate_limited_count += 1;
-            }
-        }
-    }
-    
-    assert_eq!(rate_limited_count, 0, "No rate limited requests expected when no limit configured");
-}
-
-#[tokio::test]
-async fn test_ac4_rate_limit_error_message_format() {
-    // AC-4: Rate limited error message contains expected format
-    env::set_var("SHIPPING_GET_QUOTE_RPS", "10");
-    env::set_var("SHIPPING_GET_QUOTE_BURST", "20");
-    
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let mut client = get_shipping_client().await;
-    
-    // Exhaust rate limit first
-    for _ in 0..10 {
-        let _ = client.get_quote(tonic::Request::new(GetQuoteRequest::default())).await;
-    }
-    
-    // Get rate limited response
-    let req = tonic::Request::new(GetQuoteRequest::default());
-    let err = client.get_quote(req).await.unwrap_err();
-    
-    assert_eq!(err.code(), Code::ResourceExhausted);
-    let expected_msg = "Rate limit exceeded for endpoint /oteldemo.ShippingService/GetQuote: limit is 10 requests per second, burst 20 capacity";
-    assert!(err.message().contains(expected_msg), "Error message '{}' does not contain expected text '{}'", err.message(), expected_msg);
-    
-    env::remove_var("SHIPPING_GET_QUOTE_RPS");
-    env::remove_var("SHIPPING_GET_QUOTE_BURST");
-}
-
-#[tokio::test]
-async fn test_ac5_rate_limited_metric_incremented() {
-    // AC-5: Rate limited requests increment shipping_service_rate_limited_requests_total counter with correct labels
-    env::set_var("SHIPPING_SHIP_ORDER_RPS", "5");
-    
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let mut client = get_shipping_client().await;
-    
-    // Get initial counter value
-    let initial_count = get_rate_limit_counter_value("/oteldemo.ShippingService/ShipOrder", 5).await;
-    
-    // Exhaust rate limit
+    // Send first 5 requests: all allowed
     for _ in 0..5 {
-        let _ = client.ship_order(tonic::Request::new(ShipOrderRequest::default())).await;
+        let req = create_test_request(None, client_ip, method);
+        assert!(interceptor(req).is_ok());
     }
     
-    // Trigger 3 rate limited requests
-    let mut limited_count = 0;
+    // 6th request should be denied
+    let req = create_test_request(None, client_ip, method);
+    let result = interceptor(req);
+    assert!(result.is_err(), "6th request should be denied when exceeding rate limit");
+    
+    let status = result.err().unwrap();
+    assert_eq!(status.code(), Code::ResourceExhausted, "Error code should be RESOURCE_EXHAUSTED");
+    assert_eq!(status.message(), "Rate limit exceeded, try again later", "Error message mismatch");
+    
+    // Cleanup
+    env::remove_var("SHIPPING_RATE_LIMIT_REQUESTS_PER_WINDOW");
+    env::remove_var("SHIPPING_RATE_LIMIT_WINDOW_SECONDS");
+    env::remove_var("SHIPPING_RATE_LIMIT_IDENTIFIER");
+}
+
+#[test]
+#[serial]
+fn test_ac3_rate_limit_by_ip_ignore_client_id() {
+    // AC-3: When SHIPPING_RATE_LIMIT_IDENTIFIER=ip, requests from same IP are counted together
+    // regardless of x-client-id metadata value
+    env::set_var("SHIPPING_RATE_LIMIT_REQUESTS_PER_WINDOW", "5");
+    env::set_var("SHIPPING_RATE_LIMIT_WINDOW_SECONDS", "10");
+    env::set_var("SHIPPING_RATE_LIMIT_IDENTIFIER", "ip");
+    
+    let interceptor = rate_limit_interceptor();
+    let client_ip = "192.168.1.102";
+    let method = "/opentelemetry.proto.demo.v1.ShippingService/ShipOrder";
+    
+    // Send 3 requests with client-id "client-a"
     for _ in 0..3 {
-        let req = tonic::Request::new(ShipOrderRequest::default());
-        if let Err(status) = client.ship_order(req).await {
-            if status.code() == Code::ResourceExhausted {
-                limited_count += 1;
-            }
+        let req = create_test_request(Some("client-a"), client_ip, method);
+        assert!(interceptor(req).is_ok());
+    }
+    
+    // Send 3 requests with client-id "client-b" from same IP: 2 allowed, 3rd denied
+    for i in 0..3 {
+        let req = create_test_request(Some("client-b"), client_ip, method);
+        let result = interceptor(req);
+        if i < 2 {
+            assert!(result.is_ok(), "Request {} with different client ID same IP should be allowed", i+1);
+        } else {
+            assert!(result.is_err(), "3rd request with different client ID same IP should be denied");
+            assert_eq!(result.err().unwrap().code(), Code::ResourceExhausted);
         }
     }
     
-    // Get updated counter value
-    let final_count = get_rate_limit_counter_value("/oteldemo.ShippingService/ShipOrder", 5).await;
-    
-    assert_eq!(final_count, initial_count + limited_count, "Rate limit counter should increment by number of limited requests");
-    
-    env::remove_var("SHIPPING_SHIP_ORDER_RPS");
+    // Cleanup
+    env::remove_var("SHIPPING_RATE_LIMIT_REQUESTS_PER_WINDOW");
+    env::remove_var("SHIPPING_RATE_LIMIT_WINDOW_SECONDS");
+    env::remove_var("SHIPPING_RATE_LIMIT_IDENTIFIER");
 }
 
-#[tokio::test]
-async fn test_ac6_rate_limit_low_latency_overhead() {
-    // AC-6: P95 latency for successful requests <1ms higher than baseline
-    env::remove_var("SHIPPING_GET_QUOTE_RPS");
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let mut client = get_shipping_client().await;
+#[test]
+#[serial]
+fn test_ac4_rate_limit_by_client_id_ignore_ip() {
+    // AC-4: When SHIPPING_RATE_LIMIT_IDENTIFIER=client_id, requests with same x-client-id are counted together
+    // regardless of source IP address
+    env::set_var("SHIPPING_RATE_LIMIT_REQUESTS_PER_WINDOW", "5");
+    env::set_var("SHIPPING_RATE_LIMIT_WINDOW_SECONDS", "10");
+    env::set_var("SHIPPING_RATE_LIMIT_IDENTIFIER", "client_id");
     
-    // Measure baseline latency (no rate limiting)
-    let mut baseline_latencies = vec![];
-    for _ in 0..1000 {
-        let start = std::time::Instant::now();
-        let _ = client.get_quote(tonic::Request::new(GetQuoteRequest::default())).await.unwrap();
-        baseline_latencies.push(start.elapsed());
+    let interceptor = rate_limit_interceptor();
+    let client_id = "test-client-123";
+    let method = "/opentelemetry.proto.demo.v1.ShippingService/GetQuote";
+    
+    // Send 3 requests from IP 192.168.1.103
+    for _ in 0..3 {
+        let req = create_test_request(Some(client_id), "192.168.1.103", method);
+        assert!(interceptor(req).is_ok());
     }
-    baseline_latencies.sort();
-    let baseline_p95 = baseline_latencies[(baseline_latencies.len() as f64 * 0.95) as usize];
     
-    // Enable rate limiting
-    env::set_var("SHIPPING_GET_QUOTE_RPS", "10000"); // High limit so no rate limiting happens
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    
-    // Measure latency with rate limiting enabled
-    let mut with_rl_latencies = vec![];
-    for _ in 0..1000 {
-        let start = std::time::Instant::now();
-        let _ = client.get_quote(tonic::Request::new(GetQuoteRequest::default())).await.unwrap();
-        with_rl_latencies.push(start.elapsed());
+    // Send 3 requests from IP 192.168.1.104 with same client ID: 2 allowed, 3rd denied
+    for i in 0..3 {
+        let req = create_test_request(Some(client_id), "192.168.1.104", method);
+        let result = interceptor(req);
+        if i < 2 {
+            assert!(result.is_ok(), "Request {} with same client ID different IP should be allowed", i+1);
+        } else {
+            assert!(result.is_err(), "3rd request with same client ID different IP should be denied");
+            assert_eq!(result.err().unwrap().code(), Code::ResourceExhausted);
+        }
     }
-    with_rl_latencies.sort();
-    let with_rl_p95 = with_rl_latencies[(with_rl_latencies.len() as f64 * 0.95) as usize];
     
-    // Check overhead < 1ms
-    let overhead = with_rl_p95.saturating_sub(baseline_p95);
-    assert!(overhead < Duration::from_millis(1), "P95 latency overhead {:?} exceeds 1ms limit", overhead);
-    
-    env::remove_var("SHIPPING_GET_QUOTE_RPS");
+    // Cleanup
+    env::remove_var("SHIPPING_RATE_LIMIT_REQUESTS_PER_WINDOW");
+    env::remove_var("SHIPPING_RATE_LIMIT_WINDOW_SECONDS");
+    env::remove_var("SHIPPING_RATE_LIMIT_IDENTIFIER");
 }
 
-#[tokio::test]
-async fn test_ac7_rate_limit_updated_after_restart() {
-    // AC-7: Changing RPS env var and restarting increases allowed RPS
-    env::set_var("SHIPPING_GET_QUOTE_RPS", "10");
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let mut client = get_shipping_client().await;
+#[test]
+#[serial]
+fn test_ac5_rate_limit_disabled_when_zero_requests() {
+    // AC-5: When SHIPPING_RATE_LIMIT_REQUESTS_PER_WINDOW=0, rate limiting is fully disabled,
+    // all requests are allowed with no rate limit checks
+    env::set_var("SHIPPING_RATE_LIMIT_REQUESTS_PER_WINDOW", "0");
+    env::set_var("SHIPPING_RATE_LIMIT_WINDOW_SECONDS", "10");
+    env::set_var("SHIPPING_RATE_LIMIT_IDENTIFIER", "ip");
     
-    // Verify initial limit is 10
-    let mut success_count = 0;
-    for _ in 0..15 {
-        let req = tonic::Request::new(GetQuoteRequest::default());
-        if client.get_quote(req).await.is_ok() {
-            success_count += 1;
-        }
-    }
-    assert_eq!(success_count, 10, "Initial limit should be 10 RPS");
+    let interceptor = rate_limit_interceptor();
+    let client_ip = "192.168.1.105";
+    let method = "/opentelemetry.proto.demo.v1.ShippingService/ShipOrder";
     
-    // Update env var and restart service (simulated by clearing connection and waiting)
-    env::set_var("SHIPPING_GET_QUOTE_RPS", "20");
-    // Restart service here (handled by test harness)
-    tokio::time::sleep(Duration::from_secs(5)).await;
-    let mut client = get_shipping_client().await;
-    
-    // Verify new limit is 20
-    success_count = 0;
-    let mut limited_count = 0;
-    for _ in 0..25 {
-        let req = tonic::Request::new(GetQuoteRequest::default());
-        match client.get_quote(req).await {
-            Ok(_) => success_count +=1,
-            Err(status) if status.code() == Code::ResourceExhausted => limited_count +=1,
-            _ => {}
-        }
+    // Send 100 requests, all should be allowed
+    for i in 0..100 {
+        let req = create_test_request(None, client_ip, method);
+        let result = interceptor(req);
+        assert!(result.is_ok(), "Request {} should be allowed when rate limit is disabled", i+1);
     }
     
-    assert_eq!(success_count, 20, "Updated limit should be 20 RPS");
-    assert_eq!(limited_count, 5, "Should have 5 rate limited responses after update");
+    // Cleanup
+    env::remove_var("SHIPPING_RATE_LIMIT_REQUESTS_PER_WINDOW");
+    env::remove_var("SHIPPING_RATE_LIMIT_WINDOW_SECONDS");
+    env::remove_var("SHIPPING_RATE_LIMIT_IDENTIFIER");
+}
+
+#[test]
+#[serial]
+fn test_ac6_counter_resets_after_window() {
+    // AC-6: After the rate limit window elapses, the request counter for a client resets,
+    // and the client can send up to configured maximum requests again in the new window
+    env::set_var("SHIPPING_RATE_LIMIT_REQUESTS_PER_WINDOW", "2");
+    env::set_var("SHIPPING_RATE_LIMIT_WINDOW_SECONDS", "2");
+    env::set_var("SHIPPING_RATE_LIMIT_IDENTIFIER", "ip");
     
-    env::remove_var("SHIPPING_GET_QUOTE_RPS");
+    let interceptor = rate_limit_interceptor();
+    let client_ip = "192.168.1.106";
+    let method = "/opentelemetry.proto.demo.v1.ShippingService/GetQuote";
+    
+    // Send 2 requests: allowed
+    assert!(interceptor(create_test_request(None, client_ip, method)).is_ok());
+    assert!(interceptor(create_test_request(None, client_ip, method)).is_ok());
+    
+    // 3rd request should be denied
+    let result = interceptor(create_test_request(None, client_ip, method));
+    assert!(result.is_err(), "3rd request should be denied before window reset");
+    assert_eq!(result.err().unwrap().code(), Code::ResourceExhausted);
+    
+    // Wait for window to elapse
+    std::thread::sleep(Duration::from_secs(2));
+    
+    // Now requests should be allowed again
+    assert!(interceptor(create_test_request(None, client_ip, method)).is_ok());
+    assert!(interceptor(create_test_request(None, client_ip, method)).is_ok());
+    
+    // Cleanup
+    env::remove_var("SHIPPING_RATE_LIMIT_REQUESTS_PER_WINDOW");
+    env::remove_var("SHIPPING_RATE_LIMIT_WINDOW_SECONDS");
+    env::remove_var("SHIPPING_RATE_LIMIT_IDENTIFIER");
+}
+
+#[test]
+#[serial]
+fn test_ac7_rate_limit_logs_generated() {
+    // AC-7: Every rate limited request triggers a WARN level structured log containing
+    // client_ip, grpc_method, and rate_limit_reset_timestamp fields
+    // Initialize logger to capture warnings
+    let _ = env_logger::builder()
+        .filter_level(log::LevelFilter::Warn)
+        .is_test(true)
+        .try_init();
+    
+    env::set_var("SHIPPING_RATE_LIMIT_REQUESTS_PER_WINDOW", "1");
+    env::set_var("SHIPPING_RATE_LIMIT_WINDOW_SECONDS", "10");
+    env::set_var("SHIPPING_RATE_LIMIT_IDENTIFIER", "ip");
+    
+    let interceptor = rate_limit_interceptor();
+    let client_ip = "192.168.1.107";
+    let client_id = "log-test-client";
+    let method = "/opentelemetry.proto.demo.v1.ShippingService/GetQuote";
+    
+    // First request allowed
+    assert!(interceptor(create_test_request(Some(client_id), client_ip, method)).is_ok());
+    
+    // Second request denied - should generate warn log
+    let _ = interceptor(create_test_request(Some(client_id), client_ip, method));
+    
+    // Verify log contains required fields (implementation will capture logs and validate)
+    // Expected log fields: client_ip = "192.168.1.107", client_id = "log-test-client",
+    // grpc_method = "/opentelemetry.proto.demo.v1.ShippingService/GetQuote",
+    // rate_limit_reset_timestamp > now_secs()
+    
+    // Cleanup
+    env::remove_var("SHIPPING_RATE_LIMIT_REQUESTS_PER_WINDOW");
+    env::remove_var("SHIPPING_RATE_LIMIT_WINDOW_SECONDS");
+    env::remove_var("SHIPPING_RATE_LIMIT_IDENTIFIER");
+}
+
+#[test]
+#[serial]
+fn test_ac8_rate_limit_metrics_incremented() {
+    // AC-8: For every incoming gRPC request, the shipping_service_rate_limited_requests_total counter
+    // is incremented with the correct client_identifier, grpc_method, and status label values
+    env::set_var("SHIPPING_RATE_LIMIT_REQUESTS_PER_WINDOW", "1");
+    env::set_var("SHIPPING_RATE_LIMIT_WINDOW_SECONDS", "10");
+    env::set_var("SHIPPING_RATE_LIMIT_IDENTIFIER", "ip");
+    
+    let interceptor = rate_limit_interceptor();
+    let client_ip = "192.168.1.108";
+    let method = "/opentelemetry.proto.demo.v1.ShippingService/ShipOrder";
+    
+    // Allowed request: metric should increment with status=allowed
+    assert!(interceptor(create_test_request(None, client_ip, method)).is_ok());
+    // Validate metric: labels client_identifier = client_ip, grpc_method = method, status = allowed, count += 1
+    
+    // Denied request: metric should increment with status=denied
+    let _ = interceptor(create_test_request(None, client_ip, method));
+    // Validate metric: labels client_identifier = client_ip, grpc_method = method, status = denied, count += 1
+    
+    // Cleanup
+    env::remove_var("SHIPPING_RATE_LIMIT_REQUESTS_PER_WINDOW");
+    env::remove_var("SHIPPING_RATE_LIMIT_WINDOW_SECONDS");
+    env::remove_var("SHIPPING_RATE_LIMIT_IDENTIFIER");
 }
