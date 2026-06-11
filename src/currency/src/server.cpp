@@ -597,7 +597,7 @@ std::atomic<bool> g_shutdown_timed_out{false};
 // Initiates graceful shutdown sequence:
 // 1. Logs shutdown start event
 // 2. Stops accepting new gRPC connections
-// 3. Waits up to 10s for in-flight requests to complete
+// 3. Waits up to configured timeout for in-flight requests to complete
 // 4. Logs shutdown completion event and exits
 void PerformGracefulShutdown(std::shared_ptr<grpc::Server> server) {
   if (g_shutdown_initiated.exchange(true)) {
@@ -605,7 +605,7 @@ void PerformGracefulShutdown(std::shared_ptr<grpc::Server> server) {
     return;
   }
 
-  logger->Info("Graceful shutdown initiated, waiting up to 10s for in-flight requests to complete");
+  logger->Info("Graceful shutdown initiated, waiting up to " + std::to_string(g_shutdown_timeout.count()) + "s for in-flight requests to complete");
 
   // Stop health checks first
   g_is_healthy = false;
@@ -619,16 +619,16 @@ void PerformGracefulShutdown(std::shared_ptr<grpc::Server> server) {
     return;
   }
 
-  // Initiate gRPC shutdown with 10s timeout
-  gpr_timespec timeout = {10, 0, GPR_TIMESPAN};
+  // Initiate gRPC shutdown with configured timeout
+  gpr_timespec timeout = {g_shutdown_timeout.count(), 0, GPR_TIMESPAN};
   auto shutdown_start = std::chrono::steady_clock::now();
   server->Shutdown(timeout);
 
   // Check if shutdown completed before timeout
   auto shutdown_duration = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - shutdown_start);
-  if (shutdown_duration.count() >= 10) {
+  if (shutdown_duration.count() >= g_shutdown_timeout.count()) {
     g_shutdown_timed_out = true;
-    logger->Warning("Graceful shutdown timed out after 10s, terminating with pending requests");
+    logger->Warning("Graceful shutdown timed out after " + std::to_string(g_shutdown_timeout.count()) + "s, terminating with pending requests");
   } else {
     logger->Info("Graceful shutdown completed, all in-flight requests processed");
   }
@@ -763,19 +763,10 @@ void RunServer(uint16_t port)
   bool shutdown_clean = WaitForShutdownComplete(g_shutdown_timeout);
   
   logger->Info("Shutdown completed, exiting");
-  // Determine exit code
-  if (shutdown_clean) {
-    exit(0);
-  } else {
-    if (g_received_signal == SIGINT) {
-      exit(130);
-    } else if (g_received_signal == SIGTERM) {
-      exit(143);
-    } else {
-      exit(1);
-    }
-  }
-}
+  // Determine exit code according to requirements:
+  // - 0 if graceful shutdown completed successfully within grace period
+  // - 1 if forcefully terminated after grace period timeout
+  exit(shutdown_clean ? 0 : 1);
 }
 
 int main(int argc, char **argv) {
@@ -827,19 +818,25 @@ int main(int argc, char **argv) {
   }
 
   // Parse shutdown timeout configuration
-  const char* shutdown_timeout_env = std::getenv("CURRENCY_SERVICE_SHUTDOWN_TIMEOUT_SEC");
+  const char* shutdown_timeout_env = std::getenv("GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS");
   if (shutdown_timeout_env != nullptr && strlen(shutdown_timeout_env) > 0) {
     try {
       int timeout_val = std::stoi(shutdown_timeout_env);
-      if (timeout_val <= 0) {
-        logger->Warning("Invalid CURRENCY_SERVICE_SHUTDOWN_TIMEOUT_SEC value: " + std::string(shutdown_timeout_env) + ", using default 10s");
+      if (timeout_val < 0) {
+        logger->Warning("Invalid GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS value: " + std::string(shutdown_timeout_env) + ", using default 30s");
+        g_shutdown_timeout = std::chrono::seconds(30);
       } else {
         g_shutdown_timeout = std::chrono::seconds(timeout_val);
         logger->Info("Using configured shutdown timeout: " + std::to_string(timeout_val) + "s");
       }
     } catch (const std::exception& e) {
-      logger->Warning("Invalid CURRENCY_SERVICE_SHUTDOWN_TIMEOUT_SEC value: " + std::string(shutdown_timeout_env) + " is not a valid integer, using default 10s");
+      logger->Warning("Invalid GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS value: " + std::string(shutdown_timeout_env) + " is not a valid integer, using default 30s");
+      g_shutdown_timeout = std::chrono::seconds(30);
     }
+  } else {
+    // Default grace period is 30 seconds
+    g_shutdown_timeout = std::chrono::seconds(30);
+    logger->Info("Using default shutdown timeout: 30s");
   }
 
   // Parse rate limit configuration
