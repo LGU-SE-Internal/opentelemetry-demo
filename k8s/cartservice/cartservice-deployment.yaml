@@ -69,9 +69,40 @@ spec:
           value: ""
         - name: MTLS_CA_CERT_PATH
           value: ""
+        - name: CART_VALKEY_TLS_ENABLED
+          value: ""
+        - name: CART_VALKEY_TLS_INSECURE_SKIP_VERIFY
+          value: ""
+        - name: CART_VALKEY_CA_CERT_PATH
+          value: ""
+        - name: CART_VALKEY_CLIENT_CERT_PATH
+          value: ""
+        - name: CART_VALKEY_CLIENT_KEY_PATH
+          value: ""
         volumeMounts:
         - name: tmp
           mountPath: /tmp
+        - name: valkey-ca-cert
+          mountPath: /certs/valkey/ca
+          readOnly: true
+        - name: valkey-client-cert
+          mountPath: /certs/valkey/client
+          readOnly: true
+        - name: valkey-client-key
+          mountPath: /certs/valkey/client
+          readOnly: true
       volumes:
       - name: tmp
         emptyDir: {}
+      - name: valkey-ca-cert
+        secret:
+          secretName: valkey-ca-cert
+          optional: true
+      - name: valkey-client-cert
+        secret:
+          secretName: valkey-client-cert
+          optional: true
+      - name: valkey-client-key
+        secret:
+          secretName: valkey-client-key
+          optional: true
