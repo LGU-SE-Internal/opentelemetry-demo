@@ -19,10 +19,6 @@ class RateLimitServerInterceptor : ServerInterceptor {
     private val rateLimitDisabled: Boolean = rateLimitRps <= 0
     private val ipBuckets: ConcurrentHashMap<String, Bucket> = ConcurrentHashMap()
 
-    private val rateLimitHitsCounter: Counter = Counter.builder("fraud_detection_rate_limit_hits_total")
-        .description("Total number of requests rejected due to rate limiting")
-        .register(Metrics.globalRegistry)
-
     override fun <ReqT : Any?, RespT : Any?> interceptCall(
         call: ServerCall<ReqT, RespT>,
         headers: Metadata,
@@ -45,9 +41,11 @@ class RateLimitServerInterceptor : ServerInterceptor {
         }
 
         // Increment metrics
-        rateLimitHitsCounter
+        Counter.builder("fraud_detection_rate_limit_hits_total")
+            .description("Total number of requests rejected due to rate limiting")
             .tag("client_ip", clientIp)
             .tag("endpoint", methodName)
+            .register(Metrics.globalRegistry)
             .increment()
 
         // Reject the call
