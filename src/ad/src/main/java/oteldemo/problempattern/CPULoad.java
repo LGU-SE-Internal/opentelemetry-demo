@@ -10,8 +10,8 @@ import java.util.Optional;
 
 import io.grpc.ManagedChannelBuilder;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.slf4j.Logger;
 
 /**
  * This class is designed to simulate a high CPU load scenario.
@@ -19,7 +19,7 @@ import org.apache.logging.log4j.Logger;
  * perform CPU-intensive calculations.
  */
 public class CPULoad {
-    private static final Logger logger = LogManager.getLogger(CPULoad.class.getName());
+    private static final Logger logger = LoggerFactory.getLogger(CPULoad.class.getName());
     private static final int THREAD_COUNT = 4;
     private boolean running = false;
     private final List<Logarithmizer> runningWorkers = new ArrayList<>();

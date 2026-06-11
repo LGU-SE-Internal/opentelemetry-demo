@@ -49,9 +49,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
-import org.apache.logging.log4j.Level;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import oteldemo.Demo.Ad;
 import oteldemo.Demo.AdRequest;
 import oteldemo.Demo.AdResponse;
@@ -147,7 +146,7 @@ public final class AdService {
         });
   }
 
-  private static final Logger logger = LogManager.getLogger(AdService.class);
+  private static final Logger logger = LoggerFactory.getLogger(AdService.class);
 
   @SuppressWarnings("FieldCanBeLocal")
   private static final int MAX_ADS_TO_SERVE = 2;
@@ -404,11 +403,9 @@ public final class AdService {
         .addShutdownHook(
             new Thread(
                 () -> {
-                  // Use stderr here since the logger may have been reset by its JVM shutdown hook.
-                  System.err.println(
-                      "*** shutting down gRPC ads server since JVM is shutting down");
+                  logger.info("*** shutting down gRPC ads server since JVM is shutting down");
                   AdService.this.stop();
-                  System.err.println("*** server shut down");
+                  logger.info("*** server shut down");
                 }));
     healthMgr.setStatus("", ServingStatus.SERVING);
     // Mark service as ready after all initialization is complete
@@ -603,7 +600,7 @@ public final class AdService {
         span.addEvent(
             "Error", Attributes.of(AttributeKey.stringKey("exception.message"), e.getMessage()));
         span.setStatus(StatusCode.ERROR);
-        logger.log(Level.WARN, "GetAds Failed with status {}", e.getStatus());
+        logger.warn("GetAds Failed with status {}", e.getStatus());
         responseObserver.onError(e);
       } finally {
         int after = service.inFlightRequests.decrementAndGet();
