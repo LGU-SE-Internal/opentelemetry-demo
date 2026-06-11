@@ -44,6 +44,16 @@ enum FlagdError {
 
 struct FlagdRetryPolicy {
     flag_key: String,
+    attempt: std::sync::Arc<std::sync::atomic::AtomicU32>,
+}
+
+impl Clone for FlagdRetryPolicy {
+    fn clone(&self) -> Self {
+        Self {
+            flag_key: self.flag_key.clone(),
+            attempt: self.attempt.clone(),
+        }
+    }
 }
 
 impl<E> RetryPolicy<(), FlagdError, E> for FlagdRetryPolicy {
@@ -56,8 +66,7 @@ impl<E> RetryPolicy<(), FlagdError, E> for FlagdRetryPolicy {
     ) -> Option<Self::Future> {
         match result {
             Ok(FlagdError::Transient) => {
-                static ATTEMPT_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-                let attempt = ATTEMPT_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                let attempt = self.attempt.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                 warn!(
                     flag_key = %self.flag_key,
                     service_name = "shipping",
@@ -94,7 +103,10 @@ impl ResiliencyLayer {
             jitter: 0.1,
         };
 
-        let retry_policy = FlagdRetryPolicy { flag_key: String::new() };
+        let retry_policy = FlagdRetryPolicy {
+            flag_key: String::new(),
+            attempt: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0))
+        };
         let retry_layer = tower_retry::RetryLayer::new(retry_policy)
             .max_attempts(*FLAGD_RETRY_MAX_ATTEMPTS)
             .backoff(ExponentialBackoff::new(backoff_config));
@@ -176,7 +188,10 @@ pub async fn get_feature_flag<T: Clone + open_feature::value::ValueVariant>(flag
     let default_cloned = default_value.clone();
 
     // Update retry policy with current flag key
-    layer.retry_layer = tower_retry::RetryLayer::new(FlagdRetryPolicy { flag_key: flag_key_owned.clone() })
+    layer.retry_layer = tower_retry::RetryLayer::new(FlagdRetryPolicy {
+        flag_key: flag_key_owned.clone(),
+        attempt: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0))
+    })
         .max_attempts(*FLAGD_RETRY_MAX_ATTEMPTS)
         .backoff(ExponentialBackoff::new(ExponentialBackoffConfig {
             initial_delay: Duration::from_millis(*FLAGD_RETRY_INITIAL_BACKOFF_MS),
@@ -198,18 +213,24 @@ pub async fn get_feature_flag<T: Clone + open_feature::value::ValueVariant>(flag
         return default_value;
     }
 
-    // Attempt to get flag from Flagd
-    match layer.flagd_client.get_value(
-        &flag_key_owned,
-        default_cloned,
-        EvaluationContext::default(),
-    ).await {
+    // Attempt to get flag from Flagd with retry
+    let retry_svc = ServiceBuilder::new()
+        .layer(layer.retry_layer.clone())
+        .service(|_| async {
+            layer.flagd_client.get_value(
+                &flag_key_owned,
+                default_cloned.clone(),
+                EvaluationContext::default(),
+            ).await.map_err(|e| FlagdError::Transient)
+        });
+    
+    match retry_svc.oneshot(()).await {
         Ok(val) => {
             // Success, record success in circuit breaker
             layer.call_circuit_breaker(flag_key, true).await;
             return val;
         }
-        Err(e) => {
+        Err(_) => {
             // Record failure in circuit breaker
             layer.call_circuit_breaker(flag_key, false).await;
             
@@ -219,8 +240,7 @@ pub async fn get_feature_flag<T: Clone + open_feature::value::ValueVariant>(flag
                 flagd_endpoint = *FLAGD_ENDPOINT,
                 event = "flagd_fallback_to_default",
                 reason = "flagd_unreachable",
-                error = %e,
-                "Falling back to default feature flag value"
+                "Falling back to default feature flag value after all retries failed"
             );
         }
     }
