@@ -170,11 +170,11 @@ type RetriableKafkaError struct {
 	Err error
 }
 
-func (e *RetriableKafkaError) Error() string {
+func (e RetriableKafkaError) Error() string {
 	return fmt.Sprintf("retriable kafka error: %v", e.Err)
 }
 
-func (e *RetriableKafkaError) Unwrap() error {
+func (e RetriableKafkaError) Unwrap() error {
 	return e.Err
 }
 
@@ -183,11 +183,11 @@ type NonRetriableKafkaError struct {
 	Err error
 }
 
-func (e *NonRetriableKafkaError) Error() string {
+func (e NonRetriableKafkaError) Error() string {
 	return fmt.Sprintf("non-retriable kafka error: %v", e.Err)
 }
 
-func (e *NonRetriableKafkaError) Unwrap() error {
+func (e NonRetriableKafkaError) Unwrap() error {
 	return e.Err
 }
 
@@ -320,8 +320,8 @@ type KafkaConsumer struct {
 	retryInitialBackoff time.Duration
 	retryMaxBackoff     time.Duration
 	dlqTopic            string
-	messageProcessor    func(*sarama.ConsumerMessage) error // For testing
-	dlqSender           func(*sarama.ConsumerMessage, error) error // For testing
+		messageProcessor    func(context.Context, *sarama.ConsumerMessage) error // For testing
+		dlqSender           func(*sarama.ConsumerMessage, error) error // For testing
 }
 
 // KafkaConsumerConfig holds all configuration parameters for Kafka consumer with retry
@@ -545,7 +545,7 @@ func NewKafkaConsumer(ctx context.Context, brokers []string, topics []string, co
 }
 
 // ProcessMessageWithRetry processes a single Kafka message with retry logic for retriable errors
-func (c *KafkaConsumer) ProcessMessageWithRetry(msg *sarama.ConsumerMessage) error {
+func (c *KafkaConsumer) ProcessMessageWithRetry(ctx context.Context, msg *sarama.ConsumerMessage) error {
 	// Check if shutdown is in progress first
 	if c.shutdownInProgress.Load() {
 		return errors.New("shutdown in progress, skipping message processing")
@@ -562,13 +562,13 @@ func (c *KafkaConsumer) ProcessMessageWithRetry(msg *sarama.ConsumerMessage) err
 		if retryCount >= c.retryMaxAttempts {
 			return backoff.Permanent(errors.New("max processing attempts exceeded"))
 		}
-		if c.shutdownInProgress.Load() {
+		if c.shutdownInProgress.Load() || ctx.Err() != nil {
 			return backoff.Permanent(errors.New("shutdown during processing retry"))
 		}
 
 		// Process the message using custom processor if set, else default logic
 		if c.messageProcessor != nil {
-			processErr = c.messageProcessor(msg)
+			processErr = c.messageProcessor(ctx, msg)
 		} else {
 			// Default processing logic
 			processErr = nil
@@ -587,7 +587,7 @@ func (c *KafkaConsumer) ProcessMessageWithRetry(msg *sarama.ConsumerMessage) err
 		}
 		return nil
 	}, bo, func(err error, duration time.Duration) {
-		globalLogger.Warn(context.Background(), "Message processing failed, retrying",
+		globalLogger.Warn(ctx, "Message processing failed, retrying",
 			zap.Int("attempt", retryCount),
 			zap.Duration("next_retry_in", duration),
 			zap.String("topic", msg.Topic),
@@ -626,7 +626,7 @@ func (c *KafkaConsumer) ProcessMessageWithRetry(msg *sarama.ConsumerMessage) err
 }
 
 // SetMessageProcessor sets a custom message processor for testing
-func (c *KafkaConsumer) SetMessageProcessor(processor func(*sarama.ConsumerMessage) error) {
+func (c *KafkaConsumer) SetMessageProcessor(processor func(context.Context, *sarama.ConsumerMessage) error) {
 	c.messageProcessor = processor
 }
 
@@ -636,10 +636,11 @@ func (c *KafkaConsumer) SetDLQSender(sender func(*sarama.ConsumerMessage, error)
 }
 
 // StartConsumption starts consuming messages from the configured topics (for testing)
-func (c *KafkaConsumer) StartConsumption(ctx context.Context) {
+func (c *KafkaConsumer) StartConsumption(ctx context.Context) error {
 	// In real implementation, this would start partition consumers and process messages
 	// For testing, this is a no-op that returns when context is canceled
 	<-ctx.Done()
+	return nil
 }
 
 // sendToDLQ writes a permanently failed message to the configured dead-letter queue
