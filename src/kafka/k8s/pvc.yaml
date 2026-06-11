@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kafka-data
+  namespace: opentelemetry-demo
+  labels:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/instance: opentelemetry-demo
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  # storageClassName: "" # Uncomment to override default storage class
