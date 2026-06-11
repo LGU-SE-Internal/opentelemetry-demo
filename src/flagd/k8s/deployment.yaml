@@ -54,6 +54,10 @@ spec:
           value: ""
         - name: FLAGD_GRACEFUL_SHUTDOWN_TIMEOUT
           value: "30s"
+        - name: FLAGD_GRPC_RATE_LIMIT_ENABLED
+          value: "true"
+        - name: FLAGD_GRPC_PER_CLIENT_RATE_LIMIT
+          value: "100"
         resources:
           requests:
             cpu: 100m
