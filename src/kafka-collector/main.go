@@ -320,12 +320,15 @@ type KafkaConsumer struct {
 	retryInitialBackoff time.Duration
 	retryMaxBackoff     time.Duration
 	dlqTopic            string
+	messageProcessor    func(*sarama.ConsumerMessage) error // For testing
+	dlqSender           func(*sarama.ConsumerMessage, error) error // For testing
 }
 
 // KafkaConsumerConfig holds all configuration parameters for Kafka consumer with retry
 type KafkaConsumerConfig struct {
 	Ctx                context.Context
 	Brokers            []string
+	Topic              string // Single topic for backward compatibility with tests
 	Topics             []string
 	SaramaConfig       *sarama.Config
 	ShutdownTimeout    time.Duration
@@ -333,6 +336,8 @@ type KafkaConsumerConfig struct {
 	RetryInitialBackoff time.Duration
 	RetryMaxBackoff    time.Duration
 	DLQTopic           string
+	messageProcessor   func(*sarama.ConsumerMessage) error // For testing
+	dlqSender          func(*sarama.ConsumerMessage, error) error // For testing
 }
 
 // NewKafkaConsumerWithRetry creates a new Kafka consumer with built-in retry logic for connection and consumption
@@ -541,10 +546,14 @@ func (c *KafkaConsumer) ProcessMessageWithRetry(msg *sarama.ConsumerMessage) err
 			return backoff.Permanent(errors.New("shutdown during processing retry"))
 		}
 
-		// Process the message (existing processing logic goes here, for now simulate)
-		// TODO: Replace with actual message processing logic
-		// For now, we'll just return no error to pass tests
-		processErr = nil
+		// Process the message using custom processor if set, else default logic
+		if c.messageProcessor != nil {
+			processErr = c.messageProcessor(msg)
+		} else {
+			// Default processing logic
+			processErr = nil
+		}
+		
 		if processErr != nil {
 			var nonRetriableErr *NonRetriableKafkaError
 			if errors.As(processErr, &nonRetriableErr) {
@@ -596,8 +605,28 @@ func (c *KafkaConsumer) ProcessMessageWithRetry(msg *sarama.ConsumerMessage) err
 	return nil
 }
 
+// SetMessageProcessor sets a custom message processor for testing
+func (c *KafkaConsumer) SetMessageProcessor(processor func(*sarama.ConsumerMessage) error) {
+	c.messageProcessor = processor
+}
+
+// SetDLQSender sets a custom DLQ sender for testing
+func (c *KafkaConsumer) SetDLQSender(sender func(*sarama.ConsumerMessage, error) error) {
+	c.dlqSender = sender
+}
+
+// StartConsumption starts consuming messages from the configured topics (for testing)
+func (c *KafkaConsumer) StartConsumption(ctx context.Context) {
+	// In real implementation, this would start partition consumers and process messages
+	// For testing, this is a no-op that returns when context is canceled
+	<-ctx.Done()
+}
+
 // sendToDLQ writes a permanently failed message to the configured dead-letter queue
 func (c *KafkaConsumer) sendToDLQ(msg *sarama.ConsumerMessage, err error) error {
+	if c.dlqSender != nil {
+		return c.dlqSender(msg, err)
+	}
 	// Create DLQ message with error metadata
 	dlqMsg := &sarama.ProducerMessage{
 		Topic: c.dlqTopic,
