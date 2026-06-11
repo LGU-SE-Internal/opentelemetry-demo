@@ -1,9 +1,6 @@
 import { status as GrpcStatus } from '@grpc/grpc-js';
-const logger = {
-  info: jest.fn(),
-  warn: jest.fn(),
-  error: jest.fn()
-};
+// Replace mock logger with actual Next.js logger
+import { logger } from '../logging';
 const opossumModule = require('opossum');
 const CircuitBreaker = opossumModule.default || opossumModule;
 import { metrics } from '@opentelemetry/api';
