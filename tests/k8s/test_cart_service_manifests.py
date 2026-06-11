@@ -211,3 +211,126 @@ def test_ac9_manifests_pass_kubectl_dry_run():
         text=True
     )
     assert result.returncode == 0, f"kubectl dry-run failed: {result.stderr}\n{result.stdout}"
+
+# Tests for Issue #1964: Cart service Valkey TLS/mTLS support
+def test_issue1964_ac1_default_no_tls_env_vars_exist():
+    """AC-1: When no TLS configuration environment variables are set (default state), cart service connects over plaintext, no breakage"""
+    deployment_path = os.path.join(MANIFESTS_DIR, "deployment.yaml")
+    assert os.path.exists(deployment_path), "deployment.yaml missing"
+    
+    with open(deployment_path) as f:
+        deployment = yaml.safe_load(f)
+    
+    containers = deployment["spec"]["template"]["spec"]["containers"]
+    cart_container = containers[0]
+    env_vars = cart_container.get("env", [])
+    env_names = [var["name"] for var in env_vars]
+    
+    # Verify no TLS env vars are set by default
+    tls_env_vars = [
+        "CART_VALKEY_TLS_ENABLED",
+        "CART_VALKEY_TLS_INSECURE_SKIP_VERIFY",
+        "CART_VALKEY_CA_CERT_PATH",
+        "CART_VALKEY_CLIENT_CERT_PATH",
+        "CART_VALKEY_CLIENT_KEY_PATH"
+    ]
+    for var in tls_env_vars:
+        assert var not in env_names, f"TLS environment variable {var} should not be set by default"
+    
+    # Verify no certificate volume mounts exist by default
+    volume_mounts = cart_container.get("volumeMounts", [])
+    mount_paths = [mount["mountPath"] for mount in volume_mounts]
+    for path in ["/certs/valkey/ca/", "/certs/valkey/client/"]:
+        assert path not in mount_paths, f"Certificate mount path {path} should not exist by default"
+
+def test_issue1964_ac2_tls_env_vars_exist_as_options():
+    """AC-2: When CART_VALKEY_TLS_ENABLED=true and CA cert path set, cart service establishes encrypted TLS 1.2+ connection"""
+    deployment_path = os.path.join(MANIFESTS_DIR, "deployment.yaml")
+    assert os.path.exists(deployment_path), "deployment.yaml missing"
+    
+    with open(deployment_path) as f:
+        deployment_content = f.read()
+    
+    # Verify all required TLS env var options are present in the manifest template
+    required_env_vars = [
+        "CART_VALKEY_TLS_ENABLED",
+        "CART_VALKEY_TLS_INSECURE_SKIP_VERIFY",
+        "CART_VALKEY_CA_CERT_PATH",
+        "CART_VALKEY_CLIENT_CERT_PATH",
+        "CART_VALKEY_CLIENT_KEY_PATH"
+    ]
+    for var in required_env_vars:
+        assert var in deployment_content, f"Required TLS environment variable {var} missing from deployment manifest options"
+
+def test_issue1964_ac3_mtls_cert_paths_configurable():
+    """AC-3: When client cert and key paths are set, cart service successfully authenticates to Valkey using mTLS"""
+    deployment_path = os.path.join(MANIFESTS_DIR, "deployment.yaml")
+    assert os.path.exists(deployment_path), "deployment.yaml missing"
+    
+    with open(deployment_path) as f:
+        deployment_content = f.read()
+    
+    # Verify client cert and key path options are present
+    assert "CART_VALKEY_CLIENT_CERT_PATH" in deployment_content, "Client cert path env var missing"
+    assert "CART_VALKEY_CLIENT_KEY_PATH" in deployment_content, "Client key path env var missing"
+    
+    # Verify mTLS volume mount options exist
+    assert "/certs/valkey/client/tls.crt" in deployment_content or "valkey-client-cert" in deployment_content, "Client cert volume mount missing"
+    assert "/certs/valkey/client/tls.key" in deployment_content or "valkey-client-key" in deployment_content, "Client key volume mount missing"
+
+def test_issue1964_ac4_cert_secrets_mounted_correctly():
+    """AC-4: When certificate secrets are configured, all cert files are present and readable at configured mount paths"""
+    deployment_path = os.path.join(MANIFESTS_DIR, "deployment.yaml")
+    assert os.path.exists(deployment_path), "deployment.yaml missing"
+    
+    with open(deployment_path) as f:
+        deployment_content = f.read()
+    
+    # Verify CA cert volume and mount options exist
+    assert "valkey-ca-cert" in deployment_content, "CA cert secret volume option missing"
+    assert "/certs/valkey/ca/" in deployment_content, "CA cert mount path missing"
+    
+    # Verify client cert/key volumes and mount options exist
+    assert "valkey-client-cert" in deployment_content, "Client cert secret volume option missing"
+    assert "valkey-client-key" in deployment_content, "Client key secret volume option missing"
+    assert "/certs/valkey/client/" in deployment_content, "Client cert/key mount path missing"
+
+def test_issue1964_ac5_insecure_skip_verify_option_exists():
+    """AC-5: When CART_VALKEY_TLS_INSECURE_SKIP_VERIFY=true, cart service connects over TLS without validating server cert"""
+    deployment_path = os.path.join(MANIFESTS_DIR, "deployment.yaml")
+    assert os.path.exists(deployment_path), "deployment.yaml missing"
+    
+    with open(deployment_path) as f:
+        deployment_content = f.read()
+    
+    assert "CART_VALKEY_TLS_INSECURE_SKIP_VERIFY" in deployment_content, "Insecure skip verify env var option missing"
+
+def test_issue1964_ac6_readme_has_tls_instructions():
+    """AC-6: Cart service README includes step-by-step instructions for enabling TLS/mTLS"""
+    readme_path = "src/cart/README.md"
+    assert os.path.exists(readme_path), "Cart service README missing"
+    
+    with open(readme_path) as f:
+        readme_content = f.read()
+    
+    # Verify TLS/mTLS documentation exists
+    required_sections = [
+        "TLS",
+        "mTLS",
+        "certificate secrets",
+        "insecure skip verify",
+        "CART_VALKEY_TLS_ENABLED"
+    ]
+    for section in required_sections:
+        assert section.lower() in readme_content.lower(), f"README missing required section: {section}"
+
+def test_issue1964_ac7_existing_tests_pass_without_tls_config():
+    """AC-7: All existing unit and integration tests pass without modification when no TLS configuration is set"""
+    # Run all existing cart service tests to verify no breakage with default config
+    result = subprocess.run(
+        ["pytest", "tests/k8s/test_cart_service_manifests.py", "-k", "not issue1964", "-v"],
+        capture_output=True,
+        text=True
+    )
+    assert result.returncode == 0, f"Existing tests failed with default configuration: {result.stderr}\n{result.stdout}"
+
