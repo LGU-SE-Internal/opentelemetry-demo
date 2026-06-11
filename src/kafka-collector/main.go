@@ -707,9 +707,6 @@ func (c *KafkaConsumer) sendToDLQ(msg *sarama.ConsumerMessage, err error) error 
 	return err
 }
 
-// NewKafkaConsumerWithTLS creates a Kafka consumer client configured with TLS settings
-// Parameters:
-//   ctx: context for logging and tracing
 //   brokers: list of Kafka broker addresses
 //   groupID: consumer group ID
 //   groupID: consumer group ID
@@ -1118,6 +1115,40 @@ func main() {
 		zap.String("kafka_topics", strings.Join(topics, ", ")),
 	)
 
+	// Load retry configuration from environment variables
+	retryMaxAttempts := 5
+	if retryMaxStr := os.Getenv("KAFKA_RETRY_MAX_ATTEMPTS"); retryMaxStr != "" {
+		if parsed, err := strconv.Atoi(retryMaxStr); err == nil && parsed >= 0 {
+			retryMaxAttempts = parsed
+		}
+	}
+
+	retryInitialBackoff := 100 * time.Millisecond
+	if initialBackoffStr := os.Getenv("KAFKA_RETRY_INITIAL_BACKOFF_MS"); initialBackoffStr != "" {
+		if parsedMs, err := strconv.Atoi(initialBackoffStr); err == nil && parsedMs >= 0 {
+			retryInitialBackoff = time.Duration(parsedMs) * time.Millisecond
+		}
+	}
+
+	retryMaxBackoff := 10 * time.Second
+	if maxBackoffStr := os.Getenv("KAFKA_RETRY_MAX_BACKOFF_MS"); maxBackoffStr != "" {
+		if parsedMs, err := strconv.Atoi(maxBackoffStr); err == nil && parsedMs >= 0 {
+			retryMaxBackoff = time.Duration(parsedMs) * time.Millisecond
+		}
+	}
+
+	dlqTopic := "kafka-collector-dlq"
+	if dlqTopicStr := os.Getenv("KAFKA_DLQ_TOPIC"); dlqTopicStr != "" {
+		dlqTopic = dlqTopicStr
+	}
+
+	globalLogger.Info(ctx, "Loaded retry configuration",
+		zap.Int("retry_max_attempts", retryMaxAttempts),
+		zap.Duration("retry_initial_backoff", retryInitialBackoff),
+		zap.Duration("retry_max_backoff", retryMaxBackoff),
+		zap.String("dlq_topic", dlqTopic),
+	)
+
 	// Load TLS configuration
 	tlsConfig, err := LoadKafkaTLSConfig()
 	if err != nil {
@@ -1130,34 +1161,73 @@ func main() {
 	// Initialize health checker
 	healthChecker := DefaultHealthChecker{}
 
-	// Initialize Kafka consumer
+	// Initialize Kafka consumer with retry logic
 	var kafkaConsumer *KafkaConsumer
 	var groupID string
+	saramaConfig := sarama.NewConfig()
+	saramaConfig.Consumer.Return.Errors = true
+	saramaConfig.Consumer.Offsets.AutoCommit.Enable = false // We will commit offsets manually during shutdown
+
 	if tlsConfig.Enabled {
 		// Get consumer group ID
 		groupID = os.Getenv("KAFKA_CONSUMER_GROUP_ID")
 		if groupID == "" {
 			groupID = "kafka-collector-group"
 		}
-		kafkaConsumer, err = NewKafkaConsumerWithTLS(ctx, []string{kafkaAddr}, groupID, tlsConfig)
+
+		// Configure TLS
+		tlsCfg := &tls.Config{
+			InsecureSkipVerify: tlsConfig.SkipVerify,
+		}
+
+		// Load CA cert
+		caCert, err := os.ReadFile(tlsConfig.CACertPath)
+		if err != nil {
+			globalLogger.Error(ctx, "Failed to read CA certificate: %w", zap.Error(err))
+			os.Exit(1)
+		}
+		caCertPool := x509.NewCertPool()
+		if !caCertPool.AppendCertsFromPEM(caCert) {
+			globalLogger.Error(ctx, "Failed to append CA certificate to pool")
+			os.Exit(1)
+		}
+		tlsCfg.RootCAs = caCertPool
+
+		// Load client cert/key if provided
+		if tlsConfig.ClientCertPath != "" && tlsConfig.ClientKeyPath != "" {
+			cert, err := tls.LoadX509KeyPair(tlsConfig.ClientCertPath, tlsConfig.ClientKeyPath)
+			if err != nil {
+				globalLogger.Error(ctx, "Failed to load client certificate/key pair: %w", zap.Error(err))
+				os.Exit(1)
+			}
+			tlsCfg.Certificates = []tls.Certificate{cert}
+		}
+
+		// Apply TLS config to sarama
+		saramaConfig.Net.TLS.Enable = true
+		saramaConfig.Net.TLS.Config = tlsCfg
 	} else {
-		// Use regular non-TLS consumer for backward compatibility
-		config := sarama.NewConfig()
-		config.Consumer.Return.Errors = true
-		config.Consumer.Offsets.AutoCommit.Enable = false // We will commit offsets manually during shutdown
 		groupID = "kafka-collector-group"
-		kafkaConsumer, err = NewKafkaConsumer(ctx, []string{kafkaAddr}, topics, config)
 	}
+
+	// Create consumer with retry logic
+	kafkaConsumer, err = NewKafkaConsumerWithRetry(KafkaConsumerConfig{
+		Ctx:                ctx,
+		Brokers:            []string{kafkaAddr},
+		Topics:             topics,
+		SaramaConfig:       saramaConfig,
+		ShutdownTimeout:    30 * time.Second,
+		RetryMaxAttempts:   retryMaxAttempts,
+		RetryInitialBackoff: retryInitialBackoff,
+		RetryMaxBackoff:    retryMaxBackoff,
+		DLQTopic:           dlqTopic,
+	})
 	if err != nil {
-		globalLogger.Error(ctx, "Failed to initialize Kafka consumer",
+		globalLogger.Error(ctx, "Failed to initialize Kafka consumer with retry",
 			zap.String("consumer_group_id", groupID),
 			zap.Error(err),
 		)
 		os.Exit(1)
-	}
-	// Set topics on the consumer for TLS case
-	if tlsConfig.Enabled {
-		kafkaConsumer.topics = topics
 	}
 	kafkaConsumer.consumerGroupID = groupID
 	readinessChecker := KafkaReadinessChecker{
