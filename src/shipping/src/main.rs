@@ -7,11 +7,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::env;
 use std::time::Duration;
 use regex::Regex;
-use tonic::{transport::Server, Request, Status, Code, service::Interceptor};
+use tonic::{transport::Server, Request, Status, Code, service::Interceptor, metadata::MetadataValue};
 use tower_governor::{Governor, GovernorConfig, GovernorConfigBuilder, key_extractor::KeyExtractor, error::GovernorError};
 use governor::Quota;
 use std::num::NonZeroU32;
-use opentelemetry::metrics::Counter;
+use opentelemetry::{metrics::{Counter, MeterProvider}, KeyValue};
 use opentelemetry_proto::oteldemo::shipping_service_server::{ShippingService, ShippingServiceServer};
 use opentelemetry_proto::oteldemo::{GetQuoteRequest, GetQuoteResponse, ShipOrderRequest, ShipOrderResponse, GetShippingRequest, GetShippingResponse};
 use tokio::signal::unix::{signal, SignalKind};
@@ -93,6 +93,76 @@ struct ActiveRequestGuard {
 impl Drop for ActiveRequestGuard {
     fn drop(&mut self) {
         self.count.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+// Client IP extractor for rate limiting
+#[derive(Debug, Clone, Copy)]
+struct ClientIpExtractor;
+
+impl KeyExtractor for ClientIpExtractor {
+    type Key = String;
+
+    fn extract<T>(&self, req: &Request<T>) -> Result<Self::Key, GovernorError> {
+        // First try X-Forwarded-For header
+        if let Some(forwarded_for) = req.metadata().get("x-forwarded-for") {
+            if let Ok(ip_str) = forwarded_for.to_str() {
+                // Take the first IP in the comma-separated list
+                if let Some(first_ip) = ip_str.split(',').next() {
+                    return Ok(first_ip.trim().to_string());
+                }
+            }
+        }
+        // Fall back to peer address
+        let addr = req.remote_addr().ok_or_else(|| {
+            GovernorError::Other("Could not extract client IP address".to_string())
+        })?;
+        Ok(addr.ip().to_string())
+    }
+}
+
+// Rate limiting interceptor
+#[derive(Debug, Clone)]
+struct RateLimitInterceptor {
+    governor: Option<Governor<ClientIpExtractor>>,
+    rate_limited_counter: Counter<u64>,
+}
+
+impl Interceptor for RateLimitInterceptor {
+    fn call(&mut self, request: Request<()>) -> Result<Request<()>, Status> {
+        let governor = match &self.governor {
+            Some(g) => g,
+            None => return Ok(request),
+        };
+
+        let client_ip = match governor.key_extractor.extract(&request) {
+            Ok(ip) => ip,
+            Err(_) => return Err(Status::internal("Could not extract client IP")),
+        };
+
+        // Get gRPC method name
+        let method_name = request
+            .uri()
+            .path()
+            .split('/')
+            .last()
+            .unwrap_or("unknown")
+            .to_string();
+
+        match governor.check_key(&client_ip) {
+            Ok(_) => Ok(request),
+            Err(_) => {
+                // Increment rate limit metric
+                self.rate_limited_counter.add(
+                    1,
+                    &[
+                        KeyValue::new("client_ip", client_ip.clone()),
+                        KeyValue::new("grpc_method", method_name),
+                    ],
+                );
+                Err(Status::resource_exhausted("Rate limit exceeded, please try again later."))
+            }
+        }
     }
 }
 
@@ -254,42 +324,39 @@ fn load_endpoint_rate_limits() -> HashMap<String, (NonZeroU32, NonZeroU32)> {
 // Build rate limiting interceptor for gRPC
 fn build_rate_limit_interceptor(
     rate_limit_counter: Counter<u64>,
-) -> impl Fn(Request<()>) -> Result<Request<()>, Status> + Clone {
-    let limits = load_endpoint_rate_limits();
-    let mut governors: HashMap<String, (NonZeroU32, NonZeroU32, Arc<Governor<GrpcEndpointKeyExtractor>>)> = HashMap::new();
+) -> RateLimitInterceptor {
+    // Read rate limit configuration from environment variable
+    let rpm = match env::var("SHIPPING_SERVICE_RATE_LIMIT_RPM") {
+        Ok(val) => match val.parse::<i32>() {
+            Ok(v) => v,
+            Err(_) => {
+                warn!("Invalid SHIPPING_SERVICE_RATE_LIMIT_RPM value, using default 100");
+                100
+            }
+        },
+        Err(_) => 100,
+    };
 
-    for (endpoint, (rps, burst)) in limits {
-        let config = GovernorConfigBuilder::default()
-            .per_second(rps.get() as u64)
-            .burst_size(burst.get())
-            .key_extractor(GrpcEndpointKeyExtractor)
-            .finish()
-            .unwrap();
-        governors.insert(endpoint, (rps, burst, Arc::new(Governor::new(&config))));
+    // If rate limit is <= 0, disable rate limiting entirely
+    if rpm <= 0 {
+        return RateLimitInterceptor {
+            governor: None,
+            rate_limited_counter: rate_limit_counter,
+        };
     }
 
-    move |mut req: Request<()>| {
-        let path = req.path().to_string();
-        if let Some((rps, burst, governor)) = governors.get(&path) {
-            match governor.check(&req) {
-                Ok(_) => Ok(req),
-                Err(GovernorError::TooManyRequests { .. }) => {
-                    let msg = format!(
-                        "Rate limit exceeded for endpoint {}: limit is {} requests per second, burst {} capacity",
-                        path, rps, burst
-                    );
-                    // Increment metric
-                    rate_limit_counter.add(1, &[
-                        opentelemetry::KeyValue::new("endpoint", path.clone()),
-                        opentelemetry::KeyValue::new("limit_rps", rps.to_string()),
-                    ]);
-                    Err(Status::new(Code::ResourceExhausted, msg))
-                }
-                Err(_) => Err(Status::internal("Rate limit check failed")),
-            }
-        } else {
-            Ok(req)
-        }
+    // Convert RPM to requests per second for governor configuration
+    let requests_per_minute = NonZeroU32::new(rpm as u32).unwrap();
+    let config = GovernorConfigBuilder::default()
+        .per_minute(requests_per_minute.get() as u64)
+        .burst_size(requests_per_minute.get())
+        .key_extractor(ClientIpExtractor)
+        .finish()
+        .unwrap();
+
+    RateLimitInterceptor {
+        governor: Some(Governor::new(&config)),
+        rate_limited_counter: rate_limit_counter,
     }
 }
 
@@ -459,20 +526,48 @@ fn load_tls_config() -> Result<Option<ServerConfig>, TlsConfigError> {
 }
 
 // Load and validate rate limit configuration from environment
-fn get_rate_limit_config() -> anyhow::Result<u32> {
-    const DEFAULT_RPM: u32 = 60;
+fn get_rate_limit_config() -> i32 {
+    const DEFAULT_RPM: i32 = 100;
 
-    match env::var("SHIPPING_RATE_LIMIT_RPM") {
+    match env::var("SHIPPING_SERVICE_RATE_LIMIT_RPM") {
         Ok(val) => {
-            let rpm = val.parse::<u32>().map_err(|_| {
-                anyhow::anyhow!("Invalid SHIPPING_RATE_LIMIT_RPM: must be a positive integer")
-            })?;
-            if rpm == 0 {
-                return Err(anyhow::anyhow!("Invalid SHIPPING_RATE_LIMIT_RPM: must be greater than 0"));
-            }
-            Ok(rpm)
+            val.parse::<i32>().unwrap_or_else(|_| {
+                warn!("Invalid SHIPPING_SERVICE_RATE_LIMIT_RPM value, using default 100");
+                DEFAULT_RPM
+            })
         }
-        Err(_) => Ok(DEFAULT_RPM),
+        Err(_) => DEFAULT_RPM,
+    }
+}
+
+// Build rate limit interceptor based on environment configuration
+fn build_rate_limit_interceptor(rate_limited_counter: Counter<u64>) -> RateLimitInterceptor {
+    let rpm = get_rate_limit_config();
+
+    if rpm <= 0 {
+        info!("Rate limiting is disabled (SHIPPING_SERVICE_RATE_LIMIT_RPM = {})", rpm);
+        return RateLimitInterceptor {
+            governor: None,
+            rate_limited_counter,
+        };
+    }
+
+    // Create per-client IP rate limiter with token bucket
+    let governor_config = GovernorConfigBuilder::default()
+        .key_extractor(ClientIpExtractor)
+        .per_second(rpm as u64 / 60)
+        .burst_size(NonZeroU32::new(rpm as u32).unwrap())
+        .use_headers()
+        .build()
+        .unwrap();
+
+    let governor = Governor::new(&governor_config);
+
+    info!("Rate limiting enabled: {} requests per minute per client IP", rpm);
+
+    RateLimitInterceptor {
+        governor: Some(governor),
+        rate_limited_counter,
     }
 }
 
