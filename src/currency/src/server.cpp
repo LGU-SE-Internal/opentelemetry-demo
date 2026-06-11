@@ -121,45 +121,59 @@ namespace
   nostd::shared_ptr<opentelemetry::logs::Logger> logger;
 
   // Rate limiting configuration
-  int g_rate_limit_rps = 0;
+  int g_rate_limit_per_minute = 100; // Default 100 requests per minute per IP
   nostd::unique_ptr<metrics_api::Counter<uint64_t>> g_rate_limited_counter;
 
-  // Thread-safe token bucket rate limiter
-  class TokenBucket {
+  // Thread-safe fixed window rate limiter (1 minute window)
+  class FixedWindowRateLimiter {
   public:
-    explicit TokenBucket(int max_tokens) : max_tokens_(max_tokens), tokens_(max_tokens), last_refill_(std::chrono::steady_clock::now()) {}
+    explicit FixedWindowRateLimiter(int max_requests) : max_requests_(max_requests), current_count_(0), window_start_(std::chrono::steady_clock::now()) {}
 
     bool try_consume() {
       std::lock_guard<std::mutex> lock(mutex_);
-      refill_tokens();
-      if (tokens_ >= 1) {
-        tokens_--;
+      auto now = std::chrono::steady_clock::now();
+      auto duration = std::chrono::duration_cast<std::chrono::minutes>(now - window_start_);
+      
+      // Reset window if 1 minute has passed
+      if (duration.count() >= 1) {
+        current_count_ = 0;
+        window_start_ = now;
+      }
+      
+      if (current_count_ < max_requests_) {
+        current_count_++;
         return true;
       }
       return false;
     }
 
   private:
-    void refill_tokens() {
-      auto now = std::chrono::steady_clock::now();
-      auto duration = std::chrono::duration_cast<std::chrono::seconds>(now - last_refill_);
-      if (duration.count() >= 1) {
-        tokens_ = max_tokens_;
-        last_refill_ = now;
-      }
-    }
-
-    int max_tokens_;
-    int tokens_;
-    std::chrono::steady_clock::time_point last_refill_;
+    int max_requests_;
+    int current_count_;
+    std::chrono::steady_clock::time_point window_start_;
     std::mutex mutex_;
   };
 
-  std::unordered_map<std::string, std::unique_ptr<TokenBucket>> g_rate_limiters;
+  std::unordered_map<std::string, std::unique_ptr<FixedWindowRateLimiter>> g_rate_limiters;
   std::shared_mutex g_rate_limiters_mutex;
 
-  // Extract client IP from gRPC peer string
-  std::string extract_client_ip(const std::string& peer) {
+  // Extract client IP from request context: first check X-Forwarded-For header, then fall back to peer
+  std::string extract_client_ip(grpc::ServerContext* context) {
+    // Check X-Forwarded-For header first
+    auto metadata = context->client_metadata();
+    auto xff_it = metadata.find("x-forwarded-for");
+    if (xff_it != metadata.end()) {
+      std::string xff_val(xff_it->second.data(), xff_it->second.size());
+      // Take the first IP in the list (client IP)
+      size_t comma_pos = xff_val.find(',');
+      if (comma_pos != std::string::npos) {
+        return xff_val.substr(0, comma_pos);
+      }
+      return xff_val;
+    }
+    
+    // Fall back to peer string if X-Forwarded-For not present
+    std::string peer = context->peer();
     size_t ipv4_pos = peer.find("ipv4:");
     if (ipv4_pos != std::string::npos) {
       size_t ip_end = peer.find(':', ipv4_pos + 5);
@@ -183,12 +197,11 @@ namespace
     void Intercept(grpc::experimental::InterceptorBatchMethods* methods) override {
       if (methods->QueryInterceptionHookPoint(grpc::experimental::InterceptionHookPoints::PRE_SEND_INITIAL_METADATA)) {
         auto* context = methods->GetServerContext();
-        std::string peer = context->peer();
-        std::string client_ip = extract_client_ip(peer);
+        std::string client_ip = extract_client_ip(context);
         std::string method_name = context->method();
 
-        // Skip rate limiting if disabled
-        if (g_rate_limit_rps <= 0) {
+        // Skip rate limiting if disabled (should never happen with default 100)
+        if (g_rate_limit_per_minute <= 0) {
           methods->Proceed();
           return;
         }
@@ -202,13 +215,13 @@ namespace
           // Check again after acquiring write lock to avoid race
           it = g_rate_limiters.find(client_ip);
           if (it == g_rate_limiters.end()) {
-            it = g_rate_limiters.emplace(client_ip, std::make_unique<TokenBucket>(g_rate_limit_rps)).first;
+            it = g_rate_limiters.emplace(client_ip, std::make_unique<FixedWindowRateLimiter>(g_rate_limit_per_minute)).first;
           }
         }
 
         if (!it->second->try_consume()) {
           // Rate limit exceeded
-          std::string error_msg = "Rate limit exceeded: maximum " + std::to_string(g_rate_limit_rps) + " requests per second per IP address";
+          std::string error_msg = "Rate limit exceeded. Try again later.";
           methods->ModifySendStatus(grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, error_msg));
           
           // Increment metric
@@ -217,6 +230,33 @@ namespace
             {"endpoint", method_name}
           };
           g_rate_limited_counter->Add(1, labels);
+          
+          // Log violation event with required fields
+          std::string trace_id = "unknown";
+          auto current_span = opentelemetry::trace::Tracer::GetCurrentSpan();
+          if (current_span) {
+            auto span_context = current_span->GetContext();
+            if (span_context.IsValid()) {
+              trace_id = span_context.trace_id().ToHex();
+            }
+          }
+          
+          // Get current UTC timestamp in ISO 8601 format
+          auto now = std::chrono::system_clock::now();
+          std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+          char timestamp_buf[sizeof("2023-10-05T14:48:00Z")];
+          std::strftime(timestamp_buf, sizeof(timestamp_buf), "%FT%TZ", std::gmtime(&now_time));
+          
+          nlohmann::json log_entry;
+          log_entry["event"] = "rate_limit_violation";
+          log_entry["client_ip"] = client_ip;
+          log_entry["endpoint"] = method_name;
+          log_entry["trace_id"] = trace_id;
+          log_entry["limit_applied"] = g_rate_limit_per_minute;
+          log_entry["timestamp"] = timestamp_buf;
+          
+          logger->Info(log_entry.dump());
+          
           return;
         }
 
@@ -843,25 +883,25 @@ int main(int argc, char **argv) {
   }
 
   // Parse rate limit configuration
-  const char* rate_limit_env = std::getenv("CURRENCY_SERVICE_RATE_LIMIT_RPS");
+  const char* rate_limit_env = std::getenv("CURRENCY_SERVICE_RATE_LIMIT_PER_MINUTE");
   if (rate_limit_env != nullptr && strlen(rate_limit_env) > 0) {
     try {
       int rate_limit_val = std::stoi(rate_limit_env);
-      if (rate_limit_val > 0) {
-        g_rate_limit_rps = rate_limit_val;
-        logger->Info("Using configured per-IP rate limit: " + std::to_string(rate_limit_val) + " requests per second");
+      if (rate_limit_val <= 0) {
+        logger->Warning("Invalid CURRENCY_SERVICE_RATE_LIMIT_PER_MINUTE value: " + std::string(rate_limit_env) + ", using default 100 requests per minute");
       } else {
-        g_rate_limit_rps = 0;
-        logger->Info("Rate limiting disabled (configured value <= 0)");
+        g_rate_limit_per_minute = rate_limit_val;
+        logger->Info("Using configured rate limit: " + std::to_string(rate_limit_val) + " requests per minute per IP");
       }
     } catch (const std::exception& e) {
-      logger->Warning("Invalid CURRENCY_SERVICE_RATE_LIMIT_RPS value: " + std::string(rate_limit_env) + " is not a valid integer, rate limiting disabled");
-      g_rate_limit_rps = 0;
+      logger->Warning("Invalid CURRENCY_SERVICE_RATE_LIMIT_PER_MINUTE value: " + std::string(rate_limit_env) + " is not a valid integer, using default 100 requests per minute");
     }
   } else {
-    g_rate_limit_rps = 0;
-    logger->Info("Rate limiting disabled (environment variable not set)");
+    logger->Info("Using default rate limit: 100 requests per minute per IP");
   }
+
+
+
 
   RunServer(port);
 
