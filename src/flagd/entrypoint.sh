@@ -1,19 +1,18 @@
 #!/bin/sh
-set -e
 
-DEFAULT_CONFIG_PATH="/etc/flagd/demo_flags.json"
-CUSTOM_CONFIG_PATH=${FLAGD_CUSTOM_CONFIG_PATH:-"/var/lib/flagd/config/flags.json"}
+DEFAULT_CONFIG="/etc/flagd/demo_flags.json"
+CUSTOM_CONFIG="${FLAGD_CUSTOM_CONFIG_PATH:-/var/lib/flagd/config/flags.json}"
 
-if [ -f "$CUSTOM_CONFIG_PATH" ] && [ -r "$CUSTOM_CONFIG_PATH" ]; then
-    echo "Using custom flag configuration from $CUSTOM_CONFIG_PATH"
-    CONFIG_PATH="$CUSTOM_CONFIG_PATH"
+if [ -f "$CUSTOM_CONFIG" ] && [ -r "$CUSTOM_CONFIG" ]; then
+    echo "INFO: Using custom flag configuration from $CUSTOM_CONFIG"
+    CONFIG_PATH="$CUSTOM_CONFIG"
 else
-    if [ -f "$CUSTOM_CONFIG_PATH" ]; then
-        echo "WARNING: Custom flag configuration file at $CUSTOM_CONFIG_PATH exists but is not readable. Falling back to default config."
+    if [ -f "$CUSTOM_CONFIG" ]; then
+        echo "WARNING: Custom flag file $CUSTOM_CONFIG exists but is not readable. Falling back to default config at $DEFAULT_CONFIG"
     else
-        echo "No custom flag configuration found at $CUSTOM_CONFIG_PATH, using default config at $DEFAULT_CONFIG_PATH"
+        echo "INFO: No custom flag configuration found at $CUSTOM_CONFIG. Using default config at $DEFAULT_CONFIG"
     fi
-    CONFIG_PATH="$DEFAULT_CONFIG_PATH"
+    CONFIG_PATH="$DEFAULT_CONFIG"
 fi
 
-exec flagd start --config "$CONFIG_PATH" --uri grpc://0.0.0.0:50051
+exec flagd start --config "$CONFIG_PATH"
