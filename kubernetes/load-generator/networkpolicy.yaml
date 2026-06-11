@@ -1,0 +1,34 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: load-generator-egress
+  namespace: opentelemetry-demo
+  labels:
+    app.kubernetes.io/name: load-generator
+    app.kubernetes.io/part-of: opentelemetry-demo
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: load-generator
+  policyTypes:
+    - Egress
+  egress:
+    # Allow DNS traffic to Kubernetes DNS servers
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Allow traffic to frontend service on port 8080
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: frontend
+      ports:
+        - port: 8080
+          protocol: TCP

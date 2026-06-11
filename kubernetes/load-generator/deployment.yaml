@@ -2,8 +2,11 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: load-generator
+  namespace: opentelemetry-demo
   labels:
     app.kubernetes.io/name: load-generator
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/part-of: opentelemetry-demo
 spec:
   replicas: 1
   selector:
@@ -16,52 +19,49 @@ spec:
     spec:
       securityContext:
         runAsNonRoot: true
-        runAsUser: 10001
-        runAsGroup: 10001
-        allowPrivilegeEscalation: false
-        readOnlyRootFilesystem: true
-        capabilities:
-          drop: ["ALL"]
+        runAsUser: 1000
+        fsGroup: 1000
       containers:
-      - name: load-generator
-        image: otel/demo-load-generator:latest
-        ports:
-        - containerPort: 8080
-        securityContext:
-          runAsNonRoot: true
-          runAsUser: 10001
-          runAsGroup: 10001
-          allowPrivilegeEscalation: false
-          readOnlyRootFilesystem: true
-          capabilities:
-            drop: ["ALL"]
-        resources:
-          requests:
-            cpu: 250m
-            memory: 256Mi
-          limits:
-            cpu: 500m
-            memory: 512Mi
-        livenessProbe:
-          httpGet:
-            path: /health/live
-            port: 8080
-          initialDelaySeconds: 5
-          periodSeconds: 10
-          failureThreshold: 3
-        readinessProbe:
-          httpGet:
-            path: /health/ready
-            port: 8080
-          initialDelaySeconds: 5
-          periodSeconds: 10
-          failureThreshold: 3
-        env:
-        - name: TARGET_HOST
-          value: ""
-        - name: OTEL_EXPORTER_OTLP_ENDPOINT
-          value: "http://otelcol:4318"
-        - name: LOAD_RATE
-          value: "10"
-        - name: LOAD_DURATION
-          value: "300s"
+        - name: load-generator
+          image: ghcr.io/open-telemetry/demo:latest-loadgenerator
+          ports:
+            - containerPort: 8080
+              name: http
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            privileged: false
+            capabilities:
+              drop:
+                - "ALL"
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          env:
+            - name: LOCUST_WAIT_TIME_MIN
+              value: "100"
+            - name: LOCUST_WAIT_TIME_MAX
+              value: "1000"
+            - name: LOCUST_TARGET_HOST
+              value: "http://frontend:8080"
+            - name: LOCUST_USERS
+              value: "10"
+            - name: LOCUST_SPAWN_RATE
+              value: "1"
+
