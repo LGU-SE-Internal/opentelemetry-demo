@@ -191,6 +191,19 @@ func (e NonRetriableKafkaError) Unwrap() error {
 	return e.Err
 }
 
+// NonRetriableKafkaError wraps errors that should not be retried
+type NonRetriableKafkaError struct {
+	Err error
+}
+
+func (e NonRetriableKafkaError) Error() string {
+	return fmt.Sprintf("non-retriable kafka error: %v", e.Err)
+}
+
+func (e NonRetriableKafkaError) Unwrap() error {
+	return e.Err
+}
+
 // Health status tracking
 var (
 	kafkaConnected atomic.Bool
@@ -203,6 +216,7 @@ type HealthResponse struct {
 	Check         string `json:"check"`
 	KafkaConnected *bool  `json:"kafka_connected,omitempty"`
 	Error         string `json:"error,omitempty"`
+}
 }
 
 
