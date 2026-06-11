@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -56,13 +57,18 @@ func GenerateIdempotencyKey() string {
 //   - maxRetries: maximum number of retry attempts per call (excluding initial call)
 //   - backoffBase: initial delay for exponential backoff
 //   - retriableCodes: list of gRPC status codes that should trigger a retry
-//   - metrics: RetryMetrics instance for tracking retries
+//   - metrics: (optional) RetryMetrics instance for tracking retries. If nil, metrics are disabled.
 //
 // Returns: configured gRPC UnaryClientInterceptor
-func NewRetryInterceptor(maxRetries int, backoffBase time.Duration, retriableCodes []codes.Code, metrics *RetryMetrics) grpc.UnaryClientInterceptor {
+func NewRetryInterceptor(maxRetries int, backoffBase time.Duration, retriableCodes []codes.Code, metrics ...*RetryMetrics) grpc.UnaryClientInterceptor {
 	retriableCodeMap := make(map[codes.Code]bool)
 	for _, code := range retriableCodes {
 		retriableCodeMap[code] = true
+	}
+
+	var retryMetrics *RetryMetrics
+	if len(metrics) > 0 {
+		retryMetrics = metrics[0]
 	}
 
 	return func(
@@ -73,7 +79,13 @@ func NewRetryInterceptor(maxRetries int, backoffBase time.Duration, retriableCod
 		invoker grpc.UnaryInvoker,
 		opts ...grpc.CallOption,
 	) error {
-		serviceName := cc.Target()
+		// Extract service name from method path (format: /package.Service/Method)
+		parts := strings.Split(method, "/")
+		serviceName := "unknown"
+		if len(parts) >= 2 {
+			serviceParts := strings.Split(parts[1], ".")
+			serviceName = serviceParts[len(serviceParts)-1]
+		}
 		var lastErr error
 
 		// Check if idempotency key is already present in the context metadata
@@ -123,8 +135,8 @@ func NewRetryInterceptor(maxRetries int, backoffBase time.Duration, retriableCod
 			}
 
 			// Increment retry attempts metric if this is a retry (after first attempt)
-			if attempt > 0 {
-				metrics.Attempts.WithLabelValues(serviceName, st.Code().String()).Inc()
+			if attempt > 0 && retryMetrics != nil {
+				retryMetrics.Attempts.WithLabelValues(serviceName, st.Code().String()).Inc()
 			}
 
 			// Check if this status code is retriable
@@ -139,7 +151,9 @@ func NewRetryInterceptor(maxRetries int, backoffBase time.Duration, retriableCod
 		if ok {
 			finalStatusCode = st.Code().String()
 		}
-		metrics.Failures.WithLabelValues(serviceName, finalStatusCode).Inc()
+		if retryMetrics != nil {
+			retryMetrics.Failures.WithLabelValues(serviceName, finalStatusCode).Inc()
+		}
 
 		return fmt.Errorf("failed after %d attempts: %w", maxRetries+1, lastErr)
 	}

@@ -159,7 +159,7 @@ func TestAC6_RetryAttemptsMetricIncremented(t *testing.T) {
 	metrics := NewRetryMetrics(reg)
 	// Note: Assuming interceptor accepts metrics as a parameter (or is wired with it globally)
 	// Adjust if implementation uses different wiring
-	interceptor := NewRetryInterceptor(2, 100*time.Millisecond, []codes.Code{codes.Unavailable})
+	interceptor := NewRetryInterceptor(2, 100*time.Millisecond, []codes.Code{codes.Unavailable}, metrics)
 	invoker := new(mockInvoker)
 	invoker.On("Invoke", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(status.Error(codes.Unavailable, "transient error")).Times(3)
 
@@ -175,7 +175,7 @@ func TestAC6_RetryAttemptsMetricIncremented(t *testing.T) {
 func TestAC7_RetryFailuresMetricIncremented(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	metrics := NewRetryMetrics(reg)
-	interceptor := NewRetryInterceptor(2, 100*time.Millisecond, []codes.Code{codes.Unavailable})
+	interceptor := NewRetryInterceptor(2, 100*time.Millisecond, []codes.Code{codes.Unavailable}, metrics)
 	invoker := new(mockInvoker)
 	invoker.On("Invoke", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(status.Error(codes.Unavailable, "transient error")).Times(3)
 
