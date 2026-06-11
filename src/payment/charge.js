@@ -40,15 +40,68 @@ function random(arr) {
  * @returns {Promise<{transactionId: string}>} Promise resolving to object containing the unique transaction ID on success
  * @throws {Error} If payment fails for any reason: invalid card details, expired card, unsupported card type, or random simulated failure
  */
+// Connectivity check configuration
+const CONNECTIVITY_TIMEOUT_MS = parseInt(process.env.PAYMENT_PROCESSOR_CONNECTIVITY_TIMEOUT_MS || '1000', 10);
+
+/**
+ * Simulates check for external payment processor connectivity
+ * @returns {Promise<boolean>} True if connection succeeds, false if fails (10% failure rate)
+ */
+async function checkPaymentProcessorConnectivity() {
+  return new Promise((resolve) => {
+    // Simulate 10% failure rate for testing
+    const shouldFail = Math.random() < 0.1;
+    // Simulate varying response time between 0 and 2000ms
+    const responseTime = Math.floor(Math.random() * 2000);
+    
+    setTimeout(() => {
+      resolve(!shouldFail);
+    }, responseTime);
+  });
+}
+
 /**
  * Health check function for the charge module
- * @returns {boolean} True if the module is healthy, false otherwise
+ * @returns {Promise<boolean>} True if the module is healthy and can process payments, false otherwise
  */
-module.exports.isHealthy = () => {
-  // Simple health check for now - returns true as long as module is loaded
-  // In a real implementation this would check connectivity to payment processors, etc.
-  return true;
+module.exports.isHealthy = async () => {
+  const startTime = Date.now();
+  let timeoutId;
+
+  try {
+    const timeoutPromise = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => {
+        reject(new Error('Payment processor connectivity check timed out'));
+      }, CONNECTIVITY_TIMEOUT_MS);
+    });
+
+    const isConnected = await Promise.race([
+      checkPaymentProcessorConnectivity(),
+      timeoutPromise
+    ]);
+
+    clearTimeout(timeoutId);
+
+    if (!isConnected) {
+      throw new Error('Payment processor connectivity check failed');
+    }
+
+    return true;
+  } catch (err) {
+    const durationMs = Date.now() - startTime;
+    logger.error({
+      timestamp: new Date().toISOString(),
+      event: 'payment_processor_health_check_failed',
+      error: err.message,
+      duration_ms: durationMs,
+      configured_timeout_ms: CONNECTIVITY_TIMEOUT_MS
+    });
+    return false;
+  }
 };
+
+// Export for testing purposes
+module.exports.checkPaymentProcessorConnectivity = checkPaymentProcessorConnectivity;
 
 module.exports.charge = async request => {
   const span = tracer.startSpan('charge');
