@@ -16,7 +16,7 @@ add_subdirectory(genproto)
 
 include_directories("${GENERATED_PROTOBUF_PATH}" "${OPENTELEMETRY_CPP_INCLUDE_DIRS}")
 
-add_executable(currency src/server.cpp)
+add_executable(currency src/server.cpp src/currency_service_credentials.cpp)
 add_dependencies(currency demo-proto)
 target_link_libraries(
     currency demo-proto protobuf::libprotobuf
