@@ -14,6 +14,8 @@ import re
 import uuid
 import signal
 from concurrent import futures
+import threading
+from flask import Flask, Response
 
 # Pip
 import grpc
@@ -46,6 +48,61 @@ from grpc_health.v1 import health_pb2_grpc
 from metrics import (
     init_metrics
 )
+# Health check functions
+def check_product_catalog_health():
+    """Check if product catalog service is reachable and responsive"""
+    try:
+        if not product_catalog_client:
+            return False, "Product catalog client not initialized"
+        # Make a simple ListProducts call to verify connectivity
+        response = list_products_with_retry(product_catalog_client, demo_pb2.Empty())
+        if response and hasattr(response, 'products'):
+            return True, None
+        return False, "Product catalog returned invalid response"
+    except Exception as e:
+        return False, f"Product catalog service unreachable: {str(e)}"
+
+def check_flagd_health():
+    """Check if flagd service is reachable and responsive"""
+    try:
+        provider = api.get_provider()
+        if not provider:
+            return False, "Flagd provider not initialized"
+        # Simple metadata check to verify connection
+        metadata = provider.get_metadata()
+        if metadata:
+            return True, None
+        return False, "Flagd returned invalid metadata"
+    except Exception as e:
+        return False, f"Flagd service unreachable: {str(e)}"
+
+# Create Flask app for HTTP health endpoints
+app = Flask(__name__)
+
+@app.route('/health/live', methods=['GET'])
+def liveness_check():
+    """Liveness check endpoint - always returns 200 OK when process is running"""
+    return Response("OK", status=200, content_type="text/plain")
+
+@app.route('/health/ready', methods=['GET'])
+def readiness_check():
+    """Readiness check endpoint - returns 200 only if all dependencies are healthy"""
+    # Check product catalog health
+    pc_healthy, pc_error = check_product_catalog_health()
+    if not pc_healthy:
+        return Response(f"Unavailable: {pc_error}", status=503, content_type="text/plain")
+    
+    # Check flagd health
+    flagd_healthy, flagd_error = check_flagd_health()
+    if not flagd_healthy:
+        return Response(f"Unavailable: {flagd_error}", status=503, content_type="text/plain")
+    
+    return Response("OK", status=200, content_type="text/plain")
+
+def run_http_server():
+    """Run the Flask HTTP server on port 8080"""
+    app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False)
+
 cached_ids = []
 first_run = True
 
@@ -270,8 +327,24 @@ class RecommendationService(demo_pb2_grpc.RecommendationServiceServicer):
         return response
 
     def Check(self, request, context):
-        return health_pb2.HealthCheckResponse(
-            status=health_pb2.HealthCheckResponse.SERVING)
+        # Check if service name is either empty or "recommendationService"
+        if request.service and request.service != "recommendationService":
+            return health_pb2.HealthCheckResponse(
+                status=health_pb2.HealthCheckResponse.SERVICE_UNKNOWN
+            )
+        
+        # Check all dependencies
+        pc_healthy, _ = check_product_catalog_health()
+        flagd_healthy, _ = check_flagd_health()
+        
+        if pc_healthy and flagd_healthy:
+            return health_pb2.HealthCheckResponse(
+                status=health_pb2.HealthCheckResponse.SERVING
+            )
+        else:
+            return health_pb2.HealthCheckResponse(
+                status=health_pb2.HealthCheckResponse.NOT_SERVING
+            )
 
     def Watch(self, request, context):
         return health_pb2.HealthCheckResponse(
@@ -508,6 +581,13 @@ def serve(listen_addr: str, product_catalog_channel=None, test_mode: bool = Fals
             logger.info(f'Recommendation service started, listening on {listen_addr}')
     
     server.start()
+    
+    # Start HTTP health check server in separate thread
+    if not test_mode:
+        http_thread = threading.Thread(target=run_http_server, daemon=True)
+        http_thread.start()
+        if logger:
+            logger.info("HTTP health check server started on port 8080")
     
     if test_mode:
         # Return server instance for testing, don't wait for termination
