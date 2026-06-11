@@ -1,3 +1,28 @@
+# Opensearch StatefulSet with optional TLS support for production security requirements
+#
+# TLS Configuration Environment Variables (all optional, default to disabled state):
+# | Variable Name | Type | Allowed Values | Default | Description |
+# |---------------|------|----------------|---------|-------------|
+# | `OPENSEARCH_HTTP_TLS_ENABLED` | boolean | `true`/`false` | `false` | Toggle TLS encryption for port 9200 (HTTP API) |
+# | `OPENSEARCH_TRANSPORT_TLS_ENABLED` | boolean | `true`/`false` | `false` | Toggle TLS encryption for port 9300 (inter-node transport) |
+# | `OPENSEARCH_HTTP_CLIENT_AUTH_REQUIRED` | boolean | `true`/`false` | `false` | Enforce mTLS client certificate authentication for HTTP API (9200) requests |
+# | `OPENSEARCH_TRANSPORT_CLIENT_AUTH_REQUIRED` | boolean | `true`/`false` | `false` | Enforce mTLS client certificate authentication for inter-node transport (9300) connections |
+#
+# Certificate Mount Paths (all optional, required only when corresponding TLS features are enabled):
+# Mount from user-provided Kubernetes Secrets:
+# - CA certificate chain: /etc/opensearch/certs/ca/ca.crt (required when any TLS is enabled)
+# - HTTP server certificate: /etc/opensearch/certs/http/tls.crt (required when OPENSEARCH_HTTP_TLS_ENABLED=true)
+# - HTTP server private key: /etc/opensearch/certs/http/tls.key (required when OPENSEARCH_HTTP_TLS_ENABLED=true)
+# - Transport server certificate: /etc/opensearch/certs/transport/tls.crt (required when OPENSEARCH_TRANSPORT_TLS_ENABLED=true)
+# - Transport server private key: /etc/opensearch/certs/transport/tls.key (required when OPENSEARCH_TRANSPORT_TLS_ENABLED=true)
+# - Client CA certificate chain (for mTLS): /etc/opensearch/certs/client-ca/ca.crt (required when any *_CLIENT_AUTH_REQUIRED=true)
+#
+# Example Secret creation commands:
+# kubectl create secret generic opensearch-ca --from-file=ca.crt=./your-ca.crt
+# kubectl create secret generic opensearch-http-tls --from-file=tls.crt=./http.crt --from-file=tls.key=./http.key
+# kubectl create secret generic opensearch-transport-tls --from-file=tls.crt=./transport.crt --from-file=tls.key=./transport.key
+# kubectl create secret generic opensearch-client-ca --from-file=ca.crt=./client-ca.crt
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -43,50 +68,50 @@ spec:
           value: "-Xms1g -Xmx1g"
         - name: DISABLE_INSTALL_DEMO_CONFIG
           value: "true"
+        # Disable security plugin only when TLS is fully disabled for backward compatibility
         - name: DISABLE_SECURITY_PLUGIN
-          value: "$(OPENSEARCH_HTTP_TLS_ENABLED:false)"
+          value: "$(OPENSEARCH_HTTP_TLS_ENABLED:$(OPENSEARCH_TRANSPORT_TLS_ENABLED:true:false):false)"
+        # TLS Configuration Environment Variables (defaults match spec)
         - name: OPENSEARCH_HTTP_TLS_ENABLED
           value: "false"
         - name: OPENSEARCH_TRANSPORT_TLS_ENABLED
           value: "false"
-        - name: OPENSEARCH_HTTP_MTLS_ENABLED
+        - name: OPENSEARCH_HTTP_CLIENT_AUTH_REQUIRED
           value: "false"
-        - name: OPENSEARCH_TRANSPORT_MTLS_ENABLED
-          value: "true"
-        - name: OPENSEARCH_TLS_CERT_PATH
-          value: "/usr/share/opensearch/config/certs/tls.crt"
-        - name: OPENSEARCH_TLS_KEY_PATH
-          value: "/usr/share/opensearch/config/certs/tls.key"
-        - name: OPENSEARCH_TLS_CA_PATH
-          value: "/usr/share/opensearch/config/certs/ca.crt"
+        - name: OPENSEARCH_TRANSPORT_CLIENT_AUTH_REQUIRED
+          value: "false"
+        # HTTP TLS Configuration
         - name: plugins.security.ssl.http.enabled
           value: "$(OPENSEARCH_HTTP_TLS_ENABLED)"
         - name: plugins.security.ssl.http.pemcert_filepath
-          value: "$(OPENSEARCH_TLS_CERT_PATH)"
+          value: "/etc/opensearch/certs/http/tls.crt"
         - name: plugins.security.ssl.http.pemkey_filepath
-          value: "$(OPENSEARCH_TLS_KEY_PATH)"
+          value: "/etc/opensearch/certs/http/tls.key"
         - name: plugins.security.ssl.http.pemtrustedcas_filepath
-          value: "$(OPENSEARCH_TLS_CA_PATH)"
+          value: "/etc/opensearch/certs/ca/ca.crt"
         - name: plugins.security.ssl.http.clientauth_mode
-          value: "$(OPENSEARCH_HTTP_MTLS_ENABLED:REQUIRE:OPTIONAL)"
+          value: "$(OPENSEARCH_HTTP_CLIENT_AUTH_REQUIRED:REQUIRE:NONE)"
+        - name: plugins.security.ssl.http.enabled_protocols
+          value: "TLSv1.2,TLSv1.3"
+        # Transport TLS Configuration
         - name: plugins.security.ssl.transport.enabled
           value: "$(OPENSEARCH_TRANSPORT_TLS_ENABLED)"
         - name: plugins.security.ssl.transport.pemcert_filepath
-          value: "$(OPENSEARCH_TLS_CERT_PATH)"
+          value: "/etc/opensearch/certs/transport/tls.crt"
         - name: plugins.security.ssl.transport.pemkey_filepath
-          value: "$(OPENSEARCH_TLS_KEY_PATH)"
+          value: "/etc/opensearch/certs/transport/tls.key"
         - name: plugins.security.ssl.transport.pemtrustedcas_filepath
-          value: "$(OPENSEARCH_TLS_CA_PATH)"
+          value: "/etc/opensearch/certs/ca/ca.crt"
         - name: plugins.security.ssl.transport.clientauth_mode
-          value: "$(OPENSEARCH_TRANSPORT_MTLS_ENABLED:REQUIRE:OPTIONAL)"
-        - name: plugins.security.ssl.http.enabled_protocols
+          value: "$(OPENSEARCH_TRANSPORT_CLIENT_AUTH_REQUIRED:REQUIRE:NONE)"
+        - name: plugins.security.ssl.transport.enabled_protocols
           value: "TLSv1.2,TLSv1.3"
         livenessProbe:
           httpGet:
             path: /
             port: 9200
-            scheme: HTTPS
-            caFile: /usr/share/opensearch/config/certs/ca.crt
+            scheme: "$(OPENSEARCH_HTTP_TLS_ENABLED:HTTPS:HTTP)"
+            caFile: /etc/opensearch/certs/ca/ca.crt
           initialDelaySeconds: 30
           periodSeconds: 10
           failureThreshold: 3
@@ -94,8 +119,8 @@ spec:
           httpGet:
             path: /_cluster/health?local=true
             port: 9200
-            scheme: HTTPS
-            caFile: /usr/share/opensearch/config/certs/ca.crt
+            scheme: "$(OPENSEARCH_HTTP_TLS_ENABLED:HTTPS:HTTP)"
+            caFile: /etc/opensearch/certs/ca/ca.crt
           initialDelaySeconds: 10
           periodSeconds: 5
           successThreshold: 2
@@ -122,8 +147,18 @@ spec:
           mountPath: /tmp
         - name: logs-volume
           mountPath: /usr/share/opensearch/logs
-        - name: opensearch-tls
-          mountPath: /usr/share/opensearch/config/certs
+        # Certificate volume mounts (all optional, only required when TLS is enabled)
+        - name: opensearch-ca
+          mountPath: /etc/opensearch/certs/ca
+          readOnly: true
+        - name: opensearch-http-tls
+          mountPath: /etc/opensearch/certs/http
+          readOnly: true
+        - name: opensearch-transport-tls
+          mountPath: /etc/opensearch/certs/transport
+          readOnly: true
+        - name: opensearch-client-ca
+          mountPath: /etc/opensearch/certs/client-ca
           readOnly: true
         ulimits:
           memlock:
@@ -137,9 +172,22 @@ spec:
         emptyDir: {}
       - name: logs-volume
         emptyDir: {}
-      - name: opensearch-tls
+      # Certificate volumes (all optional, no mounts required by default)
+      - name: opensearch-ca
         secret:
-          secretName: opensearch-tls
+          secretName: opensearch-ca
+          optional: true
+      - name: opensearch-http-tls
+        secret:
+          secretName: opensearch-http-tls
+          optional: true
+      - name: opensearch-transport-tls
+        secret:
+          secretName: opensearch-transport-tls
+          optional: true
+      - name: opensearch-client-ca
+        secret:
+          secretName: opensearch-client-ca
           optional: true
   volumeClaimTemplates:
   - metadata:
@@ -162,5 +210,7 @@ spec:
   ports:
   - port: 9200
     name: http
+  - port: 9300
+    name: transport
   selector:
     app.kubernetes.io/name: opensearch
