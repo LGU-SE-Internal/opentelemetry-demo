@@ -34,6 +34,8 @@
     "@opentelemetry/sdk-node": "0.218.0",
     "express": "^5.2.1",
     "grpc-js-health-check": "1.2.2",
+    "iso4217": "^0.2.0",
+    "luhn": "^2.4.1",
     "opossum": "^8.5.0",
     "pino": "^10.3.1",
     "pino-opentelemetry-transport": "^3.0.0",
