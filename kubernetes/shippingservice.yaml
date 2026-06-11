@@ -32,7 +32,8 @@ spec:
             - containerPort: 8080
               name: grpc
           livenessProbe:
-            grpc:
+            httpGet:
+              path: /health
               port: 8080
             initialDelaySeconds: 10
             periodSeconds: 10
@@ -40,7 +41,8 @@ spec:
             failureThreshold: 3
             successThreshold: 1
           readinessProbe:
-            grpc:
+            httpGet:
+              path: /health
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
