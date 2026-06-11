@@ -6,3 +6,9 @@ jaeger:
       - ReadWriteOnce
   retention:
     ttl: "7d"
+grafana:
+  persistence:
+    enabled: true # Defaults to true to enable persistent storage
+    storageClassName: "" # Optional: Set to use specific storage class, falls back to cluster default if empty
+    size: 10Gi # Optional: Storage volume size, defaults to 10Gi
+    existingClaim: "grafana-pvc" # Name of existing PVC to use, matches the PVC manifest name in the repo
