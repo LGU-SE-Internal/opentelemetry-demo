@@ -1,0 +1,137 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/part-of: opentelemetry-demo
+    app.kubernetes.io/component: grafana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: grafana
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: grafana
+        app.kubernetes.io/part-of: opentelemetry-demo
+        app.kubernetes.io/component: grafana
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 472
+        fsGroup: 472
+        readOnlyRootFilesystem: true
+      containers:
+      - name: grafana
+        image: grafana/grafana:10.4.10
+        env:
+          - name: GRAFANA_TLS_ENABLED
+            valueFrom:
+              configMapKeyRef:
+                name: grafana-config
+                key: grafana.tls.enabled
+                optional: true
+          - name: GRAFANA_MTLS_ENABLED
+            valueFrom:
+              configMapKeyRef:
+                name: grafana-config
+                key: grafana.mtls.enabled
+                optional: true
+          - name: GRAFANA_TLS_CERT_PATH
+            value: "/etc/grafana/tls/tls.crt"
+          - name: GRAFANA_TLS_KEY_PATH
+            value: "/etc/grafana/tls/tls.key"
+          - name: GRAFANA_MTLS_CA_CERT_PATH
+            value: "/etc/grafana/mtls/ca.crt"
+        ports:
+        - containerPort: 3000
+          name: http
+        - containerPort: 443
+          name: https
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: {{ .Values.grafana.tls.enabled | ternary 443 3000 }}
+            scheme: {{ .Values.grafana.tls.enabled | ternary "HTTPS" "HTTP" }}
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: {{ .Values.grafana.tls.enabled | ternary 443 3000 }}
+            scheme: {{ .Values.grafana.tls.enabled | ternary "HTTPS" "HTTP" }}
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          privileged: false
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: grafana-config
+          mountPath: /etc/grafana/grafana.ini
+          subPath: grafana.ini
+        - name: grafana-storage
+          mountPath: /var/lib/grafana
+        - name: grafana-provisioning-dashboards
+          mountPath: /etc/grafana/provisioning/dashboards
+        - name: grafana-provisioning-datasources
+          mountPath: /etc/grafana/provisioning/datasources
+        - name: grafana-tmp
+          mountPath: /tmp
+        - name: grafana-log
+          mountPath: /var/log/grafana
+        {{- if .Values.grafana.tls.enabled }}
+        - name: grafana-tls-cert
+          mountPath: /etc/grafana/tls
+          readOnly: true
+        {{- end }}
+        {{- if .Values.grafana.mtls.enabled }}
+        - name: grafana-mtls-ca
+          mountPath: /etc/grafana/mtls
+          readOnly: true
+        {{- end }}
+      volumes:
+      - name: grafana-config
+        configMap:
+          name: grafana-config
+      - name: grafana-storage
+        {{- if .Values.grafana.persistence.enabled }}
+        persistentVolumeClaim:
+          claimName: {{ .Values.grafana.persistence.existingClaim | default "grafana-storage" }}
+        {{- else }}
+        emptyDir: {}
+        {{- end }}
+      - name: grafana-provisioning-dashboards
+        configMap:
+          name: grafana-provisioning-dashboards
+      - name: grafana-provisioning-datasources
+        configMap:
+          name: grafana-provisioning-datasources
+      - name: grafana-tmp
+        emptyDir: {}
+      - name: grafana-log
+        emptyDir: {}
+      {{- if .Values.grafana.tls.enabled }}
+      - name: grafana-tls-cert
+        secret:
+          secretName: {{ .Values.grafana.tls.secretName | default "grafana-tls" }}
+      {{- end }}
+      {{- if .Values.grafana.mtls.enabled }}
+      - name: grafana-mtls-ca
+        secret:
+          secretName: {{ .Values.grafana.mtls.caSecretName | default "grafana-mtls-ca" }}
+      {{- end }}
