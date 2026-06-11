@@ -28,6 +28,7 @@ import (
 	"syscall"
 	"time"
 
+	lru "github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/cenkalti/backoff/v4"
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/lib/pq"
@@ -43,6 +44,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	semconv "go.opentelemetry.io/otel/semconv/v1.38.0"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/time/rate"
 
 	otelhooks "github.com/open-feature/go-sdk-contrib/hooks/open-telemetry/pkg"
 	flagd "github.com/open-feature/go-sdk-contrib/providers/flagd/pkg"
@@ -51,8 +53,10 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
-	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/reflection"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
 	"github.com/XSAM/otelsql"
@@ -73,6 +77,101 @@ var (
 	ErrTLSInvalidCert       = errors.New("invalid TLS certificate/key")
 	ErrTLSInvalidCA         = errors.New("invalid CA bundle")
 )
+
+// RateLimitConfig defines configuration for rate limiting behavior
+type RateLimitConfig struct {
+	RPS            float64 // Maximum requests per second per client identifier
+	IdentifierType string  // Client identifier type: "ip" or "user_id"
+}
+
+// RateLimitInterceptor returns a unary gRPC server interceptor that enforces rate limits per client
+func RateLimitInterceptor(config RateLimitConfig) grpc.UnaryServerInterceptor {
+	var limiterCache *lru.LRU[string, *rate.Limiter]
+	if config.RPS > 0 {
+		limiterCache = lru.NewLRU[string, *rate.Limiter](10000, nil, 5*time.Minute)
+	}
+
+	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+		// Skip rate limiting if disabled
+		if config.RPS <= 0 || limiterCache == nil {
+			return handler(ctx, req)
+		}
+
+		// Extract client identifier
+		var clientID string
+		switch config.IdentifierType {
+		case "user_id":
+			if md, ok := metadata.FromIncomingContext(ctx); ok {
+				if vals := md.Get("x-user-id"); len(vals) > 0 {
+					clientID = vals[0]
+				}
+			}
+			// Fallback to IP if user ID is not present
+			if clientID == "" {
+				fallthrough
+			}
+		case "ip":
+			fallthrough
+		default:
+			// Get IP from X-Forwarded-For header first
+			if md, ok := metadata.FromIncomingContext(ctx); ok {
+				if xff := md.Get("x-forwarded-for"); len(xff) > 0 {
+					// Take the first IP in the comma-separated list
+					parts := strings.Split(xff[0], ",")
+					if len(parts) > 0 {
+						clientID = strings.TrimSpace(parts[0])
+					}
+				}
+			}
+			// Fallback to peer address if X-Forwarded-For is not present
+			if clientID == "" {
+				if p, ok := peer.FromContext(ctx); ok {
+					if tcpAddr, ok := p.Addr.(*net.TCPAddr); ok {
+						clientID = tcpAddr.IP.String()
+					} else {
+						clientID = p.Addr.String()
+					}
+				}
+			}
+		}
+
+		// If we couldn't get any client ID, allow the request
+		if clientID == "" {
+			return handler(ctx, req)
+		}
+
+		// Get or create rate limiter for this client
+		limiter, ok := limiterCache.Get(clientID)
+		if !ok {
+			limiter = rate.NewLimiter(rate.Limit(config.RPS), int(config.RPS)+1)
+			limiterCache.Add(clientID, limiter)
+		}
+
+		// Check rate limit
+		if !limiter.Allow() {
+			// Emit structured warn log
+			logger.WarnContext(ctx, "rate limit exceeded",
+				"client_id", clientID,
+				"endpoint", info.FullMethod,
+				"rps_limit", config.RPS,
+			)
+
+			// Add event to OpenTelemetry span
+			if span := trace.SpanFromContext(ctx); span.IsRecording() {
+				span.AddEvent("rate_limit_exceeded", trace.WithAttributes(
+					attribute.Bool("rate.limit.exceeded", true),
+					attribute.Float64("rate.limit.rps", config.RPS),
+					attribute.String("rate.limit.client_id", clientID),
+				))
+			}
+
+			// Return ResourceExhausted status
+			return nil, status.Error(codes.ResourceExhausted, "rate limit exceeded")
+		}
+
+		return handler(ctx, req)
+	}
+}
 
 // RetryConfig defines configuration for retry behavior
 type RetryConfig struct {
@@ -501,22 +600,46 @@ func LoadTLSConfigFromEnv() (TLSConfig, error) {
 	return cfg, nil
 }
 
+// LoadRateLimitConfigFromEnv reads rate limit configuration from environment variables
+func LoadRateLimitConfigFromEnv() RateLimitConfig {
+	var cfg RateLimitConfig
+	
+	rpsStr := os.Getenv("PRODUCT_CATALOG_RATE_LIMIT_RPS")
+	if rpsStr != "" {
+		if rps, err := strconv.ParseFloat(rpsStr, 64); err == nil {
+			cfg.RPS = rps
+		}
+	}
+	
+	cfg.IdentifierType = os.Getenv("PRODUCT_CATALOG_RATE_LIMIT_IDENTIFIER")
+	if cfg.IdentifierType == "" {
+		cfg.IdentifierType = "ip"
+	}
+	
+	return cfg
+}
+
 // NewGRPCServerWithTLS creates a gRPC server configured with TLS/mTLS as per the provided config
 // Returns plaintext gRPC server if TLS is disabled
 // Returns error if TLS configuration is invalid or cannot be loaded
-func NewGRPCServerWithTLS(cfg TLSConfig) (*grpc.Server, error) {
+func NewGRPCServerWithTLS(tlsCfg TLSConfig, rateLimitCfg RateLimitConfig) (*grpc.Server, error) {
 	// Base server options with OTel handler
 	opts := []grpc.ServerOption{
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 	}
 
-	if !cfg.Enabled {
+	// Add rate limit interceptor if enabled
+	if rateLimitCfg.RPS > 0 {
+		opts = append(opts, grpc.UnaryInterceptor(RateLimitInterceptor(rateLimitCfg)))
+	}
+
+	if !tlsCfg.Enabled {
 		// Return plaintext server
 		return grpc.NewServer(opts...), nil
 	}
 
 	// Load server cert and key
-	cert, err := tls.LoadX509KeyPair(cfg.CertPath, cfg.KeyPath)
+	cert, err := tls.LoadX509KeyPair(tlsCfg.CertPath, tlsCfg.KeyPath)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrTLSInvalidCert, err)
 	}
@@ -526,9 +649,9 @@ func NewGRPCServerWithTLS(cfg TLSConfig) (*grpc.Server, error) {
 		MinVersion:   tls.VersionTLS12,
 	}
 
-	if cfg.ClientAuthRequired {
+	if tlsCfg.ClientAuthRequired {
 		// Load CA certs for client authentication
-		caCert, err := os.ReadFile(cfg.CAPath)
+		caCert, err := os.ReadFile(tlsCfg.CAPath)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrTLSInvalidCA, err)
 		}
@@ -557,12 +680,15 @@ func runServer(ctx context.Context, port int) error {
 		return fmt.Errorf("invalid TLS configuration: %w", err)
 	}
 
+	// Load rate limit configuration
+	rateLimitCfg := LoadRateLimitConfigFromEnv()
+
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		return fmt.Errorf("TCP listen failed: %w", err)
 	}
 
-	srv, err := NewGRPCServerWithTLS(tlsCfg)
+	srv, err := NewGRPCServerWithTLS(tlsCfg, rateLimitCfg)
 	if err != nil {
 		return fmt.Errorf("failed to create gRPC server: %w", err)
 	}
@@ -778,7 +904,10 @@ func main() {
 		logger.Error(fmt.Sprintf("Invalid TLS configuration: %v", err))
 		os.Exit(1)
 	}
-	
+
+	// Load rate limit configuration
+	rateLimitCfg := LoadRateLimitConfigFromEnv()
+
 	logger.Info(fmt.Sprintf("Product Catalog gRPC server started on port: %s", port))
 
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%s", port))
@@ -787,7 +916,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	srv, err := NewGRPCServerWithTLS(tlsCfg)
+	srv, err := NewGRPCServerWithTLS(tlsCfg, rateLimitCfg)
 	if err != nil {
 		logger.Error(fmt.Sprintf("Failed to create gRPC server with TLS config: %v", err))
 		os.Exit(1)
