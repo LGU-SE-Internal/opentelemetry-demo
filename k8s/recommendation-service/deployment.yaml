@@ -15,22 +15,31 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: recommendationservice
+        app.kubernetes.io/instance: recommendation-service
+        app.kubernetes.io/version: {{ .Values.image.tag | default "latest" }}
+        app.kubernetes.io/component: recommendation-service
         app.kubernetes.io/part-of: opentelemetry-demo
-        app.kubernetes.io/component: service
+        app.kubernetes.io/managed-by: Helm
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
     spec:
+      terminationGracePeriodSeconds: 10
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
-        allowPrivilegeEscalation: false
-        capabilities:
-          drop:
-            - ALL
-        readOnlyRootFilesystem: true
-        privileged: false
       containers:
-      - name: recommendationservice
+      - name: recommendation-service
         image: {{ .Values.image.repository | default "otel/opentelemetry-demo-recommendation" }}:{{ .Values.image.tag | default "latest" }}
+        securityContext:
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+          privileged: false
         env:
         - name: PORT
           value: "8080"
@@ -46,17 +55,17 @@ spec:
         - containerPort: 8080
           name: grpc
         livenessProbe:
-          grpc:
+          httpGet:
+            path: /health
             port: 8080
-            service: recommendationservice
           initialDelaySeconds: 5
           periodSeconds: 10
           timeoutSeconds: 1
           failureThreshold: 3
         readinessProbe:
-          grpc:
+          httpGet:
+            path: /health
             port: 8080
-            service: recommendationservice
           initialDelaySeconds: 2
           periodSeconds: 5
           timeoutSeconds: 1
