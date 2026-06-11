@@ -108,7 +108,7 @@ func NewRetryInterceptor(maxRetries int, backoffBase time.Duration, retriableCod
 		for attempt := 0; attempt <= maxRetries; attempt++ {
 			if attempt > 0 {
 				// Calculate exponential backoff
-				delay := backoffBase * time.Duration(1<<attempt)
+				delay := backoffBase * time.Duration(1<<(attempt-1))
 				if delay > 1*time.Second {
 					delay = 1 * time.Second
 				}
@@ -136,7 +136,7 @@ func NewRetryInterceptor(maxRetries int, backoffBase time.Duration, retriableCod
 
 			// Increment retry attempts metric if this is a retry (after first attempt)
 			if attempt > 0 && retryMetrics != nil {
-				retryMetrics.Attempts.WithLabelValues(serviceName, st.Code().String()).Inc()
+				retryMetrics.Attempts.WithLabelValues(serviceName, strings.ToUpper(st.Code().String())).Inc()
 			}
 
 			// Check if this status code is retriable
@@ -147,9 +147,9 @@ func NewRetryInterceptor(maxRetries int, backoffBase time.Duration, retriableCod
 
 		// If we got here, all attempts failed
 		st, ok := status.FromError(lastErr)
-		finalStatusCode := "unknown"
+		finalStatusCode := "UNKNOWN"
 		if ok {
-			finalStatusCode = st.Code().String()
+			finalStatusCode = strings.ToUpper(st.Code().String())
 		}
 		if retryMetrics != nil {
 			retryMetrics.Failures.WithLabelValues(serviceName, finalStatusCode).Inc()

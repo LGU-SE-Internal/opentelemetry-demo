@@ -22,6 +22,9 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/log/global"
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
@@ -55,6 +58,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
@@ -249,8 +253,15 @@ func main() {
 	healthcheck := health.NewServer()
 	healthcheck.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
 
+	// Initialize prometheus metrics
+	registry := prometheus.NewRegistry()
+	retryMetrics = NewRetryMetrics(registry)
+
 	// Set up HTTP health endpoints first so they are available during initialization
 	mux := http.NewServeMux()
+
+	// Metrics endpoint
+	mux.Handle("/metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{}))
 
 	// Health endpoint - always returns 200 when service is running
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -496,6 +507,14 @@ func (cs *checkout) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (
 		return nil, status.Errorf(codes.Internal, "failed to generate order uuid")
 	}
 
+	// Generate idempotency key for this checkout request
+	idempotencyKey := GenerateIdempotencyKey()
+	
+	// Add idempotency key to context for downstream gRPC calls
+	md := metadata.New(nil)
+	md.Set("idempotency-key", idempotencyKey)
+	ctxWithIdempotency := metadata.NewOutgoingContext(ctx, md)
+
 	prep, err := cs.prepareOrderItemsAndShippingQuoteFromCart(ctx, req.UserId, req.UserCurrency, req.Address)
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
@@ -513,7 +532,7 @@ func (cs *checkout) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (
 		total = money.Must(money.Sum(total, multPrice))
 	}
 
-	txID, err := cs.chargeCard(ctx, total, req.CreditCard)
+	txID, err := cs.chargeCard(ctxWithIdempotency, total, req.CreditCard)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to charge card: %+v", err)
 	}
@@ -526,7 +545,7 @@ func (cs *checkout) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (
 		slog.String("transaction_id", txID),
 	)
 
-	shippingTrackingID, err := cs.shipOrder(ctx, req.Address, prep.cartItems)
+	shippingTrackingID, err := cs.shipOrder(ctx, req.Address, prep.cartItems, idempotencyKey)
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "shipping error: %+v", err)
 	}
@@ -629,13 +648,14 @@ var (
 	// Circuit breakers per upstream service
 	circuitBreakers = make(map[string]*gobreaker.CircuitBreaker)
 	cbMutex         sync.RWMutex
+	retryMetrics    *RetryMetrics
 
 	// Resilience configuration constants
 	retryableStatusCodes = []codes.Code{codes.Unavailable, codes.ResourceExhausted, codes.Aborted}
 	initialBackoff       = 100 * time.Millisecond
 	maxBackoff           = 1 * time.Second
 	backoffMultiplier    = 2.0
-	maxRetryAttempts     = 3
+	maxRetryAttempts     = 2
 	totalRetryTimeout    = 2 * time.Second
 	cbFailureThreshold   = uint32(5)
 	cbCoolingPeriod      = 10 * time.Second
@@ -731,21 +751,9 @@ func circuitBreakerUnaryInterceptor(svcName string) grpc.UnaryClientInterceptor 
 
 // mustCreateClient creates a gRPC client for the given target address with retry and circuit breaker interceptors
 func mustCreateClient(addr string, svcName string) *grpc.ClientConn {
-	// Configure gRPC retry policy
-	retryPolicy := fmt.Sprintf(`{
-		"methodConfig": [{
-			"name": [{"service": ""}],
-			"retryPolicy": {
-				"maxAttempts": %d,
-				"initialBackoff": "%s",
-				"maxBackoff": "%s",
-				"backoffMultiplier": %f,
-				"retryableStatusCodes": ["UNAVAILABLE", "RESOURCE_EXHAUSTED", "ABORTED"]
-			},
-			"waitForReady": true,
-			"timeout": "%s"
-		}]
-	}`, maxRetryAttempts, initialBackoff, maxBackoff, backoffMultiplier, totalRetryTimeout)
+	// Configure retry interceptor
+	retryCodes := []codes.Code{codes.Unavailable, codes.ResourceExhausted, codes.Aborted}
+	retryInterceptor := NewRetryInterceptor(maxRetryAttempts, initialBackoff, retryCodes, retryMetrics)
 
 	// Load client TLS configuration for this service
 	svcNameUpper := strings.ToUpper(svcName)
@@ -758,7 +766,7 @@ func mustCreateClient(addr string, svcName string) *grpc.ClientConn {
 
 	c, err := NewGRPCClientConn(addr, clientTLSConfig,
 		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
-		grpc.WithDefaultServiceConfig(retryPolicy),
+		grpc.WithUnaryInterceptor(retryInterceptor),
 		grpc.WithUnaryInterceptor(circuitBreakerUnaryInterceptor(svcName)),
 	)
 	if err != nil {
@@ -902,7 +910,7 @@ func (cs *checkout) sendOrderConfirmation(ctx context.Context, email string, ord
 	return err
 }
 
-func (cs *checkout) shipOrder(ctx context.Context, address *pb.Address, items []*pb.CartItem) (string, error) {
+func (cs *checkout) shipOrder(ctx context.Context, address *pb.Address, items []*pb.CartItem, idempotencyKey string) (string, error) {
 	shipPayload, err := json.Marshal(map[string]interface{}{
 		"address": address,
 		"items":   items,
@@ -916,6 +924,7 @@ func (cs *checkout) shipOrder(ctx context.Context, address *pb.Address, items []
 		return "", fmt.Errorf("failed to create request: %+v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", idempotencyKey)
 	resp, err := cs.httpClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed POST to shipping service: %+v", err)
@@ -923,7 +932,7 @@ func (cs *checkout) shipOrder(ctx context.Context, address *pb.Address, items []
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("failed POST to email service: expected 200, got %d", resp.StatusCode)
+		return "", fmt.Errorf("failed POST to shipping service: expected 200, got %d", resp.StatusCode)
 	}
 
 	trackingRespBytes, err := io.ReadAll(resp.Body)
