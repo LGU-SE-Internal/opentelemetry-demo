@@ -180,20 +180,20 @@ impl ShippingServiceImpl {
     fn validate_get_quote_request(req: &GetQuoteRequest) -> Result<(), Status> {
         // Validate address is present and all fields are non-empty
         let address = req.address.as_ref().ok_or_else(|| Status::invalid_argument("Missing required field: address"))?;
-        if address.street_address.is_empty() {
-            return Err(Status::invalid_argument("Missing required field: address.street_address"));
+        if address.street.is_empty() {
+            return Err(Status::invalid_argument("Missing required field: street"));
         }
         if address.city.is_empty() {
-            return Err(Status::invalid_argument("Missing required field: address.city"));
+            return Err(Status::invalid_argument("Missing required field: city"));
         }
         if address.state.is_empty() {
-            return Err(Status::invalid_argument("Missing required field: address.state"));
+            return Err(Status::invalid_argument("Missing required field: state"));
         }
         if address.zip_code.is_empty() {
-            return Err(Status::invalid_argument("Missing required field: address.zip_code"));
+            return Err(Status::invalid_argument("Missing required field: zip_code"));
         }
         if address.country.is_empty() {
-            return Err(Status::invalid_argument("Missing required field: address.country"));
+            return Err(Status::invalid_argument("Missing required field: country"));
         }
         
         // Validate weight value is strictly greater than 0
@@ -213,8 +213,8 @@ impl ShippingServiceImpl {
         
         // Validate address is present and all fields are non-empty
         let address = req.address.as_ref().ok_or_else(|| Status::invalid_argument("Address field address cannot be empty"))?;
-        if address.street_address.is_empty() {
-            return Err(Status::invalid_argument("Address field street_address cannot be empty"));
+        if address.street.is_empty() {
+            return Err(Status::invalid_argument("Address field street cannot be empty"));
         }
         if address.city.is_empty() {
             return Err(Status::invalid_argument("Address field city cannot be empty"));
@@ -239,7 +239,7 @@ impl ShippingServiceImpl {
             if item.quantity <= 0 {
                 return Err(Status::invalid_argument(format!(
                     "Item {} has invalid quantity: must be greater than 0",
-                    item.item_id
+                    item.product_id
                 )));
             }
         }
