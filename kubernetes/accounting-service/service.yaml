@@ -3,13 +3,14 @@ kind: Service
 metadata:
   name: accounting-service
   labels:
-    app: accounting-service
+    app.kubernetes.io/name: accounting-service
+    app.kubernetes.io/part-of: opentelemetry-demo
 spec:
   type: ClusterIP
   ports:
   - port: 8080
     targetPort: 8080
     protocol: TCP
-    name: health
+    name: http-health
   selector:
-    app: accounting-service
+    app.kubernetes.io/name: accounting-service
