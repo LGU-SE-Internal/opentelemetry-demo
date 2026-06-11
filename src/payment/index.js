@@ -1029,12 +1029,16 @@ async function closeGracefully(signal) {
       duration_ms: durationMs,
       timestamp: new Date().toISOString()
     });
-    process.exit(1);
   }
+}
+
+function getServer() {
+  return server;
 }
 
 module.exports = {
   getServerCredentials,
+  getServer,
   app: app,
   rateLimitInterceptor,
   getLimitRpsForEndpoint
