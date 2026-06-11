@@ -15,6 +15,19 @@ spec:
       labels:
         app.kubernetes.io/name: llm-service
     spec:
+      serviceAccountName: llm-service-sa
+      automountServiceAccountToken: false
+      securityContext:
+        privileged: false
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        allowPrivilegeEscalation: false
+        seccompProfile:
+          type: RuntimeDefault
+        capabilities:
+          drop: ["ALL"]
+        readOnlyRootFilesystem: true
       containers:
       - name: llm-service
         image: llm-service:latest
