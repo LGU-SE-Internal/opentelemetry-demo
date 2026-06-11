@@ -179,14 +179,14 @@ func (rdb *RetryableDB) retryOperation(ctx context.Context, opType string, opera
 	return lastErr
 }
 
-// Ping wraps the underlying Ping operation with retry logic
+// Ping wraps the underlying Ping method with retry logic
 func (rdb *RetryableDB) Ping(ctx context.Context) error {
 	return rdb.retryOperation(ctx, "ping", func() error {
 		return rdb.db.Ping(ctx)
 	})
 }
 
-// Exec wraps the underlying Exec operation with retry logic
+// Exec wraps the underlying Exec method with retry logic
 func (rdb *RetryableDB) Exec(ctx context.Context, query string, args ...interface{}) (pgconn.CommandTag, error) {
 	var res pgconn.CommandTag
 	err := rdb.retryOperation(ctx, "exec", func() error {
@@ -197,27 +197,26 @@ func (rdb *RetryableDB) Exec(ctx context.Context, query string, args ...interfac
 	return res, err
 }
 
-// Query wraps the underlying Query operation with retry logic
+// Query wraps the underlying Query method with retry logic
 func (rdb *RetryableDB) Query(ctx context.Context, query string, args ...interface{}) (pgx.Rows, error) {
-	var res pgx.Rows
+	var rows pgx.Rows
 	err := rdb.retryOperation(ctx, "query", func() error {
 		var innerErr error
-		res, innerErr = rdb.db.Query(ctx, query, args...)
+		rows, innerErr = rdb.db.Query(ctx, query, args...)
 		return innerErr
 	})
-	return res, err
+	return rows, err
 }
 
-// QueryRow wraps the underlying QueryRow operation with retry logic
+// QueryRow wraps the underlying QueryRow method with retry logic
 func (rdb *RetryableDB) QueryRow(ctx context.Context, query string, args ...interface{}) pgx.Row {
-	var res pgx.Row
-	// QueryRow returns the error via the Row object's Err method
-	rdb.retryOperation(ctx, "query_row", func() error {
-		res = rdb.db.QueryRow(ctx, query, args...)
-		return res.Err()
+	var row pgx.Row
+	_ = rdb.retryOperation(ctx, "query_row", func() error {
+		row = rdb.db.QueryRow(ctx, query, args...)
+		return row.Err()
 	})
-		return res
-	}
+	return row
+}
 var (
 	limiters = make(map[string]*clientLimiter)
 	mu       sync.Mutex
