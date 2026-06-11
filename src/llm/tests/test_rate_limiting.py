@@ -3,8 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 import time
 import pytest
+import logging
 from src.llm.app import app
 from freezegun import freeze_time
+from unittest.mock import patch
 
 
 @pytest.fixture
@@ -14,122 +16,152 @@ def client():
         yield client
 
 
-def test_ac1_requests_within_limit_return_ok_with_headers(client, monkeypatch):
-    """AC-1: Requests within rate limit return expected status with all rate limit headers"""
-    monkeypatch.setenv('RATE_LIMIT_MAX_REQUESTS', '2')
-    monkeypatch.setenv('RATE_LIMIT_WINDOW_SECONDS', '60')
-    
-    # First request
-    response = client.get('/health', environ_base={'REMOTE_ADDR': '192.168.1.1'})
-    assert response.status_code != 429
-    assert 'X-RateLimit-Limit' in response.headers
-    assert response.headers['X-RateLimit-Limit'] == '2'
-    assert 'X-RateLimit-Remaining' in response.headers
-    assert int(response.headers['X-RateLimit-Remaining']) == 1
-    assert 'X-RateLimit-Reset' in response.headers
-    assert int(response.headers['X-RateLimit-Reset']) > int(time.time())
-    
-    # Second request
-    response = client.get('/health', environ_base={'REMOTE_ADDR': '192.168.1.1'})
-    assert response.status_code != 429
-    assert int(response.headers['X-RateLimit-Remaining']) == 0
+@pytest.fixture
+def caplog(caplog):
+    caplog.set_level(logging.WARN)
+    return caplog
 
 
-def test_ac2_requests_exceeding_limit_return_429(client, monkeypatch):
-    """AC-2: Requests exceeding rate limit return 429 with Retry-After header and correct JSON body"""
-    monkeypatch.setenv('RATE_LIMIT_MAX_REQUESTS', '2')
-    monkeypatch.setenv('RATE_LIMIT_WINDOW_SECONDS', '60')
+def test_ac1_single_ip_n_success_requests_per_minute(client, monkeypatch):
+    """AC-1: When RATE_LIMIT_REQUESTS_PER_MINUTE is set to N, single client IP receives N successful 2xx responses within 60s window"""
+    test_limit = 5
+    monkeypatch.setenv('RATE_LIMIT_REQUESTS_PER_MINUTE', str(test_limit))
+    
+    for i in range(test_limit):
+        response = client.get('/health', environ_base={'REMOTE_ADDR': '10.0.0.1'})
+        assert 200 <= response.status_code < 300, f"Request {i+1} failed with status {response.status_code}"
+
+
+def test_ac2_excess_request_returns_429(client, monkeypatch):
+    """AC-2: When N+1 requests sent within 60s window, N+1th returns 429 status code"""
+    test_limit = 3
+    monkeypatch.setenv('RATE_LIMIT_REQUESTS_PER_MINUTE', str(test_limit))
     
     # Exhaust the limit
-    client.get('/health', environ_base={'REMOTE_ADDR': '192.168.1.2'})
-    client.get('/health', environ_base={'REMOTE_ADDR': '192.168.1.2'})
+    for _ in range(test_limit):
+        client.get('/health', environ_base={'REMOTE_ADDR': '10.0.0.2'})
     
-    # Third request should be blocked
-    response = client.get('/health', environ_base={'REMOTE_ADDR': '192.168.1.2'})
+    # Excess request
+    response = client.get('/health', environ_base={'REMOTE_ADDR': '10.0.0.2'})
     assert response.status_code == 429
+
+
+def test_ac3_429_response_has_correct_headers_and_body(client, monkeypatch):
+    """AC-3: 429 responses include Retry-After header (1-60) and matching retry_after in JSON body"""
+    test_limit = 1
+    monkeypatch.setenv('RATE_LIMIT_REQUESTS_PER_MINUTE', str(test_limit))
+    
+    # Exhaust limit
+    client.get('/health', environ_base={'REMOTE_ADDR': '10.0.0.3'})
+    
+    # Get blocked response
+    response = client.get('/health', environ_base={'REMOTE_ADDR': '10.0.0.3'})
+    
+    # Check headers
     assert 'Retry-After' in response.headers
     retry_after = int(response.headers['Retry-After'])
-    assert 0 < retry_after <= 60
+    assert 1 <= retry_after <= 60
     
+    # Check body
     assert response.is_json
-    response_json = response.get_json()
-    assert response_json['error'] == 'Rate limit exceeded'
-    assert response_json['retry_after'] == retry_after
+    body = response.get_json()
+    assert body['error'] == 'Too Many Requests'
+    assert body['message'] == 'Rate limit exceeded. Try again later.'
+    assert body['retry_after'] == retry_after
 
 
-def test_ac3_custom_max_requests_env_var_used(client, monkeypatch):
-    """AC-3: Custom RATE_LIMIT_MAX_REQUESTS environment variable is respected"""
-    monkeypatch.setenv('RATE_LIMIT_MAX_REQUESTS', '50')
-    monkeypatch.setenv('RATE_LIMIT_WINDOW_SECONDS', '60')
+def test_ac4_default_rate_limit_of_60_when_no_env_var(client, monkeypatch):
+    """AC-4: When RATE_LIMIT_REQUESTS_PER_MINUTE is not set, default limit of 60 requests per minute is enforced"""
+    # Clear any existing env var
+    monkeypatch.delenv('RATE_LIMIT_REQUESTS_PER_MINUTE', raising=False)
     
-    response = client.get('/health', environ_base={'REMOTE_ADDR': '192.168.1.3'})
-    assert response.headers['X-RateLimit-Limit'] == '50'
-
-
-def test_ac4_custom_window_seconds_env_var_used(client, monkeypatch):
-    """AC-4: Custom RATE_LIMIT_WINDOW_SECONDS environment variable is respected"""
-    monkeypatch.setenv('RATE_LIMIT_MAX_REQUESTS', '100')
-    monkeypatch.setenv('RATE_LIMIT_WINDOW_SECONDS', '120')
+    # Send 60 requests - all should pass
+    for i in range(60):
+        response = client.get('/health', environ_base={'REMOTE_ADDR': '10.0.0.4'})
+        assert 200 <= response.status_code < 300, f"Request {i+1} failed with status {response.status_code}"
     
-    with freeze_time() as frozen_time:
-        response = client.get('/health', environ_base={'REMOTE_ADDR': '192.168.1.4'})
-        reset_time = int(response.headers['X-RateLimit-Reset'])
-        expected_reset = int(time.time()) + 120
-        # Allow small time delta for processing
-        assert abs(reset_time - expected_reset) < 2
+    # 61st should fail
+    response = client.get('/health', environ_base={'REMOTE_ADDR': '10.0.0.4'})
+    assert response.status_code == 429
 
 
-def test_ac5_rate_limits_isolated_per_ip(client, monkeypatch):
-    """AC-5: Rate limits are isolated per client IP address"""
-    monkeypatch.setenv('RATE_LIMIT_MAX_REQUESTS', '1')
-    monkeypatch.setenv('RATE_LIMIT_WINDOW_SECONDS', '60')
+def test_ac5_rate_limit_violation_logs_all_required_fields(client, monkeypatch, caplog):
+    """AC-5: Every rate limit violation is logged with all required fields at WARN level"""
+    test_limit = 2
+    test_ip = '10.0.0.5'
+    test_endpoint = '/health'
+    monkeypatch.setenv('RATE_LIMIT_REQUESTS_PER_MINUTE', str(test_limit))
     
-    # Exhaust limit for first IP
-    client.get('/health', environ_base={'REMOTE_ADDR': '192.168.1.5'})
-    blocked_resp = client.get('/health', environ_base={'REMOTE_ADDR': '192.168.1.5'})
-    assert blocked_resp.status_code == 429
+    # Exhaust limit
+    client.get(test_endpoint, environ_base={'REMOTE_ADDR': test_ip})
+    client.get(test_endpoint, environ_base={'REMOTE_ADDR': test_ip})
     
-    # Second IP should still have full limit
-    allowed_resp = client.get('/health', environ_base={'REMOTE_ADDR': '192.168.1.6'})
-    assert allowed_resp.status_code != 429
-    assert int(allowed_resp.headers['X-RateLimit-Remaining']) == 0
+    # Trigger violation
+    with patch('src.llm.app.request_id', return_value='test-req-id-123'):
+        violation_time = time.time()
+        client.get(test_endpoint, environ_base={'REMOTE_ADDR': test_ip})
+    
+    # Find the warning log
+    rate_limit_logs = [record for record in caplog.records if record.levelname == 'WARN']
+    assert len(rate_limit_logs) == 1
+    log_record = rate_limit_logs[0]
+    
+    # Check required fields
+    assert hasattr(log_record, 'client_ip')
+    assert log_record.client_ip == test_ip
+    assert hasattr(log_record, 'request_endpoint')
+    assert log_record.request_endpoint == test_endpoint
+    assert hasattr(log_record, 'rate_limit_threshold')
+    assert log_record.rate_limit_threshold == test_limit
+    assert hasattr(log_record, 'violation_timestamp')
+    # Check timestamp is recent ISO 8601 string
+    assert len(log_record.violation_timestamp) > 10
+    assert 'T' in log_record.violation_timestamp
+    assert hasattr(log_record, 'request_id')
+    assert log_record.request_id == 'test-req-id-123'
 
 
-def test_ac6_all_endpoints_covered_by_rate_limiting(client, monkeypatch):
-    """AC-6: All Flask endpoints are covered by rate limiting middleware"""
-    monkeypatch.setenv('RATE_LIMIT_MAX_REQUESTS', '1')
-    monkeypatch.setenv('RATE_LIMIT_WINDOW_SECONDS', '60')
+def test_ac6_distinct_ips_have_isolated_limits(client, monkeypatch):
+    """AC-6: Two distinct client IPs can each make N requests without interfering"""
+    test_limit = 2
+    monkeypatch.setenv('RATE_LIMIT_REQUESTS_PER_MINUTE', str(test_limit))
     
-    test_endpoints = [
-        '/health',
-        '/ready',
-        '/v1/models',
-        '/v1/chat/completions'
-    ]
+    ip1 = '10.0.0.6'
+    ip2 = '10.0.0.7'
     
-    for endpoint in test_endpoints:
-        # First request allowed
-        resp1 = client.post(endpoint, environ_base={'REMOTE_ADDR': '192.168.1.7'}) if endpoint == '/v1/chat/completions' else client.get(endpoint, environ_base={'REMOTE_ADDR': '192.168.1.7'})
-        # Second request should be blocked regardless of endpoint
-        resp2 = client.post(endpoint, environ_base={'REMOTE_ADDR': '192.168.1.7'}) if endpoint == '/v1/chat/completions' else client.get(endpoint, environ_base={'REMOTE_ADDR': '192.168.1.7'})
-        assert resp2.status_code == 429, f"Endpoint {endpoint} not covered by rate limiting"
+    # IP1 uses all their limit
+    for _ in range(test_limit):
+        client.get('/health', environ_base={'REMOTE_ADDR': ip1})
+    # IP1 next request blocked
+    assert client.get('/health', environ_base={'REMOTE_ADDR': ip1}).status_code == 429
+    
+    # IP2 still has full limit
+    for i in range(test_limit):
+        response = client.get('/health', environ_base={'REMOTE_ADDR': ip2})
+        assert 200 <= response.status_code < 300, f"IP2 request {i+1} failed"
+    
+    # IP2 next request blocked
+    assert client.get('/health', environ_base={'REMOTE_ADDR': ip2}).status_code == 429
 
 
-def test_ac7_rate_limit_resets_after_window(client, monkeypatch):
-    """AC-7: Rate limit counter resets after window expires"""
-    monkeypatch.setenv('RATE_LIMIT_MAX_REQUESTS', '1')
-    monkeypatch.setenv('RATE_LIMIT_WINDOW_SECONDS', '60')
+def test_ac7_performance_impact_under_load(client, monkeypatch):
+    """AC-7: Response time at 80% of rate limit is no more than 5% higher than baseline (no rate limit)"""
+    test_limit = 100
+    test_ip = '10.0.0.8'
     
-    with freeze_time() as frozen_time:
-        # Exhaust limit
-        client.get('/health', environ_base={'REMOTE_ADDR': '192.168.1.8'})
-        blocked_resp = client.get('/health', environ_base={'REMOTE_ADDR': '192.168.1.8'})
-        assert blocked_resp.status_code == 429
-        
-        # Move time forward past window
-        frozen_time.tick(61)
-        
-        # Request should be allowed again
-        allowed_resp = client.get('/health', environ_base={'REMOTE_ADDR': '192.168.1.8'})
-        assert allowed_resp.status_code != 429
-        assert int(allowed_resp.headers['X-RateLimit-Remaining']) == 0
+    # Measure baseline with rate limiting disabled
+    monkeypatch.setenv('RATE_LIMIT_REQUESTS_PER_MINUTE', '0')  # 0 = disable
+    start = time.time()
+    for _ in range(int(test_limit * 0.8)):
+        client.get('/health', environ_base={'REMOTE_ADDR': test_ip})
+    baseline_avg = (time.time() - start) / (test_limit * 0.8)
+    
+    # Measure with rate limiting enabled
+    monkeypatch.setenv('RATE_LIMIT_REQUESTS_PER_MINUTE', str(test_limit))
+    start = time.time()
+    for _ in range(int(test_limit * 0.8)):
+        client.get('/health', environ_base={'REMOTE_ADDR': test_ip})
+    rate_limit_avg = (time.time() - start) / (test_limit * 0.8)
+    
+    # Check performance impact < 5%
+    assert rate_limit_avg <= baseline_avg * 1.05, f"Rate limiting added >5% latency: baseline={baseline_avg}s, with limit={rate_limit_avg}s"
