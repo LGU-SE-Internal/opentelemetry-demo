@@ -1,0 +1,18 @@
+# Copyright The OpenTelemetry Authors
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kafka-data
+  labels:
+    app: kafka
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/part-of: opentelemetry-demo
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: default
