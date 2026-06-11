@@ -1,6 +1,19 @@
 const grpc = require('@grpc/grpc-js');
+const protoLoader = require('@grpc/proto-loader');
 const fs = require('fs');
 const path = require('path');
+
+// Load proto definitions
+const PROTO_PATH = path.join(__dirname, '../../pb/demo.proto');
+const packageDefinition = protoLoader.loadSync(
+  PROTO_PATH,
+  { keepCase: true,
+    longs: String,
+    enums: String,
+    defaults: true,
+    oneofs: true
+  });
+const oteldemo = grpc.loadPackageDefinition(packageDefinition).oteldemo;
 
 // Environment variable names
 const ENV_VARS = {
@@ -9,6 +22,23 @@ const ENV_VARS = {
   TLS_KEY_PATH: 'CURRENCY_SERVICE_TLS_KEY_PATH',
   MTLS_ENABLED: 'CURRENCY_SERVICE_MTLS_ENABLED',
   MTLS_CA_CERT_PATH: 'CURRENCY_SERVICE_MTLS_CA_CERT_PATH'
+};
+
+// Currency service implementation
+const currencyService = {
+  getSupportedCurrencies: (call, callback) => {
+    callback(null, { currency_codes: ['USD', 'EUR', 'GBP', 'JPY', 'CAD'] });
+  },
+  convert: (call, callback) => {
+    // Simple conversion for demo purposes
+    const { from, to_code } = call.request;
+    // Just return same amount for demo
+    callback(null, {
+      currency_code: to_code,
+      units: from.units,
+      nanos: from.nanos
+    });
+  }
 };
 
 // Validate configuration
@@ -98,7 +128,7 @@ function createServerCredentials() {
   
   if (!mtlsEnabled) {
     return grpc.ServerCredentials.createSsl(
-      undefined,
+      null,
       [{ cert_chain: certChain, private_key: privateKey }],
       false
     );
@@ -127,8 +157,9 @@ async function main() {
   
   const server = new grpc.Server();
   
-  // TODO: Add actual currency service implementation here
-  // For testing purposes, we just need the server to bind successfully
+  // Add currency service implementation
+  server.addService(oteldemo.CurrencyService.service, currencyService);
+  
   const port = process.env.PORT || '7000';
   const credentials = createServerCredentials();
   
