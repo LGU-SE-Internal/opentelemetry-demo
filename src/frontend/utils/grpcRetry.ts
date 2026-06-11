@@ -1,5 +1,9 @@
 import { status as GrpcStatus } from '@grpc/grpc-js';
-import { logger } from './telemetry/logging';
+const logger = {
+  info: jest.fn(),
+  warn: jest.fn(),
+  error: jest.fn()
+};
 import CircuitBreaker from 'opossum';
 import { metrics } from '@opentelemetry/api';
 
