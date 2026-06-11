@@ -1,0 +1,91 @@
+# Copyright The OpenTelemetry Authors
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout-service
+  labels:
+    app.kubernetes.io/name: checkout-service
+    app.kubernetes.io/part-of: opentelemetry-demo
+    app.kubernetes.io/version: "latest"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: checkout-service
+      app.kubernetes.io/part-of: opentelemetry-demo
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: checkout-service
+        app.kubernetes.io/part-of: opentelemetry-demo
+        app.kubernetes.io/version: "latest"
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        opentelemetry.io/inject-sdk: "true"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: checkout-service
+          image: ghcr.io/lgu-se-internal/opentelemetry-demo/checkout-service:latest
+          ports:
+            - containerPort: 8080
+              name: http
+            - containerPort: 9090
+              name: metrics
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            privileged: false
+          env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otelcol:4317"
+            - name: OTEL_SERVICE_NAME
+              value: "checkout-service"
+            - name: PAYMENT_SERVICE_ADDR
+              value: "paymentservice:50051"
+            - name: SHIPPING_SERVICE_ADDR
+              value: "shippingservice:50051"
+            - name: CART_SERVICE_ADDR
+              value: "cartservice:50051"
+            - name: PRODUCT_CATALOG_SERVICE_ADDR
+              value: "productcatalogservice:50051"
+            - name: FEATURE_FLAG_GRPC_SERVICE_ADDR
+              value: "flagd:8013"
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
