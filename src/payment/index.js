@@ -246,7 +246,7 @@ async function chargeServiceHandler(call, callback) {
       await new Promise(resolve => setTimeout(resolve, call.request.__test_delay_ms));
     }
 
-    const { amount, credit_card_number, credit_card_expiration_month, credit_card_expiration_year, credit_card_cvv } = call.request;
+    const { amount, credit_card, currency_code } = call.request;
     
     // AC-1: Check required fields
     if (!amount) {
@@ -254,57 +254,70 @@ async function chargeServiceHandler(call, callback) {
       err.code = grpc.status.INVALID_ARGUMENT;
       throw err;
     }
-    if (!amount.currency_code) {
-      const err = new Error("Missing required field: amount.currency_code");
+    if (!credit_card) {
+      const err = new Error("Missing required field: credit_card");
       err.code = grpc.status.INVALID_ARGUMENT;
       throw err;
     }
+    if (!currency_code) {
+      const err = new Error("Missing required field: currency_code");
+      err.code = grpc.status.INVALID_ARGUMENT;
+      throw err;
+    }
+
+    const { 
+      credit_card_number, 
+      credit_card_expiration_month, 
+      credit_card_expiration_year, 
+      credit_card_cvv 
+    } = credit_card;
+    
     if (!credit_card_number) {
-      const err = new Error("Missing required field: credit_card_number");
+      const err = new Error("Missing required field: credit_card.credit_card_number");
       err.code = grpc.status.INVALID_ARGUMENT;
       throw err;
     }
     if (credit_card_expiration_month === undefined || credit_card_expiration_month === null) {
-      const err = new Error("Missing required field: credit_card_expiration_month");
+      const err = new Error("Missing required field: credit_card.credit_card_expiration_month");
       err.code = grpc.status.INVALID_ARGUMENT;
       throw err;
     }
     if (credit_card_expiration_year === undefined || credit_card_expiration_year === null) {
-      const err = new Error("Missing required field: credit_card_expiration_year");
+      const err = new Error("Missing required field: credit_card.credit_card_expiration_year");
       err.code = grpc.status.INVALID_ARGUMENT;
       throw err;
     }
     if (!credit_card_cvv) {
-      const err = new Error("Missing required field: credit_card_cvv");
+      const err = new Error("Missing required field: credit_card.credit_card_cvv");
       err.code = grpc.status.INVALID_ARGUMENT;
       throw err;
     }
 
     // AC-2: Validate amount units non-negative
     if (amount.units < 0) {
-      const err = new Error("units must be a non-negative integer");
+      const err = new Error("Amount units must be non-negative");
       err.code = grpc.status.INVALID_ARGUMENT;
       throw err;
     }
 
     // AC-3: Validate amount nanos range
     if (amount.nanos < 0 || amount.nanos > 999999999) {
-      const err = new Error("nanos must be an integer between 0 and 999999999 inclusive");
+      const err = new Error("Amount nanos must be between 0 and 999999999");
       err.code = grpc.status.INVALID_ARGUMENT;
       throw err;
     }
 
     // AC-3: Validate currency code format
     const currencyCodeRegex = /^[A-Z]{3}$/;
-    if (!currencyCodeRegex.test(amount.currency_code)) {
-      const err = new Error("Invalid amount.currency_code: must be 3-letter uppercase ISO 4217 code");
+    if (!currencyCodeRegex.test(currency_code)) {
+      const err = new Error(`Currency ${currency_code} is invalid: must be 3-letter uppercase ISO 4217 code`);
       err.code = grpc.status.INVALID_ARGUMENT;
       throw err;
     }
 
     // AC-4: Validate currency is supported
-    if (!SUPPORTED_CURRENCIES.includes(amount.currency_code)) {
-      const err = new Error(`currency code ${amount.currency_code} is not supported. Supported currencies: ${SUPPORTED_CURRENCIES.join(', ')}`);
+    if (!SUPPORTED_CURRENCIES.includes(currency_code)) {
+      const err = new Error(`Currency ${currency_code} is not supported`);
       err.code = grpc.status.INVALID_ARGUMENT;
       throw err;
     }
@@ -316,9 +329,10 @@ async function chargeServiceHandler(call, callback) {
       err.code = grpc.status.INVALID_ARGUMENT;
       throw err;
     }
+    // AC-5: Validate credit card number length
     const cardNumberDigits = credit_card_number;
-    if (cardNumberDigits.length < 13 || cardNumberDigits.length > 19) {
-      const err = new Error("Invalid credit_card_number: must be between 13 and 19 digits long");
+    if (cardNumberDigits.length != 13 && cardNumberDigits.length != 15 && cardNumberDigits.length != 16) {
+      const err = new Error("Invalid credit card number length: must be 13, 15, or 16 digits");
       err.code = grpc.status.INVALID_ARGUMENT;
       throw err;
     }
@@ -341,7 +355,7 @@ async function chargeServiceHandler(call, callback) {
     const currentMonth = now.getMonth() + 1; // Months are 0-based in JS
     if (credit_card_expiration_year < currentYear || 
         (credit_card_expiration_year === currentYear && credit_card_expiration_month < currentMonth)) {
-      const err = new Error("Invalid credit card expiration date: cannot be in the past");
+      const err = new Error("Credit card is expired");
       err.code = grpc.status.INVALID_ARGUMENT;
       throw err;
     }
@@ -354,7 +368,7 @@ async function chargeServiceHandler(call, callback) {
       throw err;
     }
     if (credit_card_cvv.length < 3 || credit_card_cvv.length > 4) {
-      const err = new Error("Invalid credit_card_cvv: must be between 3 and 4 digits long");
+      const err = new Error("Invalid CVV length: must be 3 or 4 digits");
       err.code = grpc.status.INVALID_ARGUMENT;
       throw err;
     }
@@ -364,7 +378,22 @@ async function chargeServiceHandler(call, callback) {
     })
     logger.info("Charge request received.")
 
-    const response = await charge.charge(call.request)
+    // Map request fields to the format expected by charge function
+    const chargeRequest = {
+      amount: {
+        units: amount.units,
+        nanos: amount.nanos,
+        currencyCode: currency_code
+      },
+      creditCard: {
+        creditCardNumber: credit_card_number,
+        creditCardExpirationYear: credit_card_expiration_year,
+        creditCardExpirationMonth: credit_card_expiration_month,
+        creditCardCvv: credit_card_cvv
+      }
+    }
+
+    const response = await charge.charge(chargeRequest)
     callback(null, response)
 
   } catch (err) {
