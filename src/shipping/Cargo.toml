@@ -44,6 +44,8 @@ rand = "0.8.5"
 prometheus = "0.14.0"
 metrics-exporter-prometheus = "0.18.3"
 tower = "0.5.3"
+tower-retry = "0.3.0"
+tower-circuit-breaker = "0.2.3"
 lazy_static = "1.4.0"
 
 [dependencies.uuid]
