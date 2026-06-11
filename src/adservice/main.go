@@ -106,6 +106,132 @@ func isTransientError(err error) bool {
 	if errors.As(err, &pgErr) {
 		return TransientPostgresErrorCodes[pgErr.Code]
 	}
+	// Also retry connection errors that are not wrapped PgError
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return false // Context errors are handled separately
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	return false
+}
+
+// retry runs the given operation with exponential backoff retry logic
+func (rdb *RetryableDB) retry(ctx context.Context, opType string, op func() error) error {
+	if rdb.config.MaxRetries == 0 {
+		return op()
+	}
+
+	backoffCfg := backoff.NewExponentialBackOff()
+	backoffCfg.InitialInterval = rdb.config.InitialBackoff
+	backoffCfg.MaxInterval = rdb.config.MaxBackoff
+	backoffCfg.Multiplier = 2
+	backoffCfg.Reset()
+
+	var lastErr error
+	for attempt := 0; attempt <= rdb.config.MaxRetries; attempt++ {
+		err := op()
+		if err == nil {
+			return nil
+		}
+
+		lastErr = err
+
+		// Check if context is canceled/deadline exceeded first
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+
+		// Check if error is transient and we have retries left
+		if attempt >= rdb.config.MaxRetries || !isTransientError(err) {
+			break
+		}
+
+		// Increment retry attempts metric
+		var errCode string
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) {
+			errCode = pgErr.Code
+		}
+		rdb.metrics.RetryAttempts.Add(ctx, 1,
+			metric.WithAttributes(
+				attribute.String("error_code", errCode),
+				attribute.String("operation_type", opType),
+			),
+		)
+
+		// Wait for backoff or context cancellation
+		waitTime := backoffCfg.NextBackOff()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(waitTime):
+		}
+	}
+
+	// Increment failure metric if we exhausted all retries
+	var errCode string
+	var pgErr *pgconn.PgError
+	if errors.As(lastErr, &pgErr) {
+		errCode = pgErr.Code
+	}
+	rdb.metrics.RetryFailures.Add(ctx, 1,
+		metric.WithAttributes(
+			attribute.String("error_code", errCode),
+			attribute.String("operation_type", opType),
+		),
+	)
+
+	return lastErr
+}
+
+// Ping wraps the underlying Ping method with retry logic
+func (rdb *RetryableDB) Ping(ctx context.Context) error {
+	return rdb.retry(ctx, "ping", func() error {
+		return rdb.db.Ping(ctx)
+	})
+}
+
+// Exec wraps the underlying Exec method with retry logic
+func (rdb *RetryableDB) Exec(ctx context.Context, query string, args ...interface{}) (pgconn.CommandTag, error) {
+	var res pgconn.CommandTag
+	err := rdb.retry(ctx, "exec", func() error {
+		var err error
+		res, err = rdb.db.Exec(ctx, query, args...)
+		return err
+	})
+	return res, err
+}
+
+// Query wraps the underlying Query method with retry logic
+func (rdb *RetryableDB) Query(ctx context.Context, query string, args ...interface{}) (pgx.Rows, error) {
+	var res pgx.Rows
+	err := rdb.retry(ctx, "query", func() error {
+		var err error
+		res, err = rdb.db.Query(ctx, query, args...)
+		return err
+	})
+	return res, err
+}
+
+// QueryRow wraps the underlying QueryRow method with retry logic
+func (rdb *RetryableDB) QueryRow(ctx context.Context, query string, args ...interface{}) pgx.Row {
+	var res pgx.Row
+	_ = rdb.retry(ctx, "query_row", func() error {
+		res = rdb.db.QueryRow(ctx, query, args...)
+		// QueryRow never returns error directly, error is returned on Scan
+		return nil
+	})
+	return res
+}
+
+// isTransientError checks if an error is a transient PostgreSQL error eligible for retry
+func isTransientError(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return TransientPostgresErrorCodes[pgErr.Code]
+	}
 	// Also retry on connection errors that are not PgError types
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return false // Context errors are handled separately
