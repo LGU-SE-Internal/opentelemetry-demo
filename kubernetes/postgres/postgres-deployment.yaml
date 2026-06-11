@@ -1,5 +1,5 @@
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: postgresql
   namespace: opentelemetry-demo
@@ -10,6 +10,7 @@ metadata:
     app.kubernetes.io/version: "15"
 spec:
   replicas: 1
+  serviceName: postgresql
   selector:
     matchLabels:
       app.kubernetes.io/name: postgresql
