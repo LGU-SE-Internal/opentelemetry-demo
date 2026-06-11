@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -16,6 +17,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cenkalti/backoff/v4"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"golang.org/x/time/rate"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel"
@@ -39,6 +43,180 @@ import (
 var isShuttingDown atomic.Bool
 var otelLogger = global.GetLoggerProvider().Logger("adservice")
 var rateLimitedRequestsCounter metric.Int64Counter
+
+// RetryConfig holds configuration for database retry logic
+type RetryConfig struct {
+	MaxRetries        int           `default:"3"`
+	InitialBackoff    time.Duration `default:"100ms"`
+	MaxBackoff        time.Duration `default:"2s"` // Capped backoff to avoid long delays
+}
+
+// RetryMetrics defines OTel metrics collected for retry operations
+type RetryMetrics struct {
+	RetryAttempts metric.Int64Counter // Name: ad_service_db_retry_attempts, Description: Total number of database operation retry attempts
+	RetryFailures metric.Int64Counter // Name: ad_service_db_retry_failures, Description: Total number of database operations that failed after all retries
+}
+
+// Transient PostgreSQL error codes eligible for retry:
+// - Connection errors: 08001 (sqlclient_unable_to_establish_sqlconnection), 08006 (connection_failure), 57P01 (admin_shutdown), 57P02 (crash_shutdown)
+// - Timeouts: 57014 (query_canceled), 40001 (serialization_failure), 40P01 (deadlock_detected)
+// - Lock waits: 55P03 (lock_not_available)
+var TransientPostgresErrorCodes = map[string]bool{
+	"08001": true, "08006": true, "57P01": true, "57P02": true,
+	"57014": true, "40001": true, "40P01": true, "55P03": true,
+}
+
+// DBPool defines the interface for database operations that will be wrapped with retry logic
+type DBPool interface {
+	Ping(ctx context.Context) error
+	Exec(ctx context.Context, query string, args ...interface{}) (pgconn.CommandTag, error)
+	Query(ctx context.Context, query string, args ...interface{}) (pgx.Rows, error)
+	QueryRow(ctx context.Context, query string, args ...interface{}) pgx.Row
+}
+
+// RetryableDB wraps a PostgreSQL database connection/pool to add retry logic
+type RetryableDB struct {
+	db      DBPool
+	config  RetryConfig
+	metrics RetryMetrics
+}
+
+// NewRetryableDB creates a new RetryableDB instance with the given configuration and metrics
+func NewRetryableDB(db DBPool, config RetryConfig, metrics RetryMetrics) *RetryableDB {
+	// Set default values if not provided
+	if config.MaxRetries < 0 {
+		config.MaxRetries = 3
+	}
+	if config.InitialBackoff <= 0 {
+		config.InitialBackoff = 100 * time.Millisecond
+	}
+	if config.MaxBackoff <= 0 {
+		config.MaxBackoff = 2 * time.Second
+	}
+	return &RetryableDB{
+		db:      db,
+		config:  config,
+		metrics: metrics,
+	}
+}
+
+// isTransientError checks if an error is a transient PostgreSQL error eligible for retry
+func isTransientError(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return TransientPostgresErrorCodes[pgErr.Code]
+	}
+	return false
+}
+
+// retryOperation runs the given operation with exponential backoff retry logic
+func (rdb *RetryableDB) retryOperation(ctx context.Context, opType string, operation func() error) error {
+	if rdb.config.MaxRetries == 0 {
+		return operation()
+	}
+
+	// Configure exponential backoff
+	bo := backoff.NewExponentialBackOff()
+	bo.InitialInterval = rdb.config.InitialBackoff
+	bo.MaxInterval = rdb.config.MaxBackoff
+	bo.MaxElapsedTime = 0 // We control max retries manually
+	bo.Reset()
+
+	var lastErr error
+	for attempt := 0; attempt <= rdb.config.MaxRetries; attempt++ {
+		err := operation()
+		if err == nil {
+			return nil
+		}
+
+		// Check if context is canceled before proceeding
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		lastErr = err
+
+		// Don't retry if not transient error or max retries reached
+		if !isTransientError(err) || attempt == rdb.config.MaxRetries {
+			break
+		}
+
+		// Increment retry attempts metric
+		var pgErr *pgconn.PgError
+		errorCode := "unknown"
+		if errors.As(err, &pgErr) {
+			errorCode = pgErr.Code
+		}
+		rdb.metrics.RetryAttempts.Add(ctx, 1,
+			metric.WithAttributes(
+				attribute.String("error_code", errorCode),
+				attribute.String("operation_type", opType),
+			),
+		)
+
+		// Wait for next backoff interval, or context cancellation
+		nextBackoff := bo.NextBackOff()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(nextBackoff):
+		}
+	}
+
+	// Increment retry failures metric after all retries failed
+	var pgErr *pgconn.PgError
+	errorCode := "unknown"
+	if errors.As(lastErr, &pgErr) {
+		errorCode = pgErr.Code
+	}
+	rdb.metrics.RetryFailures.Add(ctx, 1,
+		metric.WithAttributes(
+			attribute.String("error_code", errorCode),
+			attribute.String("operation_type", opType),
+		),
+	)
+
+	return lastErr
+}
+
+// Ping wraps the underlying Ping method with retry logic
+func (rdb *RetryableDB) Ping(ctx context.Context) error {
+	return rdb.retryOperation(ctx, "ping", func() error {
+		return rdb.db.Ping(ctx)
+	})
+}
+
+// Exec wraps the underlying Exec method with retry logic
+func (rdb *RetryableDB) Exec(ctx context.Context, query string, args ...interface{}) (pgconn.CommandTag, error) {
+	var res pgconn.CommandTag
+	err := rdb.retryOperation(ctx, "exec", func() error {
+		var innerErr error
+		res, innerErr = rdb.db.Exec(ctx, query, args...)
+		return innerErr
+	})
+	return res, err
+}
+
+// Query wraps the underlying Query method with retry logic
+func (rdb *RetryableDB) Query(ctx context.Context, query string, args ...interface{}) (pgx.Rows, error) {
+	var res pgx.Rows
+	err := rdb.retryOperation(ctx, "query", func() error {
+		var innerErr error
+		res, innerErr = rdb.db.Query(ctx, query, args...)
+		return innerErr
+	})
+	return res, err
+}
+
+// QueryRow wraps the underlying QueryRow method with retry logic
+func (rdb *RetryableDB) QueryRow(ctx context.Context, query string, args ...interface{}) pgx.Row {
+	var res pgx.Row
+	_ = rdb.retryOperation(ctx, "queryrow", func() error {
+		res = rdb.db.QueryRow(ctx, query, args...)
+		return res.Err()
+	})
+	return res
+}
 
 // clientLimiter holds a rate limiter for each client IP and tracks last seen time for cleanup
 type clientLimiter struct {
