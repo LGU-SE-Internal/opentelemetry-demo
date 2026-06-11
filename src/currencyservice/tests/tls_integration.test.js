@@ -26,15 +26,20 @@ function runServerWithEnv(envVars = {}) {
     const output = execSync('node index.js', {
       cwd: path.join(__dirname, '..'),
       env,
-      timeout: 5000,
+      timeout: 3000,
       stdio: 'pipe'
     });
     return { success: true, output: output.toString() };
   } catch (err) {
+    // If we timed out but server printed that it's running, consider it a success
+    const stdout = err.stdout?.toString() || '';
+    if (err.code === 'ETIMEDOUT' && stdout.includes('Currency service running on port')) {
+      return { success: true, output: stdout };
+    }
     return {
       success: false,
       exitCode: err.status,
-      stdout: err.stdout?.toString() || '',
+      stdout: stdout,
       stderr: err.stderr?.toString() || ''
     };
   }
