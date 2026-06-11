@@ -10,18 +10,34 @@ GENERATED_CONFIG_PATH="/etc/prometheus/prometheus.yml"
 cp "$BASE_CONFIG_PATH" "$GENERATED_CONFIG_PATH"
 
 # Validate Prometheus server TLS configuration
-if [ -n "$PROMETHEUS_TLS_CERT_PATH" ]; then
-  if [ -z "$PROMETHEUS_TLS_KEY_PATH" ]; then
-    echo "ERROR: PROMETHEUS_TLS_KEY_PATH is required when PROMETHEUS_TLS_CERT_PATH is set"
+if [ -n "$PROMETHEUS_TLS_CERT_PATH" ] || [ -n "$PROMETHEUS_TLS_KEY_PATH" ]; then
+  if [ -z "$PROMETHEUS_TLS_CERT_PATH" ] || [ -z "$PROMETHEUS_TLS_KEY_PATH" ]; then
+    echo "ERROR: Both PROMETHEUS_TLS_CERT_PATH and PROMETHEUS_TLS_KEY_PATH must be provided when using TLS"
     exit 1
   fi
   if [ ! -f "$PROMETHEUS_TLS_CERT_PATH" ] || [ ! -r "$PROMETHEUS_TLS_CERT_PATH" ]; then
     echo "ERROR: PROMETHEUS_TLS_CERT_PATH file $PROMETHEUS_TLS_CERT_PATH does not exist or is not readable"
-    exit 1
+    exit 2
   fi
   if [ ! -f "$PROMETHEUS_TLS_KEY_PATH" ] || [ ! -r "$PROMETHEUS_TLS_KEY_PATH" ]; then
     echo "ERROR: PROMETHEUS_TLS_KEY_PATH file $PROMETHEUS_TLS_KEY_PATH does not exist or is not readable"
-    exit 1
+    exit 3
+  fi
+
+  # Validate certificate and key are a matching pair
+  if ! openssl x509 -noout -modulus -in "$PROMETHEUS_TLS_CERT_PATH" >/dev/null 2>&1; then
+    echo "ERROR: PROMETHEUS_TLS_CERT_PATH file $PROMETHEUS_TLS_CERT_PATH is malformed or invalid"
+    exit 5
+  fi
+  if ! openssl rsa -noout -modulus -in "$PROMETHEUS_TLS_KEY_PATH" >/dev/null 2>&1; then
+    echo "ERROR: PROMETHEUS_TLS_KEY_PATH file $PROMETHEUS_TLS_KEY_PATH is malformed or invalid"
+    exit 5
+  fi
+  CERT_MODULUS=$(openssl x509 -noout -modulus -in "$PROMETHEUS_TLS_CERT_PATH" | openssl md5)
+  KEY_MODULUS=$(openssl rsa -noout -modulus -in "$PROMETHEUS_TLS_KEY_PATH" | openssl md5)
+  if [ "$CERT_MODULUS" != "$KEY_MODULUS" ]; then
+    echo "ERROR: Invalid certificate/key pair: certificate and private key do not match"
+    exit 5
   fi
 
   # Create web config yaml
@@ -35,7 +51,11 @@ EOF_INNER
   if [ -n "$PROMETHEUS_TLS_CLIENT_CA_PATH" ]; then
     if [ ! -f "$PROMETHEUS_TLS_CLIENT_CA_PATH" ] || [ ! -r "$PROMETHEUS_TLS_CLIENT_CA_PATH" ]; then
       echo "ERROR: PROMETHEUS_TLS_CLIENT_CA_PATH file $PROMETHEUS_TLS_CLIENT_CA_PATH does not exist or is not readable"
-      exit 1
+      exit 4
+    fi
+    if ! openssl x509 -noout -in "$PROMETHEUS_TLS_CLIENT_CA_PATH" >/dev/null 2>&1; then
+      echo "ERROR: PROMETHEUS_TLS_CLIENT_CA_PATH file $PROMETHEUS_TLS_CLIENT_CA_PATH is malformed or invalid"
+      exit 6
     fi
     cat >> /etc/prometheus/web-config.yaml << EOF_INNER
   client_ca_file: ${PROMETHEUS_TLS_CLIENT_CA_PATH}
