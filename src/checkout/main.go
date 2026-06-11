@@ -425,6 +425,10 @@ func main() {
 	// Mark service as serving once all initialization is complete
 	healthcheck.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
 
+	// Set up signal handler BEFORE starting servers
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
 	// Start HTTP server in goroutine
 	go func() {
 		logger.Info(fmt.Sprintf("HTTP health endpoints listening on port %s", httpPort))
@@ -433,21 +437,18 @@ func main() {
 		}
 	}()
 
-	logger.Info(fmt.Sprintf("starting to listen on tcp: %q", lis.Addr().String()))
-	logger.Info(fmt.Sprintf("Checkout service started on port %s", port))
-	err = srv.Serve(lis)
-	logger.Error(err.Error())
-
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGKILL)
-	defer cancel()
-
+	// Start gRPC server in goroutine
 	go func() {
+		logger.Info(fmt.Sprintf("starting to listen on tcp: %q", lis.Addr().String()))
+		logger.Info(fmt.Sprintf("Checkout service started on port %s", port))
 		if err := srv.Serve(lis); err != nil {
-			logger.Error(err.Error())
+			logger.Error(fmt.Sprintf("gRPC server failed: %v", err))
 		}
 	}()
 
+	// Wait for shutdown signal
 	<-ctx.Done()
+	logger.Info("Received shutdown signal, starting graceful shutdown")
 
 	srv.GracefulStop()
 	logger.Info("Checkout gRPC server stopped")
@@ -461,7 +462,7 @@ func main() {
 	logger.Info("Checkout HTTP server stopped")
 
 	// Shutdown Kafka producer gracefully if enabled
-	if svc.kafkaBrokerSvcAddr != "" {
+	if svc.kafkaBrokerSvcAddr != "" && svc.KafkaProducerClient != nil {
 		// Parse shutdown timeout from environment, default 5s
 		shutdownTimeoutStr := os.Getenv("KAFKA_PRODUCER_SHUTDOWN_TIMEOUT")
 		shutdownTimeout := 5 * time.Second
