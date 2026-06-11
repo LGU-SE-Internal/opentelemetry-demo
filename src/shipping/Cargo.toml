@@ -19,7 +19,8 @@ rustls = "0.21.0"
 rustls-pemfile = "1.0.3"
 thiserror = "1.0.40"
 actix-governor = "0.6.0"
-governor = "0.6.3"
+governor = { version = "0.6.3", features = ["dashmap", "std"] }
+once_cell = "1.19.0"
 anyhow = "1.0.102"
 awc = { version = "3.8.2", default-features = false, features = ["compress-zstd"] }
 open-feature = "0.2"
