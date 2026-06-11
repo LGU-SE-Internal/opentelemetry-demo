@@ -34,7 +34,7 @@ tokio = { version = "1.0", features = ["full"] }
 chrono = "0.4.38"
 
 opentelemetry = "0.32.0"
-opentelemetry_proto = { git = "https://github.com/open-telemetry/opentelemetry-demo.git", branch = "main" }
+opentelemetry_proto = { path = "../../pb/rust" }
 opentelemetry_sdk = "0.32.0"
 opentelemetry-otlp = { version = "0.32.0", features = ["grpc-tonic"] }
 opentelemetry-instrumentation-actix-web = { version = "0.24.0", features = ["sync-middleware", "awc", "metrics"] }

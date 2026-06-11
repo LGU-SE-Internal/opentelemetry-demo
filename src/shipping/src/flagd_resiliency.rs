@@ -6,7 +6,7 @@ use lazy_static::lazy_static;
 use open_feature::{Client, EvaluationContext, OpenFeature};
 use tokio::sync::Mutex;
 use tower::{Service, ServiceBuilder, ServiceExt};
-use tower_circuit_breaker::{CircuitBreaker, CircuitBreakerError};
+use tower_circuit_breaker::{CircuitBreaker, CircuitBreakerError, State};
 use tower_retry::{ExponentialBackoff, ExponentialBackoffConfig, RetryPolicy, RetryService};
 use tracing::{error, info, warn};
 
@@ -42,7 +42,9 @@ enum FlagdError {
     Permanent,
 }
 
-struct FlagdRetryPolicy;
+struct FlagdRetryPolicy {
+    flag_key: String,
+}
 
 impl<E> RetryPolicy<(), FlagdError, E> for FlagdRetryPolicy {
     type Future = futures::future::Ready<Self>;
@@ -53,7 +55,20 @@ impl<E> RetryPolicy<(), FlagdError, E> for FlagdRetryPolicy {
         result: &Result<FlagdError, E>,
     ) -> Option<Self::Future> {
         match result {
-            Ok(FlagdError::Transient) => Some(futures::future::ready(self.clone())),
+            Ok(FlagdError::Transient) => {
+                static ATTEMPT_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                let attempt = ATTEMPT_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                warn!(
+                    flag_key = %self.flag_key,
+                    service_name = "shipping",
+                    flagd_endpoint = *FLAGD_ENDPOINT,
+                    event = "flagd_retry_attempt",
+                    attempt_number = attempt,
+                    error = ?result,
+                    "Retrying Flagd API call"
+                );
+                Some(futures::future::ready(self.clone()))
+            }
             _ => None,
         }
     }
@@ -64,11 +79,10 @@ impl<E> RetryPolicy<(), FlagdError, E> for FlagdRetryPolicy {
 }
 
 struct ResiliencyLayer {
-    service: RetryService<
-        FlagdRetryPolicy,
-        CircuitBreaker<Box<dyn Fn() -> Duration + Send + Sync + Clone>, Box<dyn Fn(&Result<(), FlagdError>) -> bool + Send + Sync + Clone>>,
-    >,
+    circuit_breaker: CircuitBreaker<Box<dyn Fn() -> Duration + Send + Sync + Clone>, Box<dyn Fn(&Result<(), FlagdError>) -> bool + Send + Sync + Clone>>,
+    retry_layer: tower_retry::RetryLayer<FlagdRetryPolicy>,
     flagd_client: Client,
+    last_circuit_state: State,
 }
 
 impl ResiliencyLayer {
@@ -80,7 +94,7 @@ impl ResiliencyLayer {
             jitter: 0.1,
         };
 
-        let retry_policy = FlagdRetryPolicy;
+        let retry_policy = FlagdRetryPolicy { flag_key: String::new() };
         let retry_layer = tower_retry::RetryLayer::new(retry_policy)
             .max_attempts(*FLAGD_RETRY_MAX_ATTEMPTS)
             .backoff(ExponentialBackoff::new(backoff_config));
@@ -98,15 +112,51 @@ impl ResiliencyLayer {
             failure_detector,
         );
 
-        let service = ServiceBuilder::new()
-            .layer(retry_layer)
-            .service(circuit_breaker);
-
         let flagd_client = OpenFeature::global_client();
 
         Self {
-            service,
+            circuit_breaker,
+            retry_layer,
             flagd_client,
+            last_circuit_state: State::Closed,
+        }
+    }
+
+    async fn call_circuit_breaker(&mut self, flag_key: &str, is_success: bool) {
+        let prev_state = self.circuit_breaker.state();
+        let result = if is_success {
+            Ok(())
+        } else {
+            Err(FlagdError::Transient)
+        };
+        let _ = self.circuit_breaker.call(()).await;
+        let new_state = self.circuit_breaker.state();
+
+        if prev_state != new_state {
+            match new_state {
+                State::Open => {
+                    error!(
+                        flag_key = flag_key,
+                        service_name = "shipping",
+                        flagd_endpoint = *FLAGD_ENDPOINT,
+                        event = "flagd_circuit_breaker_open",
+                        failure_count = *FLAGD_CIRCUIT_BREAKER_FAILURE_THRESHOLD,
+                        cooldown_period_ms = *FLAGD_CIRCUIT_BREAKER_COOLDOWN_MS,
+                        "Flagd circuit breaker opened"
+                    );
+                }
+                State::Closed => {
+                    info!(
+                        flag_key = flag_key,
+                        service_name = "shipping",
+                        flagd_endpoint = *FLAGD_ENDPOINT,
+                        event = "flagd_circuit_breaker_closed",
+                        "Flagd circuit breaker closed"
+                    );
+                }
+                State::HalfOpen => {}
+            }
+            self.last_circuit_state = new_state;
         }
     }
 }
@@ -125,9 +175,18 @@ pub async fn get_feature_flag<T: Clone + open_feature::value::ValueVariant>(flag
     let flag_key_owned = flag_key.to_string();
     let default_cloned = default_value.clone();
 
+    // Update retry policy with current flag key
+    layer.retry_layer = tower_retry::RetryLayer::new(FlagdRetryPolicy { flag_key: flag_key_owned.clone() })
+        .max_attempts(*FLAGD_RETRY_MAX_ATTEMPTS)
+        .backoff(ExponentialBackoff::new(ExponentialBackoffConfig {
+            initial_delay: Duration::from_millis(*FLAGD_RETRY_INITIAL_BACKOFF_MS),
+            max_delay: Duration::from_secs(2),
+            multiplier: 2.0,
+            jitter: 0.1,
+        }));
+
     // First check if circuit is open
-    let service_result = layer.service.ready().await;
-    if service_result.is_err() {
+    if layer.circuit_breaker.state() == State::Open {
         warn!(
             flag_key = flag_key_owned,
             service_name = "shipping",
@@ -147,12 +206,12 @@ pub async fn get_feature_flag<T: Clone + open_feature::value::ValueVariant>(flag
     ).await {
         Ok(val) => {
             // Success, record success in circuit breaker
-            let _ = layer.service.call(()).await;
+            layer.call_circuit_breaker(flag_key, true).await;
             return val;
         }
         Err(e) => {
             // Record failure in circuit breaker
-            let _ = layer.service.call(()).await;
+            layer.call_circuit_breaker(flag_key, false).await;
             
             warn!(
                 flag_key = flag_key_owned,
