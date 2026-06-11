@@ -136,6 +136,7 @@ var (
 	tracer            trace.Tracer
 	resource          *sdkresource.Resource
 	initResourcesOnce sync.Once
+)
 
 func initResource() *sdkresource.Resource {
 	initResourcesOnce.Do(func() {
