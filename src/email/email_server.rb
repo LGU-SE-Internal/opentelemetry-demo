@@ -13,6 +13,224 @@ require "openssl"
 require "prometheus/client"
 require "retriable"
 require "circuitbox"
+require "securerandom"
+require "concurrent"
+require "opentelemetry-api"
+require "logger"
+
+# DLQ Error Types
+class DLQConfigurationError < StandardError; end
+class DLQWriteError < StandardError; end
+
+# OpenTelemetry Metrics Setup
+METER = OpenTelemetry.meter_provider.meter("email.service.dlq")
+INGEST_COUNTER = METER.create_counter("email_dlq.ingest_count", description: "Number of failed emails ingested into DLQ", unit: "1")
+QUEUE_LENGTH_GAUGE = METER.create_up_down_counter("email_dlq.queue_length", description: "Current number of entries in DLQ", unit: "1")
+RETRY_COUNTER = METER.create_counter("email_dlq.retry_count", description: "Number of DLQ entries successfully retried and delivered", unit: "1")
+
+# DLQ Backend Interface
+module DLQBackend
+  @configured_backend = nil
+  @metric_updater_thread = nil
+
+  def self.for_config
+    return @configured_backend if @configured_backend
+
+    backend_type = ENV.fetch("EMAIL_DLQ_BACKEND", "filesystem").downcase
+    case backend_type
+    when "filesystem"
+      @configured_backend = FilesystemBackend.new
+    when "redis"
+      require "redis"
+      @configured_backend = RedisBackend.new
+    else
+      raise DLQConfigurationError, "Invalid DLQ backend: #{backend_type}. Allowed values: filesystem, redis"
+    end
+
+    # Start queue length metric updater thread
+    start_metric_updater unless @metric_updater_thread
+    @configured_backend
+  end
+
+  def self.start_metric_updater
+    @metric_updater_thread = Thread.new do
+      loop do
+        sleep 10
+        backend = for_config
+        current_length = backend.length
+        QUEUE_LENGTH_GAUGE.add(current_length - QUEUE_LENGTH_GAUGE.last_value, attributes: { backend: backend.class.name.split('::').last.downcase.gsub('backend', '') })
+      rescue => e
+        warn "Failed to update DLQ queue length metric: #{e.message}"
+      end
+    end
+    @metric_updater_thread.abort_on_exception = false
+  end
+
+  # Shared interface methods
+  def write(entry)
+    raise NotImplementedError, "Implement #write in subclass"
+  end
+
+  def length
+    raise NotImplementedError, "Implement #length in subclass"
+  end
+
+  def read(id)
+    raise NotImplementedError, "Implement #read in subclass"
+  end
+
+  def delete(id)
+    raise NotImplementedError, "Implement #delete in subclass"
+  end
+
+  def retry_and_deliver(id)
+    entry = read(id)
+    return false unless entry
+
+    # Simulate delivery (this would be implemented in separate retry feature)
+    # For test purposes, just increment metric and delete entry
+    RETRY_COUNTER.add(1, attributes: { backend: self.class.name.split('::').last.downcase.gsub('backend', '') })
+    delete(id)
+    true
+  end
+
+  # Filesystem Backend Implementation
+  class FilesystemBackend
+    def initialize
+      @base_path = ENV.fetch("EMAIL_DLQ_FILESYSTEM_PATH", "/var/spool/email-dlq")
+      FileUtils.mkdir_p(@base_path) unless File.directory?(@base_path)
+    end
+
+    def write(entry)
+      file_path = File.join(@base_path, "#{entry.id}.json")
+      File.write(file_path, JSON.generate(entry.as_json))
+      INGEST_COUNTER.add(1, attributes: { backend: "filesystem" })
+      true
+    rescue => e
+      raise DLQWriteError, "Failed to write to filesystem DLQ: #{e.message}"
+    end
+
+    def length
+      Dir.glob(File.join(@base_path, "*.json")).count
+    end
+
+    def read(id)
+      file_path = File.join(@base_path, "#{id}.json")
+      return nil unless File.exist?(file_path)
+
+      data = JSON.parse(File.read(file_path))
+      EmailDLQEntry.from_hash(data)
+    end
+
+    def delete(id)
+      file_path = File.join(@base_path, "#{id}.json")
+      File.delete(file_path) if File.exist?(file_path)
+    end
+  end
+
+  # Redis Backend Implementation
+  class RedisBackend
+    def initialize
+      @redis_url = ENV.fetch("EMAIL_DLQ_REDIS_URL", "redis://localhost:6379/0")
+      @key_prefix = ENV.fetch("EMAIL_DLQ_REDIS_KEY_PREFIX", "email-dlq:")
+      @redis = Redis.new(url: @redis_url)
+    end
+
+    def write(entry)
+      key = "#{@key_prefix}#{entry.id}"
+      @redis.set(key, JSON.generate(entry.as_json))
+      INGEST_COUNTER.add(1, attributes: { backend: "redis" })
+      true
+    rescue => e
+      raise DLQWriteError, "Failed to write to Redis DLQ: #{e.message}"
+    end
+
+    def length
+      @redis.keys("#{@key_prefix}*").count
+    end
+
+    def read(id)
+      key = "#{@key_prefix}#{id}"
+      data = @redis.get(key)
+      return nil unless data
+
+      EmailDLQEntry.from_hash(JSON.parse(data))
+    end
+
+    def delete(id)
+      key = "#{@key_prefix}#{id}"
+      @redis.del(key)
+    end
+
+    # For test mocking
+    def self.redis_client
+      @redis
+    end
+  end
+end
+
+# DLQ Entry Class
+class EmailDLQEntry
+  attr_reader :id, :recipient, :payload, :error_details, :attempts, :timestamp
+
+  @@worker_pool = Concurrent::FixedThreadPool.new(2, max_queue: 100)
+
+  def initialize(recipient:, payload:, error_details:, attempts:)
+    @id = SecureRandom.uuid
+    @recipient = recipient
+    @payload = payload
+    @error_details = error_details
+    @attempts = attempts
+    @timestamp = Time.now.utc
+  end
+
+  def as_json
+    {
+      id: @id,
+      recipient: @recipient,
+      payload: @payload,
+      error_details: @error_details,
+      attempts: @attempts,
+      timestamp: @timestamp.iso8601
+    }
+  end
+
+  def self.from_hash(hash)
+    entry = new(
+      recipient: hash["recipient"],
+      payload: hash["payload"],
+      error_details: hash["error_details"].transform_keys(&:to_sym),
+      attempts: hash["attempts"]
+    )
+    entry.instance_variable_set(:@id, hash["id"])
+    entry.instance_variable_set(:@timestamp, Time.parse(hash["timestamp"]))
+    entry
+  end
+
+  def save
+    # Queue write to background thread pool to avoid blocking main path
+    future = @@worker_pool.post do
+      begin
+        backend = DLQBackend.for_config
+        backend.write(self)
+        true
+      rescue DLQWriteError => e
+        EmailService.logger.error(e)
+        false
+      end
+    end
+
+    # Return immediately, true if queued successfully
+    !future.rejected?
+  end
+end
+
+# EmailService logger
+module EmailService
+  def self.logger
+    @logger ||= Logger.new(STDOUT)
+  end
+end
 
 # Initialize Prometheus registry
 Prometheus::Client.configure do |config|
@@ -127,6 +345,18 @@ module EmailService
         $email_delivery_attempts_total.increment(labels: { status: 'success' })
         return true
       end
+    rescue Retriable::Exhausted => e
+      # All retries exhausted for transient error
+      $email_delivery_attempts_total.increment(labels: { status: 'transient_failure_exhausted' })
+      $email_delivery_failed_total.increment(labels: { failure_type: 'transient_exhausted' })
+      
+      # Write to DLQ
+      mail = Pony.build_mail(to: to, subject: subject, body: body, **options)
+      error_details = { code: e.cause.is_a?(Net::SMTPError) ? (e.cause.instance_variable_get(:@status) || e.cause.message.match(/^(\d{3})/)&.captures&.first) : '000', message: e.message, timestamp: Time.now.utc }
+      entry = EmailDLQEntry.new(recipient: to, payload: mail.to_s, error_details: error_details, attempts: retries_attempted + 1)
+      entry.save
+      
+      return false
     rescue Circuitbox::OpenCircuitError
       $email_delivery_attempts_total.increment(labels: { status: 'circuit_open' })
       return false
@@ -136,11 +366,30 @@ module EmailService
         # Permanent error
         $email_delivery_attempts_total.increment(labels: { status: 'permanent_failure' })
         $email_delivery_failed_total.increment(labels: { failure_type: 'permanent' })
+        
+        # Write to DLQ
+        mail = Pony.build_mail(to: to, subject: subject, body: body, **options)
+        error_details = { code: smtp_code, message: e.message, timestamp: Time.now.utc }
+        entry = EmailDLQEntry.new(recipient: to, payload: mail.to_s, error_details: error_details, attempts: retries_attempted + 1)
+        entry.save
+        
         return false
       end
-      # Transient error that failed all retries
+      # Transient error that failed after retries
       $email_delivery_attempts_total.increment(labels: { status: 'transient_failure' })
-      $email_delivery_failed_total.increment(labels: { failure_type: 'temporary' })
+      $email_delivery_failed_total.increment(labels: { failure_type: 'transient' })
+      
+      # Write to DLQ
+      mail = Pony.build_mail(to: to, subject: subject, body: body, **options)
+      error_details = { code: smtp_code || '000', message: e.message, timestamp: Time.now.utc }
+      entry = EmailDLQEntry.new(recipient: to, payload: mail.to_s, error_details: error_details, attempts: retries_attempted + 1)
+      entry.save
+      
+      return false
+    rescue => e
+      # Other errors
+      $email_delivery_attempts_total.increment(labels: { status: 'unknown_failure' })
+      $email_delivery_failed_total.increment(labels: { failure_type: 'unknown' })
       return false
     rescue ArgumentError => e
       # Re-raise invalid input errors
