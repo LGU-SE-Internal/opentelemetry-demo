@@ -72,6 +72,20 @@ error_page 429 @rate_limit_exceeded;
     include mime.types;
     sendfile on;
 
+    # Upstream image storage backend
+    upstream image_storage {
+        server ${IMAGE_UPSTREAM_HOST}:${IMAGE_UPSTREAM_PORT};
+        retry_backoff exponential base=100ms factor=2;
+    }
+
+    # Proxy configuration
+    proxy_connect_timeout 2s;
+    proxy_send_timeout 2s;
+    proxy_read_timeout 2s;
+    proxy_next_upstream error timeout http_500 http_502 http_503 http_504 http_404 http_429;
+    proxy_next_upstream_tries 3;
+    proxy_next_upstream_timeout 1s;
+
     $ENABLE_TLS == "false" ? '
     server {
         listen 8080;
@@ -124,13 +138,43 @@ error_page 429 @rate_limit_exceeded;
             return 200 'READY';
         }
 
+        # Nginx status endpoint with retry metrics
+        location /nginx_status {
+            stub_status on;
+            access_log off;
+            allow all;
+            
+            # Custom retry metrics
+            set $retry_total 0;
+            set $retry_failed_total 0;
+            set $retry_success_rate 0;
+            
+            if ($upstream_retry_count > 0) {
+                set $retry_total $upstream_retry_count;
+            }
+            
+            if ($upstream_status ~ ^5[0-9][0-9]$) {
+                set $retry_failed_total 1;
+            }
+            
+            add_header nginx_upstream_retry_total $retry_total always;
+            add_header nginx_upstream_retry_failed_total $retry_failed_total always;
+            add_header nginx_upstream_retry_success_rate $retry_success_rate always;
+        }
+
         # Rate limit image assets only
         location ~* \.(png|jpg|jpeg|gif|webp|svg)$ {
             limit_req zone=image_rate_limit burst=5 nodelay;
             limit_req zone=per_image burst=5 nodelay;
             expires 1y;
             add_header Cache-Control "public, max-age=31536000, immutable" always;
-            try_files $uri =404;
+            
+            # Only retry GET/HEAD requests
+            if ($request_method !~ ^(GET|HEAD)$) {
+                proxy_next_upstream off;
+            }
+            
+            proxy_pass http://image_storage$request_uri;
         }
 
         # CSS/JS assets
@@ -222,13 +266,44 @@ error_page 429 @rate_limit_exceeded;
             return 200 'READY';
         }
 
+        # Nginx status endpoint with retry metrics
+        location /nginx_status {
+            stub_status on;
+            access_log off;
+            allow all;
+            
+            # Custom retry metrics
+            set $retry_total 0;
+            set $retry_failed_total 0;
+            set $retry_success_rate 0;
+            
+            if ($upstream_retry_count > 0) {
+                set $retry_total $upstream_retry_count;
+            }
+            
+            if ($upstream_status ~ ^5[0-9][0-9]$) {
+                set $retry_failed_total 1;
+            }
+            
+            add_header nginx_upstream_retry_total $retry_total always;
+            add_header nginx_upstream_retry_failed_total $retry_failed_total always;
+            add_header nginx_upstream_retry_success_rate $retry_success_rate always;
+        }
+
         # Rate limit image assets only
         location ~* \.(png|jpg|jpeg|gif|webp|svg)$ {
             limit_req zone=image_rate_limit burst=5 nodelay;
             limit_req zone=per_image burst=5 nodelay;
             expires 1y;
             add_header Cache-Control "public, max-age=31536000, immutable" always;
-            try_files $uri =404;
+            
+            # Only retry GET/HEAD requests
+            if ($request_method !~ ^(GET|HEAD)$) {
+                proxy_next_upstream off;
+            }
+            
+            proxy_pass http://image_storage$request_uri;
+        }
         }
 
         # CSS/JS assets
