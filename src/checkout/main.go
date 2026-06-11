@@ -136,29 +136,6 @@ var (
 	tracer            trace.Tracer
 	resource          *sdkresource.Resource
 	initResourcesOnce sync.Once
-	circuitBreakers   = make(map[string]*gobreaker.CircuitBreaker)
-	circuitBreakerMu  sync.Mutex
-)
-
-func circuitBreakerUnaryInterceptor(serviceName string) grpc.UnaryClientInterceptor {
-	circuitBreakerMu.Lock()
-	defer circuitBreakerMu.Unlock()
-
-	cb, exists := circuitBreakers[serviceName]
-	if !exists {
-		config := CircuitBreakerConfig{
-			ServiceName:             serviceName,
-			FailureThresholdPercent: 50,
-			OpenStateTimeout:        30 * time.Second,
-			HalfOpenMaxRequests:     5,
-			RollingWindowDuration:   10 * time.Second,
-		}
-		cb = NewCircuitBreaker(config)
-		circuitBreakers[serviceName] = cb
-	}
-
-	return CircuitBreakerClientInterceptor(cb)
-}
 
 func initResource() *sdkresource.Resource {
 	initResourcesOnce.Do(func() {
@@ -658,10 +635,8 @@ func (cs *checkout) prepareOrderItemsAndShippingQuoteFromCart(ctx context.Contex
 	}
 	shippingCostFloat, _ := strconv.ParseFloat(fmt.Sprintf("%d.%02d", shippingPrice.GetUnits(), shippingPrice.GetNanos()/1000000000), 64)
 
-	span.SetAttributes(
-
-
-// mustCreateClient creates a gRPC client for the given target address with retry and circuit breaker interceptors
+	span.SetAttributes()
+}
 func mustCreateClient(addr string, svcName string) *grpc.ClientConn {
 	// Configure retry interceptor
 	retryCodes := []codes.Code{codes.Unavailable, codes.ResourceExhausted, codes.Aborted}
