@@ -13,10 +13,22 @@ receivers:
     protocols:
       grpc:
         endpoint: ${env:OTEL_COLLECTOR_HOST}:${env:OTEL_COLLECTOR_PORT_GRPC}
+        tls:
+          insecure: ${env:OTELCOL_TLS_OTLP_GRPC_INSECURE:-true}
+          ca_file: ${env:OTELCOL_TLS_CA_FILE:-}
+          cert_file: ${env:OTELCOL_TLS_SERVER_CERT_FILE:-}
+          key_file: ${env:OTELCOL_TLS_SERVER_KEY_FILE:-}
+          client_ca_file: ${env:OTELCOL_TLS_CLIENT_CA_FILE:-}
       http:
         endpoint: ${env:OTEL_COLLECTOR_HOST}:${env:OTEL_COLLECTOR_PORT_HTTP}
         cors:
           allowed_origins: ${env:OTEL_OTLP_HTTP_CORS_ALLOWED_ORIGINS:-*}
+        tls:
+          insecure: ${env:OTELCOL_TLS_OTLP_HTTP_INSECURE:-true}
+          ca_file: ${env:OTELCOL_TLS_CA_FILE:-}
+          cert_file: ${env:OTELCOL_TLS_SERVER_CERT_FILE:-}
+          key_file: ${env:OTELCOL_TLS_SERVER_KEY_FILE:-}
+          client_ca_file: ${env:OTELCOL_TLS_CLIENT_CA_FILE:-}
   http_check/frontend-proxy:
     targets:
       - endpoint: http://${env:FRONTEND_PROXY_ADDR}
