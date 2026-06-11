@@ -178,14 +178,47 @@ lazy_static::lazy_static! {
 impl ShippingServiceImpl {
     // Validate GetQuoteRequest
     fn validate_get_quote_request(req: &GetQuoteRequest) -> Result<(), Status> {
+        // Validate address is present and all fields are non-empty (AC-4)
+        let address = req.address.as_ref().ok_or_else(|| Status::invalid_argument("shipping address is required"))?;
+        if address.street_address.is_empty() {
+            return Err(Status::invalid_argument("shipping address street cannot be empty"));
+        }
+        if address.city.is_empty() {
+            return Err(Status::invalid_argument("shipping address city cannot be empty"));
+        }
+        if address.state.is_empty() {
+            return Err(Status::invalid_argument("shipping address state cannot be empty"));
+        }
+        if address.zip_code.is_empty() {
+            return Err(Status::invalid_argument("shipping address postal code cannot be empty"));
+        }
+        if address.country.is_empty() {
+            return Err(Status::invalid_argument("shipping address country cannot be empty"));
+        }
+        
+        // Validate shipping distance > 0 (AC-1)
+        if req.shipping_distance <= 0.0 {
+            return Err(Status::invalid_argument("shipping distance must be greater than 0"));
+        }
+        
+        // Validate items are not empty
         if req.items.is_empty() {
             return Err(Status::invalid_argument("items list cannot be empty"));
         }
+        
         for (i, item) in req.items.iter().enumerate() {
-            if item.quantity <= 0 {
+            // Validate item quantity >= 1 (AC-3)
+            if item.quantity < 1 {
                 return Err(Status::invalid_argument(format!(
-                    "item at index {} has invalid non-positive quantity: {}",
+                    "item at index {} has invalid quantity {}: must be greater than or equal to 1",
                     i, item.quantity
+                )));
+            }
+            // Validate item weight > 0 (AC-2)
+            if item.weight <= 0.0 {
+                return Err(Status::invalid_argument(format!(
+                    "item at index {} has invalid weight {}: must be greater than 0",
+                    i, item.weight
                 )));
             }
         }
