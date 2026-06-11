@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"time"
 
 	"github.com/IBM/sarama"
@@ -234,16 +235,14 @@ func (p *orderKafkaProducer) Close() error {
 	return p.producer.Close()
 }
 
-// isRetriableError checks if a Kafka producer error is retriable
 func isRetriableError(err error) bool {
-	var producerErr *sarama.ProducerError
-	if errors.As(err, &producerErr) {
-		return producerErr.Err.Temporary()
-	}
-	// Also check for other temporary errors
 	var tempErr interface{ Temporary() bool }
 	if errors.As(err, &tempErr) {
 		return tempErr.Temporary()
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return netErr.Temporary() || netErr.Timeout()
 	}
 	return false
 }
