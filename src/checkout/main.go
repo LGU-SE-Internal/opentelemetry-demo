@@ -136,7 +136,29 @@ var (
 	tracer            trace.Tracer
 	resource          *sdkresource.Resource
 	initResourcesOnce sync.Once
+	circuitBreakers   = make(map[string]*gobreaker.CircuitBreaker)
+	circuitBreakerMu  sync.Mutex
 )
+
+func circuitBreakerUnaryInterceptor(serviceName string) grpc.UnaryClientInterceptor {
+	circuitBreakerMu.Lock()
+	defer circuitBreakerMu.Unlock()
+
+	cb, exists := circuitBreakers[serviceName]
+	if !exists {
+		config := CircuitBreakerConfig{
+			ServiceName:             serviceName,
+			FailureThresholdPercent: 50,
+			OpenStateTimeout:        30 * time.Second,
+			HalfOpenMaxRequests:     5,
+			RollingWindowDuration:   10 * time.Second,
+		}
+		cb = NewCircuitBreaker(config)
+		circuitBreakers[serviceName] = cb
+	}
+
+	return CircuitBreakerClientInterceptor(cb)
+}
 
 func initResource() *sdkresource.Resource {
 	initResourcesOnce.Do(func() {
