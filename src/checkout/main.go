@@ -459,6 +459,38 @@ func main() {
 		logger.Error(fmt.Sprintf("HTTP server shutdown failed: %v", err))
 	}
 	logger.Info("Checkout HTTP server stopped")
+
+	// Shutdown Kafka producer gracefully if enabled
+	if svc.kafkaBrokerSvcAddr != "" {
+		// Parse shutdown timeout from environment, default 5s
+		shutdownTimeoutStr := os.Getenv("KAFKA_PRODUCER_SHUTDOWN_TIMEOUT")
+		shutdownTimeout := 5 * time.Second
+		if shutdownTimeoutStr != "" {
+			if parsedTimeout, err := time.ParseDuration(shutdownTimeoutStr); err == nil {
+				shutdownTimeout = parsedTimeout
+			} else {
+				logger.Warn(fmt.Sprintf("Invalid KAFKA_PRODUCER_SHUTDOWN_TIMEOUT value %q, using default 5s: %v", shutdownTimeoutStr, err))
+			}
+		}
+
+		// Close producer with timeout
+		logger.Info(fmt.Sprintf("Shutting down Kafka producer with timeout %v", shutdownTimeout))
+		closeErr := make(chan error, 1)
+		go func() {
+			closeErr <- svc.KafkaProducerClient.Close()
+		}()
+
+		select {
+		case err := <-closeErr:
+			if err != nil {
+				logger.Error(fmt.Sprintf("Kafka producer shutdown failed: %v", err))
+			} else {
+				logger.Info("Kafka producer shut down successfully, all pending messages flushed")
+			}
+		case <-time.After(shutdownTimeout):
+			logger.Error(fmt.Sprintf("Kafka producer shutdown timed out after %v, force exiting, some messages may have been lost", shutdownTimeout))
+		}
+	}
 }
 
 func mustMapEnv(target *string, envKey string) {
