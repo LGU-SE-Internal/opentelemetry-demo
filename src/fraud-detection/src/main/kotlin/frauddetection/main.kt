@@ -52,6 +52,9 @@ import kotlin.concurrent.thread
 import sun.misc.Signal
 import sun.misc.SignalHandler
 import frauddetection.health.ServiceReadinessCheck
+import io.opentelemetry.api.GlobalOpenTelemetry
+import io.opentelemetry.api.common.Attributes
+import io.opentelemetry.api.logs.Logger as OtelLogger
 
 /**
  * Validates CheckTransactionRequest input parameters
@@ -131,7 +134,7 @@ interface GracefulShutdownManager {
 class GracefulShutdownManagerImpl : GracefulShutdownManager {
     private var server: Server? = null
     private var kafkaConsumer: KafkaConsumer<*, *>? = null
-    private val logger: Logger = LogManager.getLogger(GracefulShutdownManagerImpl::class.java)
+    private val logger = GlobalOpenTelemetry.get().getLogger(GracefulShutdownManagerImpl::class.java.name)
     private val isShuttingDown = AtomicBoolean(false)
     private val inFlightRequests = AtomicLong(0)
 
@@ -184,7 +187,7 @@ class DefaultShutdownHandler(
     private val healthStatusManager: HealthStatusManager,
     private val kafkaConsumer: KafkaConsumer<String, ByteArray>? = null
 ) : ShutdownHandler {
-    private val logger: Logger = LogManager.getLogger(DefaultShutdownHandler::class.java)
+    private val logger = GlobalOpenTelemetry.get().getLogger(DefaultShutdownHandler::class.java.name)
 
     override fun performGracefulShutdown(): Boolean {
         if (isShuttingDown.compareAndSet(false, true)) {
@@ -285,6 +288,8 @@ class HealthCheckHandler : ChannelInboundHandlerAdapter() {
 }
 
 class FraudDetectionServiceImpl : FraudDetectionServiceGrpc.FraudDetectionServiceImplBase() {
+    private val logger = GlobalOpenTelemetry.get().getLogger(this::class.java.name)
+
     override fun checkTransaction(
         request: CheckTransactionRequest,
         responseObserver: io.grpc.stub.StreamObserver<CheckTransactionResponse>
@@ -296,10 +301,18 @@ class FraudDetectionServiceImpl : FraudDetectionServiceGrpc.FraudDetectionServic
             return
         }
         // Basic implementation for validation test
+        val fraudScore = 0.0
         val response = CheckTransactionResponse.newBuilder()
-            .setFraudScore(0.0)
+            .setFraudScore(fraudScore)
             .setIsFraudulent(false)
             .build()
+        
+        logger.info("Processed fraud check for transaction", Attributes.builder()
+            .put("transaction_id", request.transactionId)
+            .put("user_id", request.userId.toString())
+            .put("fraud_score", fraudScore)
+            .build())
+        
         responseObserver.onNext(response)
         responseObserver.onCompleted()
     }
@@ -443,7 +456,7 @@ fun validateTlsConfig(config: TlsConfig): Result<Unit> {
     return Result.Success(Unit)
 }
 
-private val logger: Logger = LogManager.getLogger(groupID)
+private val logger = GlobalOpenTelemetry.get().getLogger(groupID)
 private val lastSuccessfulPollTime = AtomicLong(0)
 private var kafkaConsumerConnected = false
 private val shutdownInitiated = AtomicBoolean(false)
@@ -814,7 +827,7 @@ fun main() {
     props[ENABLE_AUTO_COMMIT_CONFIG] = "false"
     val bootstrapServers = System.getenv("KAFKA_ADDR")
     if (bootstrapServers == null) {
-        println("KAFKA_ADDR is not supplied")
+        logger.error("KAFKA_ADDR is not supplied")
         exitProcess(1)
     }
     props[BOOTSTRAP_SERVERS_CONFIG] = bootstrapServers
@@ -987,14 +1000,25 @@ fun main() {
  * gRPC service implementation for fraud detection
  */
 class FraudDetectionServiceImpl : FraudDetectionServiceGrpcKt.FraudDetectionServiceCoroutineImplBase() {
+    private val logger = GlobalOpenTelemetry.get().getLogger(this::class.java.name)
+
     override suspend fun checkFraud(request: CheckFraudRequest): CheckFraudResponse {
         validateCheckFraudRequest(request)
 
         // Proceed with normal fraud scoring (existing logic would be here)
-        return CheckFraudResponse.newBuilder()
-            .setFraudScore(0.0f)
+        val fraudScore = 0.0f
+        val response = CheckFraudResponse.newBuilder()
+            .setFraudScore(fraudScore)
             .setIsFraud(false)
             .build()
+        
+        logger.info("Processed fraud check for transaction", Attributes.builder()
+            .put("transaction_id", request.transactionId)
+            .put("user_id", request.userId.toString())
+            .put("fraud_score", fraudScore.toDouble())
+            .build())
+        
+        return response
     }
 
     /**
