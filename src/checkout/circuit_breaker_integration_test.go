@@ -26,9 +26,33 @@ func cbMockInvoker(_ context.Context, _ string, _, _ interface{}, _ *grpc.Client
 func cbMockInvokerAlwaysFails(_ context.Context, _ string, _, _ interface{}, _ *grpc.ClientConn, _ ...grpc.CallOption) error {
 	return status.Error(codes.Unavailable, "service down")
 }
+
+func TestAC1_CircuitOpensAfter50PercentFailureIn10sWindow(t *testing.T) {
+	t.Parallel()
+	cfg := CircuitBreakerConfig{
+		ServiceName:             "test-payment",
+		FailureThresholdPercent: 50,
+		OpenStateTimeout:        30 * time.Second,
+		HalfOpenMaxRequests:     5,
+		RollingWindowDuration:   10 * time.Second,
+	}
+	cb := NewCircuitBreaker(cfg)
+	interceptor := CircuitBreakerClientInterceptor(cb)
+	ctx := context.Background()
+
+	// First request fails
+	err := interceptor(ctx, "/test.Method", nil, nil, nil, cbMockInvokerAlwaysFails)
 	assert.Error(t, err)
 
-	// Third request should be rejected with ErrCircuitOpen
+	// Second request succeeds
+	err = interceptor(ctx, "/test.Method", nil, nil, nil, cbMockInvoker)
+	assert.NoError(t, err)
+
+	// Third request fails: failure rate 2/3 = 66.6% > 50% should trip
+	err = interceptor(ctx, "/test.Method", nil, nil, nil, cbMockInvokerAlwaysFails)
+	assert.Error(t, err)
+
+	// Fourth request should be rejected with ErrCircuitOpen
 	err = interceptor(ctx, "/test.Method", nil, nil, nil, cbMockInvoker)
 	assert.Equal(t, ErrCircuitOpen, err)
 	assert.Equal(t, gobreaker.StateOpen, cb.State())
