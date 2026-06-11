@@ -1,123 +1,38 @@
 import { status as GrpcStatus } from '@grpc/grpc-js';
-import CircuitBreaker from 'opossum';
-import { metrics } from '@opentelemetry/api';
+import { logger } from './telemetry/logging';
 
-// Interfaces
+// Retry configuration type
 export interface GrpcRetryConfig {
   maxAttempts: number;
-  initialDelayMs: number;
-  maxDelayMs: number;
-  circuitBreaker: {
-    errorThresholdPercentage: number;
-    resetTimeoutMs: number;
-  };
+  initialBackoffMs: number;
+  maxBackoffMs: number;
+  backoffMultiplier: number;
 }
 
-export interface RetryMetrics {
-  incrementRetryAttempts(service: string, method: string): void;
-  incrementSuccessfulRetries(service: string, method: string): void;
-  incrementFailedRetries(service: string, method: string): void;
-  incrementCircuitBreakerTripped(service: string): void;
-}
-
-// Read-only gRPC method list (idempotent)
-export const READ_ONLY_GRPC_METHODS: ReadonlySet<string> = new Set([
-  'GetProduct',
-  'ListProducts',
-  'GetCart',
-  'ListRecommendations',
-  'GetShippingQuote',
-  'GetUserProfile'
-]);
-
-// Custom error for circuit breaker open state
-export class CircuitBreakerOpenError extends Error {
-  constructor(service: string) {
-    super(`Circuit breaker is open for service ${service}`);
-    this.name = 'CircuitBreakerOpenError';
-  }
-}
+// Idempotent gRPC method list (whitelist)
+export const IDEMPOTENT_GRPC_METHODS: ReadonlyArray<string> = [
+  'oteldemo.CartService/GetCart',
+  'oteldemo.ProductCatalogService/GetProduct',
+  'oteldemo.ProductCatalogService/ListProducts',
+  'oteldemo.ShippingService/GetQuote',
+  // Read-only methods are idempotent; write methods are excluded by default
+];
 
 // Load configuration from environment variables
 const loadConfig = (): GrpcRetryConfig => {
   return {
-    maxAttempts: parseInt(process.env.FRONTEND_GRPC_RETRY_MAX_ATTEMPTS || '3', 10),
-    initialDelayMs: parseInt(process.env.FRONTEND_GRPC_RETRY_INITIAL_DELAY_MS || '100', 10),
-    maxDelayMs: parseInt(process.env.FRONTEND_GRPC_RETRY_MAX_DELAY_MS || '2000', 10),
-    circuitBreaker: {
-      errorThresholdPercentage: parseInt(process.env.FRONTEND_GRPC_CIRCUIT_BREAKER_ERROR_THRESHOLD || '50', 10),
-      resetTimeoutMs: parseInt(process.env.FRONTEND_GRPC_CIRCUIT_BREAKER_RESET_TIMEOUT_MS || '10000', 10),
-    }
+    maxAttempts: parseInt(process.env.GRPC_RETRY_MAX_ATTEMPTS || '3', 10),
+    initialBackoffMs: parseInt(process.env.GRPC_RETRY_INITIAL_BACKOFF_MS || '100', 10),
+    maxBackoffMs: parseInt(process.env.GRPC_RETRY_MAX_BACKOFF_MS || '2000', 10),
+    backoffMultiplier: parseFloat(process.env.GRPC_RETRY_BACKOFF_MULTIPLIER || '2.0'),
   };
 };
 
 export let config: GrpcRetryConfig = loadConfig();
 
-// Initialize OpenTelemetry metrics
-const meter = metrics.getMeter('frontend-grpc-retry');
-const retryAttemptsCounter = meter.createCounter('retry_attempts_total', {
-  description: 'Total number of gRPC retry attempts'
-});
-const successfulRetriesCounter = meter.createCounter('successful_retries_total', {
-  description: 'Total number of successful gRPC retries'
-});
-const failedRetriesCounter = meter.createCounter('failed_retries_total', {
-  description: 'Total number of failed gRPC retries (all attempts exhausted)'
-});
-const circuitBreakerTrippedCounter = meter.createCounter('circuit_breaker_tripped_total', {
-  description: 'Total number of times a circuit breaker was tripped for a service'
-});
-
-export const metricsImpl: RetryMetrics = {
-  incrementRetryAttempts: (service: string, method: string) => {
-    retryAttemptsCounter.add(1, { service, method });
-  },
-  incrementSuccessfulRetries: (service: string, method: string) => {
-    successfulRetriesCounter.add(1, { service, method });
-  },
-  incrementFailedRetries: (service: string, method: string) => {
-    failedRetriesCounter.add(1, { service, method });
-  },
-  incrementCircuitBreakerTripped: (service: string) => {
-    circuitBreakerTrippedCounter.add(1, { service });
-  }
-};
-
-// Allow overriding metrics for testing
-let currentMetrics: RetryMetrics = metricsImpl;
-
-export const setMetrics = (metrics: RetryMetrics) => {
-  currentMetrics = metrics;
-};
-
-// Reload config and clear circuit breakers (for testing)
+// Reload config (for testing)
 export const reloadConfig = () => {
   config = loadConfig();
-  circuitBreakers.clear();
-};
-
-// Circuit breaker cache per service
-const circuitBreakers: Map<string, CircuitBreaker> = new Map();
-
-const getCircuitBreaker = (serviceName: string): CircuitBreaker => {
-  if (circuitBreakers.has(serviceName)) {
-    return circuitBreakers.get(serviceName)!;
-  }
-
-  const options = {
-    errorThresholdPercentage: config.circuitBreaker.errorThresholdPercentage,
-    resetTimeout: config.circuitBreaker.resetTimeoutMs,
-    name: serviceName,
-  };
-
-  const breaker = new CircuitBreaker(async (fn: () => Promise<any>) => fn(), options);
-
-  breaker.on('open', () => {
-    currentMetrics.incrementCircuitBreakerTripped(serviceName);
-  });
-
-  circuitBreakers.set(serviceName, breaker);
-  return breaker;
 };
 
 // Helper to check if error is transient and retryable
@@ -129,70 +44,85 @@ const isRetryableError = (error: any): boolean => {
     GrpcStatus.DEADLINE_EXCEEDED,
     GrpcStatus.RESOURCE_EXHAUSTED,
     GrpcStatus.ABORTED,
-    // Only INTERNAL for connection reset errors
     GrpcStatus.INTERNAL
   ];
-
-  if (error.code === GrpcStatus.INTERNAL) {
-    return error.message?.includes('connection reset') || false;
-  }
 
   return retryableCodes.includes(error.code);
 };
 
 // Helper for exponential backoff delay
-const delay = (attempt: number): Promise<void> => {
-  const delayMs = Math.min(
-    config.initialDelayMs * Math.pow(2, attempt - 1),
-    config.maxDelayMs
+const calculateDelay = (attempt: number, config: GrpcRetryConfig): number => {
+  return Math.min(
+    config.initialBackoffMs * Math.pow(config.backoffMultiplier, attempt - 1),
+    config.maxBackoffMs
   );
-  return new Promise(resolve => setTimeout(resolve, delayMs));
 };
 
+const delay = (ms: number): Promise<void> => {
+  return new Promise(resolve => setTimeout(resolve, ms));
+};
+
+// Retry wrapper function signature
 export async function withGrpcRetry<T>(
-  serviceName: string,
-  methodName: string,
   grpcCall: () => Promise<T>,
-  isIdempotent: boolean
+  methodName: string,
+  timeoutMs?: number
 ): Promise<T> {
-  const breaker = getCircuitBreaker(serviceName);
-
-  if (breaker.opened) {
-    throw new CircuitBreakerOpenError(serviceName);
-  }
-
-  // Non-idempotent calls: no retry, just run once through circuit breaker
-  if (!isIdempotent) {
-    try {
-      return await breaker.fire(grpcCall);
-    } catch (error) {
-      throw error;
-    }
-  }
-
-  // Idempotent calls: retry logic
-  let attempt = 1;
+  const startTime = Date.now();
+  let attempt = 0;
   const maxAttempts = config.maxAttempts;
+  
+  // Check if method is idempotent
+  const isIdempotent = IDEMPOTENT_GRPC_METHODS.includes(methodName);
+  
+  // If max attempts is 0 or method is non-idempotent, run once without retry
+  if (maxAttempts <= 0 || !isIdempotent) {
+    return grpcCall();
+  }
 
   while (attempt <= maxAttempts) {
     try {
-      const result = await breaker.fire(grpcCall);
-      // If we succeeded after first attempt, count as successful retry
-      if (attempt > 1) {
-        currentMetrics.incrementSuccessfulRetries(serviceName, methodName);
-      }
-      return result;
-    } catch (error) {
-      // Check if error is retryable and we have attempts left
-      if (attempt < maxAttempts && isRetryableError(error)) {
-        currentMetrics.incrementRetryAttempts(serviceName, methodName);
-        // Wait for backoff before next attempt
-        await delay(attempt);
-        attempt++;
+      attempt++;
+      return await grpcCall();
+    } catch (error: any) {
+      // Check if we have attempts left and error is retryable
+      const hasMoreAttempts = attempt < maxAttempts;
+      const errorIsRetryable = isRetryableError(error);
+      
+      // Calculate elapsed time if timeout is provided
+      const elapsed = Date.now() - startTime;
+      const timeoutExceeded = timeoutMs ? elapsed >= timeoutMs : false;
+
+      if (hasMoreAttempts && errorIsRetryable && !timeoutExceeded) {
+        const retryDelay = calculateDelay(attempt, config);
+        // Check if even after delay we would exceed timeout
+        if (timeoutMs && (elapsed + retryDelay) >= timeoutMs) {
+          logger.warn({
+            methodName,
+            totalAttempts: attempt,
+            finalErrorCode: error.code,
+            reason: 'Timeout would be exceeded by next retry'
+          }, 'gRPC retry aborted due to impending timeout');
+          throw error;
+        }
+
+        // Log retry attempt
+        logger.info({
+          methodName,
+          attemptNumber: attempt,
+          delayBeforeNextAttempt: retryDelay,
+          errorCode: error.code
+        }, 'Retrying failed gRPC call');
+        
+        await delay(retryDelay);
       } else {
-        // No more attempts or non-retryable error
+        // Log exhausted attempts
         if (attempt > 1) {
-          currentMetrics.incrementFailedRetries(serviceName, methodName);
+          logger.warn({
+            methodName,
+            totalAttempts: attempt,
+            finalErrorCode: error.code
+          }, 'All gRPC retry attempts exhausted');
         }
         throw error;
       }
@@ -202,3 +132,4 @@ export async function withGrpcRetry<T>(
   // Should never reach here, just in case
   throw new Error('Unexpected error in retry logic');
 }
+
