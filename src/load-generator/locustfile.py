@@ -13,6 +13,8 @@ import logging
 import signal
 import sys
 import time
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from types import FrameType
 from typing import Optional, NoReturn
 
@@ -115,6 +117,63 @@ def load_config() -> dict:
 
 # Load configuration at module level so it's available to all classes
 CONFIG = load_config()
+
+# Health check server state
+runner_ready = False
+runner_ready_lock = threading.Lock()
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def _send_response(self, status_code: int, body: dict) -> None:
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(body).encode("utf-8"))
+    
+    def do_GET(self) -> None:
+        if self.path == "/health/liveness":
+            self._send_response(200, {"status": "ok"})
+        elif self.path == "/health/readiness":
+            with runner_ready_lock:
+                ready = runner_ready
+            if ready:
+                self._send_response(200, {"status": "ok"})
+            else:
+                self._send_response(503, {"status": "unavailable"})
+        else:
+            self._send_response(404, {"status": "not found"})
+    
+    def log_message(self, format: str, *args) -> None:
+        # Disable access logs for health checks to avoid noise
+        pass
+
+def start_health_check_server() -> None:
+    port_str = os.environ.get("HEALTH_CHECK_PORT", "8090")
+    try:
+        port = int(port_str)
+        if not (1 <= port <= 65535):
+            logging.error(f"HEALTH_CHECK_PORT must be between 1 and 65535, got {port_str}")
+            sys.exit(1)
+    except ValueError:
+        logging.error(f"HEALTH_CHECK_PORT must be a valid integer, got {port_str}")
+        sys.exit(1)
+    
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    logging.info(f"Health check server started on port {port}")
+
+def on_runner_init(*args, **kwargs) -> None:
+    global runner_ready
+    with runner_ready_lock:
+        runner_ready = True
+    logging.info("Locust runner initialized, readiness probe now passing")
+
+# Register Locust event hook for when runner is ready
+from locust import events
+events.init.add_listener(on_runner_init)
+
+# Start health check server immediately when module loads
+start_health_check_server()
 
 from pythonjsonlogger import jsonlogger
 
