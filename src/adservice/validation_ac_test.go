@@ -13,7 +13,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
-	pb "github.com/open-telemetry/opentelemetry-demo/src/adservice/pb/oteldemo/pb"
+	pb "github.com/open-telemetry/opentelemetry-demo/pb/oteldemo"
 )
 
 const (
@@ -41,7 +41,7 @@ func setupTestClient(t *testing.T) pb.AdServiceClient {
 
 func TestAC1_EmptyUserIdRejected(t *testing.T) {
 	client := setupTestClient(t)
-	req := &pb.AdRequest{
+	req := &pb.GetAdsRequest{
 		UserId:      "",
 		ContextKeys: []string{"test"},
 		Category:    []string{"clothing"},
@@ -60,7 +60,7 @@ func TestAC1_EmptyUserIdRejected(t *testing.T) {
 func TestAC2_UserIdExceedsMaxLengthRejected(t *testing.T) {
 	client := setupTestClient(t)
 	longUserId := strings.Repeat("a", 129)
-	req := &pb.AdRequest{
+	req := &pb.GetAdsRequest{
 		UserId:      longUserId,
 		ContextKeys: []string{"test"},
 		Category:    []string{"clothing"},
@@ -79,7 +79,7 @@ func TestAC2_UserIdExceedsMaxLengthRejected(t *testing.T) {
 func TestAC3_UserIdWithInvalidCharsRejected(t *testing.T) {
 	client := setupTestClient(t)
 	invalidUserId := "user@123" // contains @ which is invalid
-	req := &pb.AdRequest{
+	req := &pb.GetAdsRequest{
 		UserId:      invalidUserId,
 		ContextKeys: []string{"test"},
 		Category:    []string{"clothing"},
@@ -97,7 +97,7 @@ func TestAC3_UserIdWithInvalidCharsRejected(t *testing.T) {
 
 func TestAC4_EmptyContextKeyRejected(t *testing.T) {
 	client := setupTestClient(t)
-	req := &pb.AdRequest{
+	req := &pb.GetAdsRequest{
 		UserId:      "valid_user_123",
 		ContextKeys: []string{"test", ""}, // empty string in context keys
 		Category:    []string{"clothing"},
@@ -116,7 +116,7 @@ func TestAC4_EmptyContextKeyRejected(t *testing.T) {
 func TestAC5_ContextKeyExceedsMaxLengthRejected(t *testing.T) {
 	client := setupTestClient(t)
 	longKey := strings.Repeat("b", 65)
-	req := &pb.AdRequest{
+	req := &pb.GetAdsRequest{
 		UserId:      "valid_user_123",
 		ContextKeys: []string{longKey},
 		Category:    []string{"clothing"},
@@ -135,7 +135,7 @@ func TestAC5_ContextKeyExceedsMaxLengthRejected(t *testing.T) {
 func TestAC6_ContextKeyWithInvalidCharsRejected(t *testing.T) {
 	client := setupTestClient(t)
 	invalidKey := "context:key" // contains colon which is invalid
-	req := &pb.AdRequest{
+	req := &pb.GetAdsRequest{
 		UserId:      "valid_user_123",
 		ContextKeys: []string{invalidKey},
 		Category:    []string{"clothing"},
@@ -153,7 +153,7 @@ func TestAC6_ContextKeyWithInvalidCharsRejected(t *testing.T) {
 
 func TestAC7_EmptyCategoryRejected(t *testing.T) {
 	client := setupTestClient(t)
-	req := &pb.AdRequest{
+	req := &pb.GetAdsRequest{
 		UserId:      "valid_user_123",
 		ContextKeys: []string{"test"},
 		Category:    []string{"clothing", ""}, // empty string in categories
@@ -172,7 +172,7 @@ func TestAC7_EmptyCategoryRejected(t *testing.T) {
 func TestAC8_CategoryExceedsMaxLengthRejected(t *testing.T) {
 	client := setupTestClient(t)
 	longCategory := strings.Repeat("c", 33)
-	req := &pb.AdRequest{
+	req := &pb.GetAdsRequest{
 		UserId:      "valid_user_123",
 		ContextKeys: []string{"test"},
 		Category:    []string{longCategory},
@@ -191,7 +191,7 @@ func TestAC8_CategoryExceedsMaxLengthRejected(t *testing.T) {
 func TestAC9_CategoryWithInvalidCharsRejected(t *testing.T) {
 	client := setupTestClient(t)
 	invalidCategory := "clothing_shoes" // contains underscore which is invalid for categories
-	req := &pb.AdRequest{
+	req := &pb.GetAdsRequest{
 		UserId:      "valid_user_123",
 		ContextKeys: []string{"test"},
 		Category:    []string{invalidCategory},
@@ -209,7 +209,7 @@ func TestAC9_CategoryWithInvalidCharsRejected(t *testing.T) {
 
 func TestAC11_ValidRequestProcessedNormally(t *testing.T) {
 	client := setupTestClient(t)
-	req := &pb.AdRequest{
+	req := &pb.GetAdsRequest{
 		UserId:      "valid-user_123",
 		ContextKeys: []string{"valid-key-1", "another_valid_key2"},
 		Category:    []string{"clothing", "home-goods"},
@@ -223,7 +223,7 @@ func TestAC11_ValidRequestProcessedNormally(t *testing.T) {
 
 func TestAC12_ValidationPerformanceUnder1ms(t *testing.T) {
 	client := setupTestClient(t)
-	req := &pb.AdRequest{
+	req := &pb.GetAdsRequest{
 		UserId:      "valid-user_123",
 		ContextKeys: []string{"test-key"},
 		Category:    []string{"clothing"},

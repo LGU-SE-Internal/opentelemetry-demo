@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -52,6 +53,171 @@ var (
 	cleanupInterval = 1 * time.Minute
 	limiterTimeout  = 3 * time.Minute
 )
+
+// Validation regex patterns
+var (
+	userIdRegex       = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+	contextKeyRegex   = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+	categoryRegex     = regexp.MustCompile(`^[a-zA-Z0-9-]+$`)
+)
+
+// unaryValidationInterceptor validates incoming AdRequest for GetAds RPC method
+func unaryValidationInterceptor() grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+		// Only validate GetAds method
+		if info.FullMethod != "/oteldemo.AdService/GetAds" {
+			return handler(ctx, req)
+		}
+
+		adReq, ok := req.(*pb.GetAdsRequest)
+		if !ok {
+			return handler(ctx, req)
+		}
+
+		peer, ok := peer.FromContext(ctx)
+		clientIP := "unknown"
+		if ok {
+			clientIP = getClientIP(ctx, peer.Addr.String())
+		}
+
+		// Validate UserId
+		if adReq.UserId == "" {
+			// Log invalid request
+			otelLogger.Emit(ctx, log.Record{
+				Severity: log.SeverityWarn,
+				Body:     log.StringValue("Invalid AdRequest rejected"),
+				Attributes: []log.KeyValue{
+					log.String("remote_addr", clientIP),
+					log.String("user_id", "[REDACTED]"),
+					log.String("invalid_field", "user_id"),
+					log.String("error", "user_id is required"),
+				},
+			})
+			return nil, status.Error(codes.InvalidArgument, "user_id is required")
+		}
+
+		if len(adReq.UserId) > 128 {
+			otelLogger.Emit(ctx, log.Record{
+				Severity: log.SeverityWarn,
+				Body:     log.StringValue("Invalid AdRequest rejected"),
+				Attributes: []log.KeyValue{
+					log.String("remote_addr", clientIP),
+					log.String("user_id", adReq.UserId),
+					log.String("invalid_field", "user_id"),
+					log.String("error", "user_id exceeds maximum length of 128 characters"),
+				},
+			})
+			return nil, status.Error(codes.InvalidArgument, "user_id exceeds maximum length of 128 characters")
+		}
+
+		if !userIdRegex.MatchString(adReq.UserId) {
+			otelLogger.Emit(ctx, log.Record{
+				Severity: log.SeverityWarn,
+				Body:     log.StringValue("Invalid AdRequest rejected"),
+				Attributes: []log.KeyValue{
+					log.String("remote_addr", clientIP),
+					log.String("user_id", adReq.UserId),
+					log.String("invalid_field", "user_id"),
+					log.String("error", "user_id contains invalid characters"),
+				},
+			})
+			return nil, status.Error(codes.InvalidArgument, "user_id contains invalid characters")
+		}
+
+		// Validate ContextKeys
+		for _, key := range adReq.ContextKeys {
+			if key == "" {
+				otelLogger.Emit(ctx, log.Record{
+					Severity: log.SeverityWarn,
+					Body:     log.StringValue("Invalid AdRequest rejected"),
+					Attributes: []log.KeyValue{
+						log.String("remote_addr", clientIP),
+						log.String("user_id", adReq.UserId),
+						log.String("invalid_field", "context_keys"),
+						log.String("error", "context_keys cannot contain empty values"),
+					},
+				})
+				return nil, status.Error(codes.InvalidArgument, "context_keys cannot contain empty values")
+			}
+
+			if len(key) > 64 {
+				otelLogger.Emit(ctx, log.Record{
+					Severity: log.SeverityWarn,
+					Body:     log.StringValue("Invalid AdRequest rejected"),
+					Attributes: []log.KeyValue{
+						log.String("remote_addr", clientIP),
+						log.String("user_id", adReq.UserId),
+						log.String("invalid_field", "context_keys"),
+						log.String("error", "context_key exceeds maximum length of 64 characters"),
+					},
+				})
+				return nil, status.Error(codes.InvalidArgument, "context_key exceeds maximum length of 64 characters")
+			}
+
+			if !contextKeyRegex.MatchString(key) {
+				otelLogger.Emit(ctx, log.Record{
+					Severity: log.SeverityWarn,
+					Body:     log.StringValue("Invalid AdRequest rejected"),
+					Attributes: []log.KeyValue{
+						log.String("remote_addr", clientIP),
+						log.String("user_id", adReq.UserId),
+						log.String("invalid_field", "context_keys"),
+						log.String("error", "context_key contains invalid characters"),
+					},
+				})
+				return nil, status.Error(codes.InvalidArgument, "context_key contains invalid characters")
+			}
+		}
+
+		// Validate Category
+		for _, cat := range adReq.Category {
+			if cat == "" {
+				otelLogger.Emit(ctx, log.Record{
+					Severity: log.SeverityWarn,
+					Body:     log.StringValue("Invalid AdRequest rejected"),
+					Attributes: []log.KeyValue{
+						log.String("remote_addr", clientIP),
+						log.String("user_id", adReq.UserId),
+						log.String("invalid_field", "category"),
+						log.String("error", "category cannot contain empty values"),
+					},
+				})
+				return nil, status.Error(codes.InvalidArgument, "category cannot contain empty values")
+			}
+
+			if len(cat) > 32 {
+				otelLogger.Emit(ctx, log.Record{
+					Severity: log.SeverityWarn,
+					Body:     log.StringValue("Invalid AdRequest rejected"),
+					Attributes: []log.KeyValue{
+						log.String("remote_addr", clientIP),
+						log.String("user_id", adReq.UserId),
+						log.String("invalid_field", "category"),
+						log.String("error", "category exceeds maximum length of 32 characters"),
+					},
+				})
+				return nil, status.Error(codes.InvalidArgument, "category exceeds maximum length of 32 characters")
+			}
+
+			if !categoryRegex.MatchString(cat) {
+				otelLogger.Emit(ctx, log.Record{
+					Severity: log.SeverityWarn,
+					Body:     log.StringValue("Invalid AdRequest rejected"),
+					Attributes: []log.KeyValue{
+						log.String("remote_addr", clientIP),
+						log.String("user_id", adReq.UserId),
+						log.String("invalid_field", "category"),
+						log.String("error", "category contains invalid characters"),
+					},
+				})
+				return nil, status.Error(codes.InvalidArgument, "category contains invalid characters")
+			}
+		}
+
+		// All validations passed
+		return handler(ctx, req)
+	}
+}
 
 // getClientIP extracts client IP from X-Forwarded-For header or peer address
 func getClientIP(ctx context.Context, peerAddr string) string {
@@ -445,17 +611,18 @@ func readinessHandler(db *sql.DB) http.HandlerFunc {
 	unaryRateLimiter := unaryRateLimitInterceptor(rateLimit, burst)
 	streamRateLimiter := streamRateLimitInterceptor(rateLimit, burst)
 
-	// Chain interceptors: rate limit runs first, then otel
-	s := grpc.NewServer(
-		grpc.ChainUnaryInterceptor(
-			unaryRateLimiter,
-			otelgrpc.UnaryServerInterceptor(),
-		),
-		grpc.ChainStreamInterceptor(
-			streamRateLimiter,
-			otelgrpc.StreamServerInterceptor(),
-		),
-	)
+// Chain interceptors: validation runs first, then rate limit, then otel
+s := grpc.NewServer(
+	grpc.ChainUnaryInterceptor(
+		unaryValidationInterceptor(),
+		unaryRateLimiter,
+		otelgrpc.UnaryServerInterceptor(),
+	),
+	grpc.ChainStreamInterceptor(
+		streamRateLimiter,
+		otelgrpc.StreamServerInterceptor(),
+	),
+)
 	pb.RegisterAdServiceServer(s, &adService{db: dbConn})
 	reflection.Register(s)
 
