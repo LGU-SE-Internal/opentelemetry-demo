@@ -106,6 +106,194 @@ func isTransientError(err error) bool {
 	if errors.As(err, &pgErr) {
 		return TransientPostgresErrorCodes[pgErr.Code]
 	}
+	// Also check for context cancellation/deadline errors
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	return false
+}
+
+// retryOperation executes the given operation with retry logic
+func (rdb *RetryableDB) retryOperation(ctx context.Context, opType string, operation func() error) error {
+	if rdb.config.MaxRetries == 0 {
+		return operation()
+	}
+
+	// Create exponential backoff
+	bo := backoff.NewExponentialBackOff()
+	bo.InitialInterval = rdb.config.InitialBackoff
+	bo.MaxInterval = rdb.config.MaxBackoff
+	bo.Multiplier = 2
+	bo.MaxElapsedTime = 0 // We handle max retries ourselves
+
+	var lastErr error
+	for attempt := 0; attempt <= rdb.config.MaxRetries; attempt++ {
+		err := operation()
+		if err == nil {
+			return nil
+		}
+
+		lastErr = err
+
+		// Check if context is already canceled
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		// Don't retry non-transient errors or if this is the last attempt
+		if !isTransientError(err) || attempt == rdb.config.MaxRetries {
+			break
+		}
+
+		// Increment retry attempts metric
+		rdb.metrics.RetryAttempts.Add(ctx, 1,
+			metric.WithAttributes(
+				attribute.String("error_code", getErrorCode(err)),
+				attribute.String("operation_type", opType),
+			),
+		)
+
+		// Wait for backoff or context cancellation
+		nextBackoff := bo.NextBackOff()
+		if nextBackoff == backoff.Stop {
+			break
+		}
+
+		timer := time.NewTimer(nextBackoff)
+		select {
+		case <-timer.C:
+			// Continue to next attempt
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		}
+	}
+
+	// If we got here, all retries failed
+	rdb.metrics.RetryFailures.Add(ctx, 1,
+		metric.WithAttributes(
+			attribute.String("error_code", getErrorCode(lastErr)),
+			attribute.String("operation_type", opType),
+		),
+	)
+
+	return lastErr
+}
+
+// getErrorCode extracts the PostgreSQL error code from an error, returns "unknown" if not a PgError
+func getErrorCode(err error) string {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code
+	}
+	if errors.Is(err, context.Canceled) {
+		return "context_canceled"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "context_deadline_exceeded"
+	}
+	return "unknown"
+}
+
+// Ping implements the DBPool interface with retry logic
+func (rdb *RetryableDB) Ping(ctx context.Context) error {
+	return rdb.retryOperation(ctx, "ping", func() error {
+		return rdb.db.Ping(ctx)
+	})
+}
+
+// Exec implements the DBPool interface with retry logic
+func (rdb *RetryableDB) Exec(ctx context.Context, query string, args ...interface{}) (pgconn.CommandTag, error) {
+	var res pgconn.CommandTag
+	err := rdb.retryOperation(ctx, "exec", func() error {
+		var err error
+		res, err = rdb.db.Exec(ctx, query, args...)
+		return err
+	})
+	return res, err
+}
+
+// Query implements the DBPool interface with retry logic
+func (rdb *RetryableDB) Query(ctx context.Context, query string, args ...interface{}) (pgx.Rows, error) {
+	var res pgx.Rows
+	err := rdb.retryOperation(ctx, "query", func() error {
+		var err error
+		res, err = rdb.db.Query(ctx, query, args...)
+		return err
+	})
+	return res, err
+}
+
+// QueryRow implements the DBPool interface with retry logic
+func (rdb *RetryableDB) QueryRow(ctx context.Context, query string, args ...interface{}) pgx.Row {
+	var res pgx.Row
+	// QueryRow never returns nil, so we can't use retryOperation directly, so implement retry logic here
+	if rdb.config.MaxRetries == 0 {
+		return rdb.db.QueryRow(ctx, query, args...)
+	}
+
+	bo := backoff.NewExponentialBackOff()
+	bo.InitialInterval = rdb.config.InitialBackoff
+	bo.MaxInterval = rdb.config.MaxBackoff
+	bo.Multiplier = 2
+	bo.MaxElapsedTime = 0
+
+	var lastErr error
+	for attempt := 0; attempt <= rdb.config.MaxRetries; attempt++ {
+		res = rdb.db.QueryRow(ctx, query, args...)
+		err := res.Err()
+		if err == nil {
+			return res
+		}
+
+		lastErr = err
+
+		if ctx.Err() != nil {
+			// Return the row with context error
+			return res
+		}
+
+		if !isTransientError(err) || attempt == rdb.config.MaxRetries {
+			break
+		}
+
+		// Increment retry attempts metric
+		rdb.metrics.RetryAttempts.Add(ctx, 1,
+			metric.WithAttributes(
+				attribute.String("error_code", getErrorCode(err)),
+				attribute.String("operation_type", "query_row"),
+			),
+		)
+
+		nextBackoff := bo.NextBackOff()
+		if nextBackoff == backoff.Stop {
+			break
+		}
+
+		timer := time.NewTimer(nextBackoff)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			// Return a row with the context error
+			return pgx.RowFunc(func(dest ...interface{}) error {
+				return ctx.Err()
+			})
+		}
+	}
+
+	// Increment failure metric
+	rdb.metrics.RetryFailures.Add(ctx, 1,
+		metric.WithAttributes(
+			attribute.String("error_code", getErrorCode(lastErr)),
+			attribute.String("operation_type", "query_row"),
+		),
+	)
+
+	return res
+}
+		return TransientPostgresErrorCodes[pgErr.Code]
+	}
 	// Also retry connection errors that are not wrapped PgError
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return false // Context errors are handled separately
