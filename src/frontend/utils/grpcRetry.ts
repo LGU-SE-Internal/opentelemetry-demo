@@ -4,7 +4,8 @@ const logger = {
   warn: jest.fn(),
   error: jest.fn()
 };
-import CircuitBreaker from 'opossum';
+const opossumModule = require('opossum');
+const CircuitBreaker = opossumModule.default || opossumModule;
 import { metrics } from '@opentelemetry/api';
 
 const meter = metrics.getMeter('frontend-grpc-retry');
@@ -87,7 +88,13 @@ export let config: GrpcRetryConfig = loadConfig();
 // Reload config and reset circuit breakers (for testing)
 export const reloadConfig = () => {
   config = loadConfig();
-  Object.values(circuitBreakers).forEach(cb => cb.shutdown());
+  Object.values(circuitBreakers).forEach(cb => {
+    if (typeof cb.shutdown === 'function') {
+      cb.shutdown();
+    } else if (typeof cb.close === 'function') {
+      cb.close();
+    }
+  });
   Object.keys(circuitBreakers).forEach(key => delete circuitBreakers[key]);
 };
 
