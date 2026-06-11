@@ -7,6 +7,7 @@ import request from '../utils/Request';
 import { AttributeNames } from '../utils/enums/AttributeNames';
 import SessionGateway from './Session.gateway';
 import { context, propagation } from "@opentelemetry/api";
+import { withGrpcRetry } from '../utils/grpcRetry';
 
 const { userId } = SessionGateway.getSession();
 
@@ -14,10 +15,13 @@ const basePath = '/api';
 
 const Apis = () => ({
   getCart(currencyCode: string) {
-    return request<IProductCart>({
-      url: `${basePath}/cart`,
-      queryParams: { sessionId: userId, currencyCode },
-    });
+    return withGrpcRetry(
+      () => request<IProductCart>({
+        url: `${basePath}/cart`,
+        queryParams: { sessionId: userId, currencyCode },
+      }),
+      'oteldemo.CartService/GetCart'
+    );
   },
   addCartItem({ currencyCode, ...item }: CartItem & { currencyCode: string }) {
     return request<Cart>({
@@ -42,14 +46,17 @@ const Apis = () => ({
   },
 
   getShippingCost(itemList: IProductCartItem[], currencyCode: string, address: Address) {
-    return request<Money>({
-      url: `${basePath}/shipping`,
-      queryParams: {
-        itemList: JSON.stringify(itemList.map(({ productId, quantity }) => ({ productId, quantity }))),
-        currencyCode,
-        address: JSON.stringify(address),
-      },
-    });
+    return withGrpcRetry(
+      () => request<Money>({
+        url: `${basePath}/shipping`,
+        queryParams: {
+          itemList: JSON.stringify(itemList.map(({ productId, quantity }) => ({ productId, quantity }))),
+          currencyCode,
+          address: JSON.stringify(address),
+        },
+      }),
+      'oteldemo.ShippingService/GetQuote'
+    );
   },
 
   placeOrder({ currencyCode, ...order }: PlaceOrderRequest & { currencyCode: string }) {
@@ -62,16 +69,22 @@ const Apis = () => ({
   },
 
   listProducts(currencyCode: string) {
-    return request<Product[]>({
-      url: `${basePath}/products`,
-      queryParams: { currencyCode },
-    });
+    return withGrpcRetry(
+      () => request<Product[]>({
+        url: `${basePath}/products`,
+        queryParams: { currencyCode },
+      }),
+      'oteldemo.ProductCatalogService/ListProducts'
+    );
   },
   getProduct(productId: string, currencyCode: string) {
-    return request<Product>({
-      url: `${basePath}/products/${productId}`,
-      queryParams: { currencyCode },
-    });
+    return withGrpcRetry(
+      () => request<Product>({
+        url: `${basePath}/products/${productId}`,
+        queryParams: { currencyCode },
+      }),
+      'oteldemo.ProductCatalogService/GetProduct'
+    );
   },
   getProductReviews(productId: string) {
     return request<ProductReview[]>({
