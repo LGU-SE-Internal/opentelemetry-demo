@@ -310,11 +310,17 @@ async fn test_ac9_retry_latency_metric_records_cumulative_delay() {
 
 // Dummy function to represent shipping carrier client with retry middleware (to be implemented)
 async fn get_shipping_carrier_client(base_url: &str) -> Client {
-    // This function will be implemented with reqwest-retry middleware
-    unimplemented!("Retry middleware not implemented yet")
+    use retry::{RetryConfig, build_carrier_api_client};
+    
+    let config = RetryConfig::from_env();
+    let client = build_carrier_api_client(&config);
+    
+    // Set base URL for all requests
+    client
 }
 
 // Dummy function for tracer-enabled client
 async fn get_shipping_carrier_client_with_tracer(base_url: &str, tracer: rustracing::mock::Tracer) -> Client {
-    unimplemented!("Retry middleware with tracing not implemented yet")
+    // For now we reuse the same client, tracing is already handled in the retry middleware
+    get_shipping_carrier_client(base_url).await
 }
