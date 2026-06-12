@@ -680,14 +680,7 @@ func circuitBreakerUnaryInterceptor(svcName string) grpc.UnaryClientInterceptor 
 
 	if _, ok := circuitBreakers[svcName]; !ok {
 		config := DefaultCircuitBreakerConfig(svcName)
-		cb, err := NewCircuitBreaker(config, meter)
-		if err != nil {
-			logger.Error(fmt.Sprintf("failed to create circuit breaker for %s: %v", svcName, err))
-			// Return no-op interceptor if circuit breaker creation fails
-			return func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
-				return invoker(ctx, method, req, reply, cc, opts...)
-			}
-		}
+		cb := NewCircuitBreaker(config, meter)
 		circuitBreakers[svcName] = cb
 	}
 
