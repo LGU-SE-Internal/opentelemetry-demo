@@ -297,7 +297,8 @@ if (require.main === module) {
     if (logger) {
       logger.error(`Unexpected error: ${err.message}`);
     } else {
-      console.error(`Unexpected error: ${err.message}`);
+      logger = initLogger('currencyservice', { endpoint: '', useTls: false });
+      logger.error(`Unexpected error: ${err.message}`);
     }
     process.exit(1);
   });
