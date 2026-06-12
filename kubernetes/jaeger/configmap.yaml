@@ -21,3 +21,9 @@ data:
       telemetry:
         health-check-http:
           host-port: 0.0.0.0:14269
+    tls:
+      enabled: ${JAEGER_TLS_ENABLED:false}
+      cert-file: ${JAEGER_TLS_CERT_PATH:}
+      key-file: ${JAEGER_TLS_KEY_PATH:}
+      client-ca-file: ${JAEGER_TLS_CA_CERT_PATH:}
+      min-version: "1.2"
