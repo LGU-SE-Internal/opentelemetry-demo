@@ -16,6 +16,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/time/rate"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel"
@@ -39,6 +41,39 @@ import (
 var isShuttingDown atomic.Bool
 var otelLogger = global.GetLoggerProvider().Logger("adservice")
 var rateLimitedRequestsCounter metric.Int64Counter
+
+// Prometheus metrics
+var (
+	requestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ad_service_requests_total",
+			Help: "Total number of ad serving requests received by the service",
+		},
+		[]string{"status"},
+	)
+	retrievalLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "ad_service_retrieval_latency_seconds",
+			Help:    "Time taken to retrieve ads for a request, grouped by ad category",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"ad_category"},
+	)
+	dbQueriesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ad_service_db_queries_total",
+			Help: "Total number of database queries executed for ad lookups",
+		},
+		[]string{"status"},
+	)
+	adsServedPerRequest = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "ad_service_ads_served_per_request",
+			Help:    "Distribution of number of ads returned per successful ad request",
+			Buckets: []float64{0, 1, 2, 3, 4, 5, 10},
+		},
+	)
+)
 
 // clientLimiter holds a rate limiter for each client IP and tracks last seen time for cleanup
 type clientLimiter struct {
@@ -191,6 +226,7 @@ func streamRateLimitInterceptor(perClientRPS rate.Limit, globalRPS rate.Limit, b
 type Config struct {
 	ServicePort int
 	HealthPort  int
+	MetricsPort int
 	DBHost      string
 	DBPort      int
 	DBUser      string
@@ -223,6 +259,7 @@ func LoadConfig() (Config, error) {
 	cfg := Config{
 		ServicePort:          9555,
 		HealthPort:           8080,
+		MetricsPort:          9090,
 		DBHost:               "localhost",
 		DBPort:               5432,
 		DBUser:               "postgres",
@@ -256,6 +293,18 @@ func LoadConfig() (Config, error) {
 			return cfg, fmt.Errorf("AD_SERVICE_HEALTH_PORT must be between 1 and 65535, got %d", port)
 		}
 		cfg.HealthPort = port
+	}
+
+	// Read metrics port from environment
+	if portStr := os.Getenv("AD_SERVICE_METRICS_PORT"); portStr != "" {
+		port, err := strconv.Atoi(portStr)
+		if err != nil {
+			return cfg, fmt.Errorf("invalid AD_SERVICE_METRICS_PORT: %w", err)
+		}
+		if port < 1 || port > 65535 {
+			return cfg, fmt.Errorf("AD_SERVICE_METRICS_PORT must be between 1 and 65535, got %d", port)
+		}
+		cfg.MetricsPort = port
 	}
 
 	// Read per client rate limit from environment
@@ -419,6 +468,34 @@ func readinessHandler(db *sql.DB) http.HandlerFunc {
 		os.Exit(1)
 	}
 
+	// Register Prometheus metrics
+	prometheus.MustRegister(requestsTotal)
+	prometheus.MustRegister(retrievalLatency)
+	prometheus.MustRegister(dbQueriesTotal)
+	prometheus.MustRegister(adsServedPerRequest)
+
+	// Start metrics server
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", promhttp.Handler())
+	metricsServer := &http.Server{
+		Addr:    fmt.Sprintf(":%d", cfg.MetricsPort),
+		Handler: metricsMux,
+	}
+
+	go func() {
+		otelLogger.Emit(context.Background(), log.Record{
+			Severity: log.SeverityInfo,
+			Body:     log.StringValue(fmt.Sprintf("Metrics endpoint starting on :%d", cfg.MetricsPort)),
+		})
+		if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			otelLogger.Emit(context.Background(), log.Record{
+				Severity: log.SeverityError,
+				Body:     log.StringValue(fmt.Sprintf("Failed to start metrics server: %v", err)),
+			})
+			os.Exit(1)
+		}
+	}()
+
 	// Initialize rate limit metric
 	meter := global.MeterProvider().Meter("adservice")
 	rateLimitedRequestsCounter, err = meter.Int64Counter(
@@ -568,15 +645,24 @@ func readinessHandler(db *sql.DB) http.HandlerFunc {
 			Severity: log.SeverityInfo,
 			Body:     log.StringValue("INFO: Starting graceful shutdown, waiting up to 10s for in-flight requests to complete"),
 		})
-		// Shutdown HTTP server
-		httpCtx, httpCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer httpCancel()
-		if err := httpServer.Shutdown(httpCtx); err != nil {
-			otelLogger.Emit(context.Background(), log.Record{
-				Severity: log.SeverityWarn,
-				Body:     log.StringValue(fmt.Sprintf("WARN: HTTP server shutdown failed: %v", err)),
-			})
-		}
+	// Shutdown HTTP server
+	httpCtx, httpCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer httpCancel()
+	if err := httpServer.Shutdown(httpCtx); err != nil {
+		otelLogger.Emit(context.Background(), log.Record{
+			Severity: log.SeverityWarn,
+			Body:     log.StringValue(fmt.Sprintf("WARN: HTTP server shutdown failed: %v", err)),
+		})
+	}
+	// Shutdown metrics server
+	metricsCtx, metricsCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer metricsCancel()
+	if err := metricsServer.Shutdown(metricsCtx); err != nil {
+		otelLogger.Emit(context.Background(), log.Record{
+			Severity: log.SeverityWarn,
+			Body:     log.StringValue(fmt.Sprintf("WARN: Metrics server shutdown failed: %v", err)),
+		})
+	}
 		err := GracefulShutdown(s, dbConn, shutdownWindow)
 		if err != nil {
 			if err == context.DeadlineExceeded {
@@ -620,14 +706,49 @@ type adService struct {
 
 // GetAds returns ads based on the request context
 func (s *adService) GetAds(ctx context.Context, req *pb.GetAdsRequest) (*pb.GetAdsResponse, error) {
+	startTime := time.Now()
+	status := "success"
+	defer func() {
+		requestsTotal.WithLabelValues(status).Inc()
+	}()
+
+	// Simulate database query
+	dbStart := time.Now()
+	// In real implementation, this would be actual DB call
+	err := s.db.PingContext(ctx)
+	dbLatency := time.Since(dbStart)
+	_ = dbLatency // unused for now, but track query status
+	if err != nil {
+		dbQueriesTotal.WithLabelValues("failure").Inc()
+		status = "failure"
+		return nil, status.Error(codes.Internal, "failed to query database")
+	}
+	dbQueriesTotal.WithLabelValues("success").Inc()
+
+	// Get ad categories from request
+	categories := req.GetContextKeys()
+	if len(categories) == 0 {
+		categories = []string{"default"}
+	}
+
+	// Simulate ad retrieval latency per category
+	for _, cat := range categories {
+		retrievalLatency.WithLabelValues(cat).Observe(time.Since(startTime).Seconds())
+	}
+
 	// Simple implementation - return dummy ads for now
-	return &pb.GetAdsResponse{
-		Ads: []*pb.Ad{
-			{
-				Text: "Sample ad",
-				Url:  "https://example.com",
-			},
+	ads := []*pb.Ad{
+		{
+			Text: "Sample ad",
+			Url:  "https://example.com",
 		},
+	}
+
+	// Record number of ads served
+	adsServedPerRequest.Observe(float64(len(ads)))
+
+	return &pb.GetAdsResponse{
+		Ads: ads,
 	}, nil
 }
 
