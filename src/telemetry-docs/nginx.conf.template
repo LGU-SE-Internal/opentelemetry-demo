@@ -31,56 +31,5 @@ http {
 
     include mime.types;
     sendfile on;
-    server {
-        listen ${TELEMETRY_DOCS_PORT};
-        listen [::]:${TELEMETRY_DOCS_PORT};
-
-        resolver 127.0.0.11;
-        autoindex off;
-
-        server_name _;
-        server_tokens off;
-
-        root /static;
-        gzip_static on;
-
-        # Don't trace static assets
-        location ~* \.(css|js|png|jpg|jpeg|svg|ico|woff|woff2|ttf|eot|map|json|xml|gz)$ {
-            otel_trace off;
-            expires 1y;
-            add_header Cache-Control "public, immutable";
-        }
-
-        location /assets/ {
-            otel_trace off;
-            expires 1y;
-            add_header Cache-Control "public, immutable";
-        }
-
-        location /search/ {
-            otel_trace off;
-        }
-
-        location /status {
-            otel_trace off;
-            stub_status on;
-            access_log  on;
-            allow all;
-        }
-
-        location /health {
-            otel_trace off;
-            add_header Content-Type application/json always;
-            return 200 '{"status": "healthy", "service": "telemetry-docs"}';
-        }
-
-        location /ready {
-            otel_trace off;
-            add_header Content-Type application/json always;
-            if (-f $document_root/index.html) {
-                return 200 '{"status": "ready", "service": "telemetry-docs", "content_available": true}';
-            }
-            return 503 '{"status": "not_ready", "service": "telemetry-docs", "content_available": false}';
-        }
-    }
+    #SERVER_BLOCKS#
 }
