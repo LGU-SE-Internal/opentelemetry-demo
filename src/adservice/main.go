@@ -616,6 +616,35 @@ func readinessHandler(db *sql.DB) http.HandlerFunc {
 		}
 	}()
 
+	// Register Prometheus metrics
+	prometheus.MustRegister(requestsTotal)
+	prometheus.MustRegister(retrievalLatency)
+	prometheus.MustRegister(dbQueriesTotal)
+	prometheus.MustRegister(adsServedPerRequest)
+
+	// Set up metrics server
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", promhttp.Handler())
+	metricsServer := &http.Server{
+		Addr:    fmt.Sprintf(":%d", cfg.MetricsPort),
+		Handler: metricsMux,
+	}
+
+	// Start metrics server in goroutine
+	go func() {
+		otelLogger.Emit(context.Background(), log.Record{
+			Severity: log.SeverityInfo,
+			Body:     log.StringValue(fmt.Sprintf("Metrics endpoint starting on :%d", cfg.MetricsPort)),
+		})
+		if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			otelLogger.Emit(context.Background(), log.Record{
+				Severity: log.SeverityError,
+				Body:     log.StringValue(fmt.Sprintf("Failed to start metrics server: %v", err)),
+			})
+			os.Exit(1)
+		}
+	}()
+
 	// Start background DB health check goroutine
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
