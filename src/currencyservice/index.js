@@ -3,6 +3,11 @@ const protoLoader = require('@grpc/proto-loader');
 const fs = require('fs');
 const path = require('path');
 const { context, trace } = require('@opentelemetry/api');
+const { logs } = require('@opentelemetry/api-logs');
+const { LoggerProvider, BatchLogRecordProcessor, ConsoleLogRecordExporter } = require('@opentelemetry/sdk-logs');
+const { OTLPLogExporter } = require('@opentelemetry/exporter-logs-otlp-http');
+const { Resource } = require('@opentelemetry/resources');
+const { SemanticResourceAttributes } = require('@opentelemetry/semantic-conventions');
 
 // Initialize logger instance to be used throughout the service
 let logger;
@@ -56,12 +61,12 @@ function initLogger(serviceName, config) {
       attributes: { ...attributes }
     };
 
-  // Add trace context if available
-  if (spanContext) {
-    logEntry.trace_id = spanContext.traceId;
-    logEntry.span_id = spanContext.spanId;
-    logEntry.trace_flags = `0${spanContext.traceFlags.toString(16)}`;
-  }
+    // Add trace context if available
+    if (spanContext) {
+      logEntry.trace_id = spanContext.traceId;
+      logEntry.span_id = spanContext.spanId;
+      logEntry.trace_flags = `0${spanContext.traceFlags.toString(16)}`;
+    }
 
     // Output to appropriate stream
     const logLine = JSON.stringify(logEntry) + '\n';
@@ -100,9 +105,7 @@ function initLogger(serviceName, config) {
   };
 
   // Set global logger for service use
-  // if (!logger) {
-    logger = otelLoggerInterface;
-  // }
+  logger = otelLoggerInterface;
 
   return otelLoggerInterface;
 }
