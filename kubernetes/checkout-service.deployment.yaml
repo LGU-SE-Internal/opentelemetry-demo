@@ -30,6 +30,7 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         fsGroup: 1000
+      terminationGracePeriodSeconds: 60
       containers:
         - name: checkout-service
           image: ghcr.io/lgu-se-internal/opentelemetry-demo/checkout-service:latest
@@ -38,6 +39,10 @@ spec:
               name: http
             - containerPort: 9090
               name: metrics
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "10"]
           livenessProbe:
             httpGet:
               path: /health
