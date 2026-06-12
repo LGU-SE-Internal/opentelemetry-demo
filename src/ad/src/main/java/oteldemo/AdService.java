@@ -80,9 +80,15 @@ import io.github.resilience4j.core.IntervalFunction;
 import io.github.resilience4j.ratelimiter.RateLimiter;
 import io.github.resilience4j.ratelimiter.RateLimiterConfig;
 import java.time.Duration;
+import java.util.regex.Pattern;
 
 
 public final class AdService {
+
+  // Validation constants and patterns
+  private static final int MAX_CONTEXT_KEYS = 10;
+  private static final int MAX_CONTEXT_KEY_LENGTH = 64;
+  private static final Pattern VALID_CONTEXT_KEY_PATTERN = Pattern.compile("^[a-zA-Z0-9\\-_.]+$");
 
   // Resilience4j components
   private static final Retry retry;
@@ -509,6 +515,36 @@ public final class AdService {
       // get the current span in context
       Span span = Span.current();
       try {
+        // Validate context keys first (fail fast order: count first, then per-key checks)
+        int contextKeysCount = req.getContextKeysCount();
+        if (contextKeysCount > MAX_CONTEXT_KEYS) {
+          throw new StatusRuntimeException(Status.INVALID_ARGUMENT.withDescription(
+            "Too many context keys: maximum 10 allowed"
+          ));
+        }
+
+        for (int i = 0; i < contextKeysCount; i++) {
+          String key = req.getContextKeys(i);
+          // Check for empty key
+          if (key.isEmpty()) {
+            throw new StatusRuntimeException(Status.INVALID_ARGUMENT.withDescription(
+              "Context key cannot be empty"
+            ));
+          }
+          // Check key length
+          if (key.length() > MAX_CONTEXT_KEY_LENGTH) {
+            throw new StatusRuntimeException(Status.INVALID_ARGUMENT.withDescription(
+              "Context key too long: maximum 64 characters allowed"
+            ));
+          }
+          // Check key format
+          if (!VALID_CONTEXT_KEY_PATTERN.matcher(key).matches()) {
+            throw new StatusRuntimeException(Status.INVALID_ARGUMENT.withDescription(
+              "Invalid context key format: only alphanumeric characters, hyphens, underscores, and periods are allowed"
+            ));
+          }
+        }
+
         // Validate all context category parameters first
         for (int i = 0; i < req.getContextCategoriesCount(); i++) {
           service.validateAdCategory(req.getContextCategories(i));
