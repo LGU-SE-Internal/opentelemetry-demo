@@ -2,7 +2,7 @@ import logging
 import json
 import psycopg2
 from psycopg2 import errors
-from typing import Callable, Any, Optional
+from typing import Callable, Any, Optional, TypeVar
 from tenacity import (
     retry,
     stop_after_attempt,
@@ -10,10 +10,11 @@ from tenacity import (
     retry_if_exception_type,
     RetryCallState,
 )
-from pybreaker import CircuitBreaker, CircuitBreakerListener
+from pybreaker import CircuitBreaker, CircuitBreakerListener, CircuitBreakerError
 from opentelemetry import metrics
 import os
 import simplejson as json
+import grpc
 
 logger = logging.getLogger(__name__)
 
@@ -23,10 +24,28 @@ db_operation_retry_counter = meter.create_counter(
     "db_operation_retry_count",
     description="Number of retry attempts for database operations",
 )
-circuit_breaker_state_counter = meter.create_counter(
-    "circuit_breaker_state_change",
-    description="Number of circuit breaker state transitions",
+
+# Circuit Breaker Metrics as per requirements
+cb_state_gauge = meter.create_gauge(
+    "product_reviews.db.circuit_breaker.state",
+    description="Current circuit state: 0 = CLOSED, 1 = HALF_OPEN, 2 = OPEN"
 )
+cb_state_transitions_counter = meter.create_counter(
+    "product_reviews.db.circuit_breaker.state_transitions_total",
+    description="Count of circuit state transition events"
+)
+cb_requests_counter = meter.create_counter(
+    "product_reviews.db.circuit_breaker.requests_total",
+    description="Count of requests processed by circuit breaker"
+)
+
+T = TypeVar("T")
+
+# Load circuit breaker configuration from environment variables
+CB_ENABLED = os.environ.get("PRODUCT_REVIEWS_DB_CIRCUIT_BREAKER_ENABLED", "true").lower() == "true"
+CB_FAILURE_THRESHOLD = int(os.environ.get("PRODUCT_REVIEWS_DB_CIRCUIT_BREAKER_FAILURE_THRESHOLD", "5"))
+CB_RECOVERY_TIMEOUT = int(os.environ.get("PRODUCT_REVIEWS_DB_CIRCUIT_BREAKER_RECOVERY_TIMEOUT", "30"))
+CB_SUCCESS_THRESHOLD = int(os.environ.get("PRODUCT_REVIEWS_DB_CIRCUIT_BREAKER_SUCCESS_THRESHOLD", "3"))
 
 # Retriable PostgreSQL error types
 RETRIABLE_ERRORS = (
@@ -97,36 +116,96 @@ def postgres_read_retry() -> Callable:
 
 # Circuit Breaker Listener for OTel metrics
 class CircuitBreakerMetricsListener(CircuitBreakerListener):
-    def __init__(self, operation_name: str):
-        self.operation_name = operation_name
-    
     def state_change(self, cb, old_state, new_state):
-        state_name = new_state.__class__.__name__.lower().replace("state", "")
-        circuit_breaker_state_counter.add(
+        # Map state names to enum values
+        state_map = {
+            "closed": 0,
+            "half_open": 1,
+            "open": 2
+        }
+        old_state_name = old_state.__class__.__name__.lower().replace("state", "")
+        new_state_name = new_state.__class__.__name__.lower().replace("state", "")
+        
+        # Update state gauge
+        cb_state_gauge.set(
+            state_map[new_state_name],
+            {"service": "product-reviews"}
+        )
+        
+        # Increment transition counter
+        cb_state_transitions_counter.add(
             1,
             {
-                "state": state_name,
-                "operation_name": self.operation_name,
+                "service": "product-reviews",
+                "from_state": old_state_name,
+                "to_state": new_state_name
             }
         )
-        logger.info(f"Circuit breaker for {self.operation_name} transitioned from {old_state} to {new_state}")
+        
+        logger.info(f"Database circuit breaker transitioned from {old_state_name} to {new_state_name}")
 
-# Fallback response for circuit open
-class FallbackResponse:
-    def __init__(self):
-        self.status_code = 503
-        self.json = {"error": "Product review service is temporarily unavailable, please try again later"}
+# Initialize circuit breaker if enabled
+db_circuit_breaker: Optional[CircuitBreaker] = None
+if CB_ENABLED:
+    db_circuit_breaker = CircuitBreaker(
+        fail_max=CB_FAILURE_THRESHOLD,
+        reset_timeout=CB_RECOVERY_TIMEOUT,
+        expected_exception=RETRIABLE_ERRORS,
+        listeners=[CircuitBreakerMetricsListener()]
+    )
+    # Set initial state gauge to closed
+    cb_state_gauge.set(0, {"service": "product-reviews"})
 
-def create_review_fallback(*args, **kwargs):
-    return FallbackResponse()
-
-# Circuit breaker for create_review operation
-create_review_circuit_breaker = CircuitBreaker(
-    fail_max=5,
-    reset_timeout=30,
-    listeners=[CircuitBreakerMetricsListener("create_review")],
-    fallback_function=create_review_fallback
-)
+def with_db_circuit_breaker(func: Callable[..., T]) -> Callable[..., T]:
+    """
+    Decorator that wraps PostgreSQL database operations with circuit breaker logic.
+    Raises: grpc.StatusCode.UNAVAILABLE when circuit is OPEN, no database call is executed.
+    """
+    def wrapper(*args, **kwargs) -> T:
+        if not CB_ENABLED or not db_circuit_breaker:
+            # Circuit breaker disabled, call function directly
+            return func(*args, **kwargs)
+        
+        current_state = db_circuit_breaker.current_state.__class__.__name__.lower().replace("state", "")
+        
+        try:
+            result = db_circuit_breaker.call(func, *args, **kwargs)
+            # Request succeeded
+            cb_requests_counter.add(
+                1,
+                {
+                    "service": "product-reviews",
+                    "state": current_state,
+                    "result": "success"
+                }
+            )
+            return result
+        except CircuitBreakerError:
+            # Circuit is open, request rejected
+            cb_requests_counter.add(
+                1,
+                {
+                    "service": "product-reviews",
+                    "state": current_state,
+                    "result": "rejected"
+                }
+            )
+            raise grpc.RpcError(
+                grpc.StatusCode.UNAVAILABLE,
+                "Product reviews database is temporarily unavailable, please try again later"
+            )
+        except Exception as e:
+            # Request failed but circuit not open yet
+            cb_requests_counter.add(
+                1,
+                {
+                    "service": "product-reviews",
+                    "state": current_state,
+                    "result": "failure"
+                }
+            )
+            raise e
+    return wrapper
 
 def must_map_env(key: str):
     value = os.environ.get(key)
@@ -172,6 +251,7 @@ if tls_params:
         db_connection_str += '?' + '&'.join(tls_params)
 
 @postgres_read_retry()
+@with_db_circuit_breaker
 def fetch_product_reviews(product_id: str, page: int = 1, limit: int = 20) -> list[dict]:
     """Fetch paginated reviews for a product, retries on transient DB errors"""
     offset = (page - 1) * limit
@@ -204,6 +284,7 @@ def fetch_product_reviews(product_id: str, page: int = 1, limit: int = 20) -> li
                 pass
 
 @postgres_read_retry()
+@with_db_circuit_breaker
 def fetch_average_review_score(product_id: str) -> float:
     """Fetch average review score for a product, retries on transient DB errors"""
     connection = None
@@ -226,7 +307,7 @@ def fetch_average_review_score(product_id: str) -> float:
             except Exception as e:
                 pass
 
-@create_review_circuit_breaker
+@with_db_circuit_breaker
 def create_review(product_id: str, user_id: str, rating: int, comment: str | None) -> dict:
     """Create a new product review, uses circuit breaker for transient failure protection"""
     connection = None
@@ -260,8 +341,8 @@ def create_review(product_id: str, user_id: str, rating: int, comment: str | Non
             except Exception as e:
                 pass
 
-# Attach breaker to function for test access
-create_review._breaker = create_review_circuit_breaker
+# Attach breaker to module for test access
+_db_circuit_breaker = db_circuit_breaker
 
 # Copyright The OpenTelemetry Authors
 # SPDX-License-Identifier: Apache-2.0
