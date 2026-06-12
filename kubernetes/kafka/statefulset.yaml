@@ -26,6 +26,7 @@ spec:
         readOnlyRootFilesystem: true
         seccompProfile:
           type: RuntimeDefault
+      terminationGracePeriodSeconds: 60
       containers:
       - name: kafka
         image: opentelemetry-demo-kafka:latest
