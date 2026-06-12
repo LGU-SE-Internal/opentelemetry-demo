@@ -5,17 +5,12 @@ metadata:
   labels:
     app.kubernetes.io/name: frontend-proxy
     app.kubernetes.io/part-of: opentelemetry-demo
-    app.kubernetes.io/component: proxy
 spec:
-  type: {{ .Values.frontendProxy.service.type | default "ClusterIP" }}
+  type: ClusterIP
   ports:
     - name: http
       port: 80
-      targetPort: http
-      protocol: TCP
-    - name: admin
-      port: 9901
-      targetPort: admin
+      targetPort: 8080
       protocol: TCP
   selector:
     app.kubernetes.io/name: frontend-proxy
