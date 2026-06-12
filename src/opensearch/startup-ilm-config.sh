@@ -2,6 +2,20 @@
 
 set -euo pipefail
 
+# Signal handler for graceful shutdown
+handle_signal() {
+    local signal=$1
+    echo "Received $signal, forwarding to OpenSearch process (PID $OPENSEARCH_PID)"
+    kill -"$signal" "$OPENSEARCH_PID"
+    wait "$OPENSEARCH_PID"
+    exit $?
+}
+
+# Register signal handlers
+trap 'handle_signal SIGTERM' SIGTERM
+trap 'handle_signal SIGINT' SIGINT
+trap 'handle_signal SIGQUIT' SIGQUIT
+
 # Default retention period if not set
 DEFAULT_RETENTION_DAYS=7
 RETENTION_DAYS=${OPENSEARCH_LOG_RETENTION_DAYS:-$DEFAULT_RETENTION_DAYS}
