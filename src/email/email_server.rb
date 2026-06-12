@@ -765,19 +765,22 @@ post "/send" do
 
     # Also write to stderr as JSON for test capture
     log_entry = {
-      level: "error",
       timestamp: Time.now.utc.iso8601,
+      event_type: "email.request.validation_failed",
       message: "Request validation failed for email send endpoint",
       service: "email-service",
       endpoint: "POST /send",
-      request_id: request_id,
+      correlation_id: request_id,
       invalid_fields: invalid_fields,
       context: {
         email_provided: masked_email,
         order_id_provided: order_id_provided
       }
     }
-    $stderr.puts log_entry.to_json
+    $logger.info(log_entry[:message], log_entry.merge({
+      trace_id: OpenTelemetry::Trace.current_trace_id,
+      span_id: OpenTelemetry::Trace.current_span_id
+    }))
 
     content_type :json
     status 400
@@ -831,15 +834,19 @@ def retry_smtp_delivery(&block)
       # Log permanent failure
       failure_type = permanent_failure ? 'permanent' : 'temporary'
       log_entry = {
-        level: "error",
         timestamp: Time.now.utc.iso8601,
+        event_type: "email.delivery.failed",
         message: "Email delivery failed permanently",
         recipient: recipient,
-        smtp_code: smtp_code,
-        total_retries: retries,
-        failure_type: failure_type
+        error_details: e.message,
+        correlation_id: request_id || '',
+        failure_type: failure_type,
+        smtp_code: smtp_code
       }
-      $stderr.puts log_entry.to_json
+      $logger.error(log_entry[:message], log_entry.merge({
+        trace_id: OpenTelemetry::Trace.current_trace_id,
+        span_id: OpenTelemetry::Trace.current_span_id
+      }))
 
       $email_delivery_failed_total.add(1, labels: { failure_type: failure_type })
 
@@ -853,16 +860,19 @@ def retry_smtp_delivery(&block)
 
     # Log retry warning
     log_entry = {
-      level: "warn",
       timestamp: Time.now.utc.iso8601,
+      event_type: "email.delivery.retry",
       message: "Retrying email delivery",
       recipient: recipient,
+      correlation_id: request_id || '',
       smtp_code: smtp_code,
-      retry_count: retries + 1,
-      max_retries: max_retries,
-      next_retry_delay: delay
+      next_retry_delay: delay,
+      attempt_number: retries + 1
     }
-    $stderr.puts log_entry.to_json
+    $logger.warn(log_entry[:message], log_entry.merge({
+      trace_id: OpenTelemetry::Trace.current_trace_id,
+      span_id: OpenTelemetry::Trace.current_span_id
+    }))
 
     $email_delivery_retry_total.add(1, labels: { retry_attempt: retries + 1 })
 
