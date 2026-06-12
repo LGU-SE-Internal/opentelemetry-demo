@@ -24,7 +24,32 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+
+	"github.com/open-telemetry/opentelemetry-demo/src/kafka-collector/internal/metrics"
 )
+
+// Exported metrics functions for tests and use in processing flow
+func IncMessagesConsumed(topic string, partition int32) {
+	metrics.IncMessagesConsumed(topic, partition)
+}
+
+func IncMessagesProcessedSuccess(topic string, partition int32) {
+	metrics.IncMessagesProcessedSuccess(topic, partition)
+}
+
+func IncMessagesProcessedFailure(topic string, partition int32, errorType string) {
+	metrics.IncMessagesProcessedFailure(topic, partition, errorType)
+}
+
+func SetConsumerLag(topic string, partition int32, lag int64) {
+	metrics.SetConsumerLag(topic, partition, lag)
+}
+
+func ObserveProcessingDuration(topic string, partition int32, status string, duration time.Duration) {
+	metrics.ObserveProcessingDuration(topic, partition, status, duration)
+}
+
+
 
 // Logger interface for structured logging
 type Logger interface {
