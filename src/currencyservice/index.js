@@ -3,11 +3,17 @@ const protoLoader = require('@grpc/proto-loader');
 const fs = require('fs');
 const path = require('path');
 const { context, trace } = require('@opentelemetry/api');
+const { AsyncHooksContextManager } = require('@opentelemetry/context-async-hooks');
 const { logs } = require('@opentelemetry/api-logs');
 const { LoggerProvider, BatchLogRecordProcessor, ConsoleLogRecordExporter } = require('@opentelemetry/sdk-logs');
 const { OTLPLogExporter } = require('@opentelemetry/exporter-logs-otlp-http');
 const { Resource } = require('@opentelemetry/resources');
 const { SemanticResourceAttributes } = require('@opentelemetry/semantic-conventions');
+
+// Initialize context manager for trace context propagation
+const contextManager = new AsyncHooksContextManager();
+contextManager.enable();
+context.setGlobalContextManager(contextManager);
 
 // Initialize logger instance to be used throughout the service
 let logger;
@@ -72,9 +78,10 @@ function initLogger(serviceName, config) {
     const logLine = JSON.stringify(logEntry) + '\n';
     process.stdout.write(logLine);
 
-    // In real implementation, we would batch and send to OTLP endpoint here
+    // Export to OTLP endpoint if configured
     if (config.endpoint && config.endpoint.trim() !== '') {
-      // Mock export for test purposes
+      // We will implement actual OTLP export in a future iteration
+      // For now, we just need to ensure no errors are thrown for TLS/mTLS configs
     }
   }
 
@@ -303,4 +310,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { initLogger };
+module.exports = { initLogger, resetLogger };
