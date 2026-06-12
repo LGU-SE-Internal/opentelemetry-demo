@@ -16,6 +16,8 @@ import signal
 import time
 from concurrent import futures
 import threading
+from multiprocessing import shared_memory, Lock
+from typing import Optional
 from flask import Flask, Response
 
 # Pip
@@ -49,6 +51,74 @@ from grpc_health.v1 import health_pb2_grpc
 from metrics import (
     init_metrics
 )
+
+class SharedMemoryRateLimiter:
+    def __init__(self, rps_limit: int, shm_name: str = "otel_demo_recommendation_rate_limit"):
+        """
+        Initialize shared memory rate limiter
+        :param rps_limit: Configured requests per second limit
+        :param shm_name: Name of shared memory segment (defaults to fixed value for service)
+        """
+        self.lock = Lock()  # Inter-process mutex lock for atomic counter updates
+        self.shm: Optional[shared_memory.SharedMemory] = None
+        self.rps_limit = rps_limit
+        self.current_window_start_ns: int = 0
+        self.shm_name = shm_name
+        # Shared memory layout: 8 bytes for window start timestamp (ns), 4 bytes for request count
+        self._initialize_shared_memory()
+
+    def _initialize_shared_memory(self) -> None:
+        """Create or attach to shared memory segment, initialize values if created"""
+        self.shm_size = 12  # 8 bytes timestamp (ns), 4 bytes count
+        try:
+            # Try to create first
+            self.shm = shared_memory.SharedMemory(name=self.shm_name, create=True, size=self.shm_size)
+            # Initialize values
+            self.shm.buf[:8] = int(0).to_bytes(8, byteorder='little')
+            self.shm.buf[8:12] = int(0).to_bytes(4, byteorder='little')
+        except FileExistsError:
+            # Already exists, attach to it
+            self.shm = shared_memory.SharedMemory(name=self.shm_name, create=False, size=self.shm_size)
+
+    def is_allowed(self) -> bool:
+        """
+        Check if current request is allowed under rate limit
+        :return: True if request is allowed, False if rate limited
+        """
+        now_ns = time.time_ns()
+        window_duration_ns = 1_000_000_000  # 1 second window
+
+        with self.lock:
+            # Read current window from shared memory
+            window_start_ns = int.from_bytes(self.shm.buf[:8], byteorder='little')
+            count = int.from_bytes(self.shm.buf[8:12], byteorder='little')
+
+            # Reset window if it's new second
+            if now_ns - window_start_ns >= window_duration_ns:
+                window_start_ns = now_ns
+                count = 0
+                # Write new window start
+                self.shm.buf[:8] = window_start_ns.to_bytes(8, byteorder='little')
+                self.shm.buf[8:12] = count.to_bytes(4, byteorder='little')
+
+            if count < self.rps_limit:
+                # Increment count
+                count += 1
+                self.shm.buf[8:12] = count.to_bytes(4, byteorder='little')
+                return True
+            return False
+
+    def __del__(self) -> None:
+        """Cleanup shared memory reference when process exits"""
+        if self.shm:
+            self.shm.close()
+            try:
+                # Try to unlink, only succeeds if this is the last process attached
+                self.shm.unlink()
+            except:
+                # Ignore if other processes are still attached
+                pass
+
 # Health check functions
 def check_product_catalog_health():
     """Check if product catalog service is reachable and responsive"""
@@ -760,7 +830,7 @@ product_catalog_stub, product_catalog_channel = create_product_catalog_client(ca
 product_catalog_client = product_catalog_stub
 
 # Initialize rate limiter
-LEGACY_RATE_LIMIT_ENV_VAR = 'RECOMMENDATION_SERVICE_RATE_LIMIT_RPS'
+LEGACY_RATE_LIMIT_ENV_VAR = 'RECOMMENDATION_SERVICE_RATE_LIMIT'
 DEFAULT_RATE_LIMIT_ENV_VAR = 'RECOMMENDATION_SERVICE_RATE_LIMIT_DEFAULT_RPS'
 RATE_LIMIT_ENV_VAR_PREFIX = 'RECOMMENDATION_SERVICE_RATE_LIMIT_'
 RATE_LIMIT_ENV_VAR_SUFFIX = '_RPS'
