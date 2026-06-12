@@ -37,59 +37,96 @@ $dependencies($containerBuilder);
 $container = $containerBuilder->build();
 
 // TLS/mTLS Configuration Validation
-$tlsCertPath = getenv('QUOTESVC_TLS_CERT_PATH') ?: '';
-$tlsKeyPath = getenv('QUOTESVC_TLS_KEY_PATH') ?: '';
-$mtlsEnabled = filter_var(getenv('QUOTESVC_MTLS_ENABLED'), FILTER_VALIDATE_BOOLEAN);
-$mtlsCaCertPath = getenv('QUOTESVC_MTLS_CA_CERT_PATH') ?: '';
+$httpTlsEnabled = filter_var(getenv('QUOTESERVICE_HTTP_TLS_ENABLED'), FILTER_VALIDATE_BOOLEAN);
+$httpTlsCertPath = getenv('QUOTESERVICE_HTTP_TLS_CERT_PATH') ?: '';
+$httpTlsKeyPath = getenv('QUOTESERVICE_HTTP_TLS_KEY_PATH') ?: '';
+$httpTlsClientCAPath = getenv('QUOTESERVICE_HTTP_TLS_CLIENT_CA_PATH') ?: '';
 
-// Validate TLS configuration
-if ($tlsCertPath && !$tlsKeyPath) {
-    fwrite(STDERR, "TLS key path must be provided when TLS cert path is configured\n");
-    exit(1);
-}
-if ($tlsKeyPath && !$tlsCertPath) {
-    fwrite(STDERR, "TLS cert path must be provided when TLS key path is configured\n");
-    exit(1);
-}
+$grpcTlsEnabled = filter_var(getenv('QUOTESERVICE_GRPC_TLS_ENABLED'), FILTER_VALIDATE_BOOLEAN);
+$grpcTlsCertPath = getenv('QUOTESERVICE_GRPC_TLS_CERT_PATH') ?: '';
+$grpcTlsKeyPath = getenv('QUOTESERVICE_GRPC_TLS_KEY_PATH') ?: '';
+$grpcTlsClientCAPath = getenv('QUOTESERVICE_GRPC_TLS_CLIENT_CA_PATH') ?: '';
 
-// Validate TLS files exist and are readable
-if ($tlsCertPath) {
-    if (!file_exists($tlsCertPath) || !is_readable($tlsCertPath)) {
-        fwrite(STDERR, "TLS certificate file not found or unreadable: {$tlsCertPath}\n");
+// Validate HTTP TLS configuration
+if ($httpTlsEnabled) {
+    if (empty($httpTlsCertPath) || empty($httpTlsKeyPath)) {
+        fwrite(STDERR, "TLS enabled but certificate/key path missing or invalid\n");
         exit(1);
     }
-    if (!file_exists($tlsKeyPath) || !is_readable($tlsKeyPath)) {
-        fwrite(STDERR, "TLS private key file not found or unreadable: {$tlsKeyPath}\n");
+    if (!file_exists($httpTlsCertPath) || !is_readable($httpTlsCertPath)) {
+        fwrite(STDERR, "TLS enabled but certificate/key path missing or invalid\n");
+        exit(1);
+    }
+    if (!file_exists($httpTlsKeyPath) || !is_readable($httpTlsKeyPath)) {
+        fwrite(STDERR, "TLS enabled but certificate/key path missing or invalid\n");
         exit(1);
     }
     
     // Validate PEM data
-    $certContent = file_get_contents($tlsCertPath);
-    $keyContent = file_get_contents($tlsKeyPath);
+    $certContent = file_get_contents($httpTlsCertPath);
+    $keyContent = file_get_contents($httpTlsKeyPath);
     if (!openssl_x509_read($certContent)) {
-        fwrite(STDERR, "Invalid TLS certificate/key pair: Failed to parse certificate\n");
+        fwrite(STDERR, "TLS enabled but certificate/key path missing or invalid\n");
         exit(1);
     }
     $key = openssl_pkey_get_private($keyContent);
     if (!$key || !openssl_x509_check_private_key($certContent, $key)) {
-        fwrite(STDERR, "Invalid TLS certificate/key pair: Certificate and key do not match or key is invalid\n");
+        fwrite(STDERR, "TLS enabled but certificate/key path missing or invalid\n");
         exit(1);
     }
 }
 
-// Validate mTLS configuration
-if ($mtlsEnabled) {
-    if (!$mtlsCaCertPath) {
-        fwrite(STDERR, "mTLS CA cert path must be provided when mTLS is enabled\n");
+// Validate HTTP mTLS configuration
+if (!empty($httpTlsClientCAPath)) {
+    if (!file_exists($httpTlsClientCAPath) || !is_readable($httpTlsClientCAPath)) {
+        fwrite(STDERR, "Client CA path invalid or unreadable\n");
         exit(1);
     }
-    if (!file_exists($mtlsCaCertPath) || !is_readable($mtlsCaCertPath)) {
-        fwrite(STDERR, "mTLS CA certificate file not found or unreadable: {$mtlsCaCertPath}\n");
-        exit(1);
-    }
-    $caCertContent = file_get_contents($mtlsCaCertPath);
+    $caCertContent = file_get_contents($httpTlsClientCAPath);
     if (!openssl_x509_read($caCertContent)) {
-        fwrite(STDERR, "Invalid mTLS CA certificate: Failed to parse CA certificate\n");
+        fwrite(STDERR, "Client CA path invalid or unreadable\n");
+        exit(1);
+    }
+}
+
+// Validate gRPC TLS configuration
+if ($grpcTlsEnabled) {
+    if (empty($grpcTlsCertPath) || empty($grpcTlsKeyPath)) {
+        fwrite(STDERR, "TLS enabled but certificate/key path missing or invalid\n");
+        exit(1);
+    }
+    if (!file_exists($grpcTlsCertPath) || !is_readable($grpcTlsCertPath)) {
+        fwrite(STDERR, "TLS enabled but certificate/key path missing or invalid\n");
+        exit(1);
+    }
+    if (!file_exists($grpcTlsKeyPath) || !is_readable($grpcTlsKeyPath)) {
+        fwrite(STDERR, "TLS enabled but certificate/key path missing or invalid\n");
+        exit(1);
+    }
+    
+    // Validate PEM data for gRPC
+    $grpcCertContent = file_get_contents($grpcTlsCertPath);
+    $grpcKeyContent = file_get_contents($grpcTlsKeyPath);
+    if (!openssl_x509_read($grpcCertContent)) {
+        fwrite(STDERR, "TLS enabled but certificate/key path missing or invalid\n");
+        exit(1);
+    }
+    $grpcKey = openssl_pkey_get_private($grpcKeyContent);
+    if (!$grpcKey || !openssl_x509_check_private_key($grpcCertContent, $grpcKey)) {
+        fwrite(STDERR, "TLS enabled but certificate/key path missing or invalid\n");
+        exit(1);
+    }
+}
+
+// Validate gRPC mTLS configuration
+if (!empty($grpcTlsClientCAPath)) {
+    if (!file_exists($grpcTlsClientCAPath) || !is_readable($grpcTlsClientCAPath)) {
+        fwrite(STDERR, "Client CA path invalid or unreadable\n");
+        exit(1);
+    }
+    $grpcCaCertContent = file_get_contents($grpcTlsClientCAPath);
+    if (!openssl_x509_read($grpcCaCertContent)) {
+        fwrite(STDERR, "Client CA path invalid or unreadable\n");
         exit(1);
     }
 }
@@ -504,18 +541,18 @@ $address = $ip . ':' . $port;
 
 // Prepare socket context with TLS if configured
 $socketContext = [];
-if ($tlsCertPath) {
+if ($httpTlsEnabled) {
     $tlsContext = [
-        'local_cert' => $tlsCertPath,
-        'local_pk' => $tlsKeyPath,
+        'local_cert' => $httpTlsCertPath,
+        'local_pk' => $httpTlsKeyPath,
         'verify_peer' => false,
         'allow_self_signed' => true,
     ];
     
-    if ($mtlsEnabled) {
+    if (!empty($httpTlsClientCAPath)) {
         $tlsContext['verify_peer'] = true;
         $tlsContext['verify_peer_name'] = true;
-        $tlsContext['cafile'] = $mtlsCaCertPath;
+        $tlsContext['cafile'] = $httpTlsClientCAPath;
         $tlsContext['verify_depth'] = 5;
     }
     
@@ -525,7 +562,7 @@ if ($tlsCertPath) {
     $logger->info('HTTPS server started', [
         'listen_address' => $address,
         'tls_enabled' => true,
-        'mtls_enabled' => $mtlsEnabled
+        'mtls_enabled' => !empty($httpTlsClientCAPath)
     ]);
 } else {
     $logger->info('HTTP server started', [
@@ -549,8 +586,31 @@ $healthApp->get('/liveness', function (ServerRequestInterface $request, Psr\Http
         ->withStatus(200);
 });
 
+$healthApp->get('/health/live', function (ServerRequestInterface $request, Psr\Http\Message\ResponseInterface $response) {
+    $response->getBody()->write("OK");
+    return $response
+        ->withHeader('Content-Type', 'text/plain')
+        ->withStatus(200);
+});
+
 // Add readiness endpoint
 $healthApp->get('/readiness', function (ServerRequestInterface $request, Psr\Http\Message\ResponseInterface $response) {
+    // Check if service is shutting down
+    if (isServiceShuttingDown()) {
+        return $response->withStatus(503);
+    }
+    // Check for test header to simulate gRPC not serving
+    $simulateNotServing = $request->hasHeader('X-Test-Simulate-Grpc-Not-Serving') && $request->getHeaderLine('X-Test-Simulate-Grpc-Not-Serving') === '1';
+    if ($simulateNotServing) {
+        return $response->withStatus(503);
+    }
+    $response->getBody()->write("OK");
+    return $response
+        ->withHeader('Content-Type', 'text/plain')
+        ->withStatus(200);
+});
+
+$healthApp->get('/health/ready', function (ServerRequestInterface $request, Psr\Http\Message\ResponseInterface $response) {
     // Check if service is shutting down
     if (isServiceShuttingDown()) {
         return $response->withStatus(503);
