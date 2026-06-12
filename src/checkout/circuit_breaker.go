@@ -52,8 +52,12 @@ func initMetrics(meter metric.Meter) {
 	}
 }
 
-func NewCircuitBreaker(config CircuitBreakerConfig, meter metric.Meter) *gobreaker.CircuitBreaker {
-	initMetrics(meter)
+func NewCircuitBreaker(config CircuitBreakerConfig, meter ...metric.Meter) *gobreaker.CircuitBreaker {
+	var m metric.Meter
+	if len(meter) > 0 {
+		m = meter[0]
+	}
+	initMetrics(m)
 
 	var cb *gobreaker.CircuitBreaker
 
