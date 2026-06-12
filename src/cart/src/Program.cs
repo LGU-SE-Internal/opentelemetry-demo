@@ -245,7 +245,11 @@ builder.Services.AddOpenTelemetry()
         .AddRuntimeInstrumentation()
         .AddAspNetCoreInstrumentation()
         .SetExemplarFilter(ExemplarFilterType.TraceBased)
-        .AddOtlpExporter());
+        .AddOtlpExporter()
+        .AddPrometheusExporter(options =>
+        {
+            options.ScrapeEndpointPath = "/metrics";
+        }));
 builder.Services.AddGrpc();
 builder.Services.AddSingleton<readinessCheck>();
 builder.Services.AddGrpcHealthChecks()
@@ -501,6 +505,8 @@ app.MapHealthChecks("/ready", new HealthCheckOptions
         await context.Response.WriteAsJsonAsync(response);
     }
 }).AllowAnonymous();
+
+app.MapPrometheusScrapingEndpoint().AllowAnonymous();
 
 app.Run();
 
