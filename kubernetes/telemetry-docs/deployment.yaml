@@ -30,7 +30,7 @@ spec:
           image: ghcr.io/lgu-se-internal/opentelemetry-demo/telemetry-docs:v1.9.0
           ports:
             - name: http
-              containerPort: 8080
+              containerPort: 80
               protocol: TCP
           securityContext:
             readOnlyRootFilesystem: true
@@ -38,28 +38,34 @@ spec:
             capabilities:
               drop:
                 - "ALL"
-              add:
-                - "NET_BIND_SERVICE"
           resources:
             requests:
-              cpu: "100m"
-              memory: "128Mi"
+              cpu: "10m"
+              memory: "32Mi"
             limits:
-              cpu: "200m"
-              memory: "256Mi"
+              cpu: "100m"
+              memory: "64Mi"
           livenessProbe:
             httpGet:
-              path: /healthz
-              port: 8080
+              path: /
+              port: 80
             initialDelaySeconds: 5
             periodSeconds: 10
-            timeoutSeconds: 1
             failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: /healthz
-              port: 8080
-            initialDelaySeconds: 2
-            periodSeconds: 5
-            timeoutSeconds: 1
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
             failureThreshold: 3
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: run
+              mountPath: /var/run
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: run
+          emptyDir: {}
