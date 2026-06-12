@@ -24,6 +24,7 @@ from openfeature import api
 from openfeature.contrib.provider.flagd import FlagdProvider
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 def init_llm_service_logger(service_name: str = "llm-service") -> logging.Logger:
     """
@@ -81,6 +82,78 @@ logger = init_llm_service_logger()
 
 app = Flask(__name__)
 app.logger = logger
+
+# Metrics configuration
+METRICS_ENABLED = os.environ.get('LLM_SERVICE_METRICS_ENABLED', 'false').lower() == 'true'
+
+if METRICS_ENABLED:
+    # Define metrics
+    REQUESTS = Counter(
+        'llm_requests_total',
+        'Total number of API requests received',
+        ['endpoint', 'status_code']
+    )
+    
+    REQUEST_DURATION = Histogram(
+        'llm_request_duration_seconds',
+        'Distribution of API request latency',
+        ['endpoint'],
+        buckets=[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]
+    )
+    
+    ERRORS = Counter(
+        'llm_errors_total',
+        'Total number of failed requests',
+        ['error_type', 'endpoint']
+    )
+    
+    TOKENS = Counter(
+        'llm_tokens_total',
+        'Total number of LLM tokens processed across all requests',
+        ['model', 'token_type']
+    )
+    
+    # Store request start time
+    @app.before_request
+    def start_timer():
+        if request.path == '/metrics':
+            return
+        request.start_time = time.perf_counter()
+    
+    # Update metrics after request
+    @app.after_request
+    def update_metrics(response):
+        if request.path == '/metrics':
+            return response
+        if hasattr(request, 'start_time'):
+            duration = time.perf_counter() - request.start_time
+            endpoint = request.path
+            status_code = response.status_code
+            
+            # Update request count and duration
+            REQUESTS.labels(endpoint=endpoint, status_code=status_code).inc()
+            REQUEST_DURATION.labels(endpoint=endpoint).observe(duration)
+        
+        return response
+    
+    # Error handler to update error metrics
+    @app.errorhandler(Exception)
+    def handle_exception(error):
+        endpoint = request.path
+        error_type = type(error).__name__
+        if hasattr(error, 'type'):
+            error_type = error.type
+        
+        ERRORS.labels(error_type=error_type, endpoint=endpoint).inc()
+        
+        # Re-raise to let original error handlers process it
+        raise error
+    
+    # Metrics endpoint
+    @app.route('/metrics', methods=['GET'])
+    def metrics():
+        return Response(generate_latest(), content_type=CONTENT_TYPE_LATEST)
+
 # Graceful shutdown configuration
 shutdown_initiated = False
 shutdown_timeout = int(os.environ.get('LLM_SERVICE_SHUTDOWN_TIMEOUT', 30))
@@ -474,6 +547,12 @@ def chat_completions():
                     "total_tokens": sum(len(m.get("content", "").split()) for m in messages)
                 }
             }
+            
+            # Update token metrics if enabled
+            if METRICS_ENABLED:
+                prompt_tokens = sum(len(m.get("content", "").split()) for m in messages)
+                TOKENS.labels(model=model, token_type="prompt").inc(prompt_tokens)
+            
             return jsonify(response)
 
     else:
@@ -484,6 +563,9 @@ def chat_completions():
 
 def build_response(model, messages, response_text):
     app.logger.info(f"Processing a response: '{response_text}'")
+    
+    prompt_tokens = sum(len(m.get("content", "").split()) for m in messages)
+    completion_tokens = len(response_text.split())
 
     response = {
         "id": f"chatcmpl-mock-{int(time.time())}",
@@ -499,11 +581,17 @@ def build_response(model, messages, response_text):
             "finish_reason": "stop"
         }],
         "usage": {
-            "prompt_tokens": sum(len(m.get("content", "").split()) for m in messages),
-            "completion_tokens": len(response_text.split()),
-            "total_tokens": sum(len(m.get("content", "").split()) for m in messages) + len(response_text.split())
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens
         }
     }
+    
+    # Update token metrics if enabled
+    if METRICS_ENABLED:
+        TOKENS.labels(model=model, token_type="prompt").inc(prompt_tokens)
+        TOKENS.labels(model=model, token_type="completion").inc(completion_tokens)
+    
     return jsonify(response)
 
 @app.route('/v1/models', methods=['GET'])
