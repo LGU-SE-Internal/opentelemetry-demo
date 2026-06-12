@@ -14,8 +14,7 @@ import org.junit.jupiter.api.Test;
 import oteldemo.AdRequest;
 import oteldemo.AdResponse;
 import oteldemo.AdServiceGrpc;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.stream.IntStream;
 
 class AdServiceGetAdsValidationIntegrationTest {
 
@@ -42,70 +41,93 @@ class AdServiceGetAdsValidationIntegrationTest {
     }
 
     @Test
-    void test_ac1_empty_context_category_returns_invalid_argument() {
-        // AC-1: Given an AdRequest containing an empty string in the context_categories list
+    void test_ac1_too_many_context_keys_returns_invalid_argument() {
+        // AC-1: When GetAdsRequest contains more than 10 context keys
+        AdRequest.Builder builder = AdRequest.newBuilder();
+        IntStream.range(0, 11).forEach(i -> builder.addContextKeys("key" + i));
+        AdRequest request = builder.build();
+
+        StatusRuntimeException exception = assertThrows(StatusRuntimeException.class, () -> stub.getAds(request));
+        assertEquals(Status.INVALID_ARGUMENT.getCode(), exception.getStatus().getCode());
+        assertEquals("Too many context keys: maximum 10 allowed", exception.getStatus().getDescription());
+    }
+
+    @Test
+    void test_ac2_context_key_too_long_returns_invalid_argument() {
+        // AC-2: When context key length exceeds 64 characters
+        String longKey = "a".repeat(65);
         AdRequest request = AdRequest.newBuilder()
-                .addContextCategories("")
+                .addContextKeys(longKey)
                 .build();
 
         StatusRuntimeException exception = assertThrows(StatusRuntimeException.class, () -> stub.getAds(request));
         assertEquals(Status.INVALID_ARGUMENT.getCode(), exception.getStatus().getCode());
-        assertEquals("Category cannot be empty", exception.getStatus().getDescription());
+        assertEquals("Context key too long: maximum 64 characters allowed", exception.getStatus().getDescription());
     }
 
     @Test
-    void test_ac2_context_category_too_long_returns_invalid_argument() {
-        // AC-2: Given an AdRequest containing a context_categories entry longer than 255 characters
-        String longCategory = "a".repeat(256);
+    void test_ac3_invalid_context_key_format_returns_invalid_argument() {
+        // AC-3: When context key contains invalid characters
+        String invalidKey = "key!@#";
         AdRequest request = AdRequest.newBuilder()
-                .addContextCategories(longCategory)
+                .addContextKeys(invalidKey)
                 .build();
 
         StatusRuntimeException exception = assertThrows(StatusRuntimeException.class, () -> stub.getAds(request));
         assertEquals(Status.INVALID_ARGUMENT.getCode(), exception.getStatus().getCode());
-        String expectedMsgStart = "Category '" + longCategory.substring(0, 10) + "...' exceeds maximum allowed length of 255 characters";
-        assertTrue(exception.getStatus().getDescription().startsWith("Category '"));
-        assertTrue(exception.getStatus().getDescription().endsWith("' exceeds maximum allowed length of 255 characters"));
+        assertEquals("Invalid context key format: only alphanumeric characters, hyphens, underscores, and periods are allowed", exception.getStatus().getDescription());
     }
 
     @Test
-    void test_ac3_context_category_invalid_characters_returns_invalid_argument() {
-        // AC-3: Given an AdRequest containing a context_categories entry with non-alphanumeric characters
-        String invalidCategory = "electronics!";
-        AdRequest request = AdRequest.newBuilder()
-                .addContextCategories(invalidCategory)
-                .build();
-
-        StatusRuntimeException exception = assertThrows(StatusRuntimeException.class, () -> stub.getAds(request));
-        assertEquals(Status.INVALID_ARGUMENT.getCode(), exception.getStatus().getCode());
-        assertEquals("Category 'electronics!' contains invalid characters: only alphanumeric characters [a-zA-Z0-9] are allowed", exception.getStatus().getDescription());
-    }
-
-    @Test
-    void test_ac3_context_category_with_special_chars_rejected() {
-        // AC-3 Additional test cases for various invalid characters
-        String[] invalidCategories = {"home&kitchen", "clothes@store", "books$discount", "sports gear", "food!", "toys#sale"};
+    void test_ac3_various_invalid_characters_rejected() {
+        // AC-3 Additional tests for various invalid characters
+        String[] invalidKeys = {
+                "key with space", "key$dollar", "key%percent", "key^caret",
+                "key&and", "key*star", "key(parenthesis)", "key=equals",
+                "key+plus", "key`backtick", "key~tilde", "key[bracket]",
+                "key{curly}", "key|pipe", "key\\backslash", "key;semicolon",
+                "key'quote", "key:colon", "key\"doublequote", "key,comma",
+                "key<less", "key>greater", "key?question", "key/slash"
+        };
         
-        for (String invalidCat : invalidCategories) {
+        for (String invalidKey : invalidKeys) {
             AdRequest request = AdRequest.newBuilder()
-                    .addContextCategories(invalidCat)
+                    .addContextKeys(invalidKey)
                     .build();
 
             StatusRuntimeException exception = assertThrows(StatusRuntimeException.class, () -> stub.getAds(request));
             assertEquals(Status.INVALID_ARGUMENT.getCode(), exception.getStatus().getCode());
-            assertTrue(exception.getStatus().getDescription().contains("contains invalid characters: only alphanumeric characters [a-zA-Z0-9] are allowed"));
-            assertTrue(exception.getStatus().getDescription().contains(invalidCat));
+            assertEquals("Invalid context key format: only alphanumeric characters, hyphens, underscores, and periods are allowed", exception.getStatus().getDescription());
         }
     }
 
     @Test
-    void test_ac4_valid_context_categories_accepted() {
-        // AC-4: Given an AdRequest where all context_categories entries are valid
+    void test_ac4_empty_context_key_returns_invalid_argument() {
+        // AC-4: When context key is empty string
         AdRequest request = AdRequest.newBuilder()
-                .addContextCategories("electronics")
-                .addContextCategories("clothes")
-                .addContextCategories("books123")
-                .addContextCategories("HomeAppliances")
+                .addContextKeys("")
+                .build();
+
+        StatusRuntimeException exception = assertThrows(StatusRuntimeException.class, () -> stub.getAds(request));
+        assertEquals(Status.INVALID_ARGUMENT.getCode(), exception.getStatus().getCode());
+        assertEquals("Context key cannot be empty", exception.getStatus().getDescription());
+    }
+
+    @Test
+    void test_ac5_valid_context_keys_accepted_and_processed() {
+        // AC-5: Valid requests are processed normally
+        AdRequest request = AdRequest.newBuilder()
+                .addContextKeys("valid-key")
+                .addContextKeys("valid_key123")
+                .addContextKeys("valid.key.with.periods")
+                .addContextKeys("VALID-UPPERCASE")
+                .addContextKeys("key-with-mixed-123.456_Chars")
+                // Add 5 more to reach 10 total (max allowed)
+                .addContextKeys("key6")
+                .addContextKeys("key7")
+                .addContextKeys("key8")
+                .addContextKeys("key9")
+                .addContextKeys("key10")
                 .build();
 
         AdResponse response = assertDoesNotThrow(() -> stub.getAds(request));
@@ -114,17 +136,33 @@ class AdServiceGetAdsValidationIntegrationTest {
     }
 
     @Test
-    void test_ac5_multiple_invalid_categories_reject_first() {
-        // AC-5: Verify validation fails immediately on first invalid category
+    void test_ac5_allowed_characters_are_accepted() {
+        // AC-5 Additional test: verify all allowed characters are permitted
         AdRequest request = AdRequest.newBuilder()
-                .addContextCategories("validCategory1")
-                .addContextCategories("invalid category!") // This should fail first
-                .addContextCategories("validCategory2")
-                .addContextCategories("anotherInvalid@")
+                .addContextKeys("abcdefghijklmnopqrstuvwxyz") // lowercase
+                .addContextKeys("ABCDEFGHIJKLMNOPQRSTUVWXYZ") // uppercase
+                .addContextKeys("0123456789") // numbers
+                .addContextKeys("key-with-hyphens") // hyphens
+                .addContextKeys("key_with_underscores") // underscores
+                .addContextKeys("key.with.periods") // periods
+                .addContextKeys("all-allowed_chars.123") // combination
                 .build();
+
+        AdResponse response = assertDoesNotThrow(() -> stub.getAds(request));
+        assertNotNull(response);
+    }
+
+    @Test
+    void test_validation_runs_in_order_fail_fast() {
+        // Verify validation order: count first, then per-key checks
+        // Request with 11 keys, all invalid (should fail on count first)
+        AdRequest.Builder builder = AdRequest.newBuilder();
+        IntStream.range(0, 11).forEach(i -> builder.addContextKeys("invalid key! " + i));
+        AdRequest request = builder.build();
 
         StatusRuntimeException exception = assertThrows(StatusRuntimeException.class, () -> stub.getAds(request));
         assertEquals(Status.INVALID_ARGUMENT.getCode(), exception.getStatus().getCode());
-        assertTrue(exception.getStatus().getDescription().contains("invalid category!"));
+        assertEquals("Too many context keys: maximum 10 allowed", exception.getStatus().getDescription());
     }
 }
+
