@@ -1,0 +1,5 @@
+# github.com/open-telemetry/opentelemetry-demo/src/flagd
+./main.go:14:2: "github.com/prometheus/client_golang/prometheus" imported and not used
+./main.go:15:2: "github.com/prometheus/client_golang/prometheus/promhttp" imported and not used
+./main.go:17:2: "go.opentelemetry.io/otel/metric" imported and not used
+./main.go:80:45: exporter.ServeHTTP undefined (type *"go.opentelemetry.io/otel/exporters/prometheus".Exporter has no field or method ServeHTTP)
