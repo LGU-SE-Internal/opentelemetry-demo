@@ -290,6 +290,12 @@ async function main() {
     if (err) {
       logger.error(`Server failed to bind: ${err.message}`);
       process.exit(1);
+    }
+    logger.info(`Currency service running on port ${boundPort}`);
+    server.start();
+  });
+}
+
 main().catch(err => {
   if (logger) {
     logger.error(`Unexpected error: ${err.message}`);
