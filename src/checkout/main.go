@@ -414,6 +414,8 @@ func main() {
 
 	srv, err := NewGRPCServer(serverTLSConfig,
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
+		grpc.UnaryInterceptor(RateLimitUnaryInterceptor()),
+		grpc.StreamInterceptor(RateLimitStreamInterceptor()),
 	)
 	if err != nil {
 		logger.Error(fmt.Sprintf("failed to create gRPC server: %v", err))
