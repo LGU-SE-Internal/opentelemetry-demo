@@ -2,6 +2,114 @@ const grpc = require('@grpc/grpc-js');
 const protoLoader = require('@grpc/proto-loader');
 const fs = require('fs');
 const path = require('path');
+const { logs } = require('@opentelemetry/api-logs');
+const { LoggerProvider, BatchLogRecordProcessor, ConsoleLogRecordExporter } = require('@opentelemetry/sdk-logs');
+const { OTLPLogExporter } = require('@opentelemetry/exporter-logs-otlp-http');
+const { Resource } = require('@opentelemetry/resources');
+const { SemanticResourceAttributes } = require('@opentelemetry/semantic-conventions');
+const { context, trace } = require('@opentelemetry/api');
+
+// Initialize logger instance to be used throughout the service
+let logger;
+
+/**
+ * Initializes OpenTelemetry structured logger for the currency service
+ * @param {string} serviceName Name of the service to include in log attributes
+ * @param {LoggerConfig} config Logger configuration including endpoint and TLS settings
+ * @returns {OtelLogger} Initialized OtelLogger instance
+ */
+function initLogger(serviceName, config) {
+  // Create resource with service name
+  const resource = Resource.default().merge(
+    new Resource({
+      [SemanticResourceAttributes.SERVICE_NAME]: serviceName,
+    })
+  );
+
+  // Initialize logger provider
+  const loggerProvider = new LoggerProvider({
+    resource: resource,
+  });
+
+  // Add appropriate processors
+  if (config.endpoint && config.endpoint.trim() !== '') {
+    // Configure OTLP exporter
+    const otlpExporterOptions = {
+      url: config.endpoint,
+      credentials: config.useTls ? require('https').createSecureAgent(
+        config.mTLS ? {
+          cert: config.mTLS.cert,
+          key: config.mTLS.key,
+          ca: config.mTLS.ca,
+        } : {}
+      ) : undefined,
+    };
+
+    const otlpExporter = new OTLPLogExporter(otlpExporterOptions);
+    loggerProvider.addLogRecordProcessor(new BatchLogRecordProcessor(otlpExporter));
+  }
+
+  // Always add console exporter for fallback
+  const consoleExporter = new ConsoleLogRecordExporter();
+  loggerProvider.addLogRecordProcessor(new BatchLogRecordProcessor(consoleExporter));
+
+  // Get logger instance
+  const otelLogger = loggerProvider.getLogger(serviceName);
+
+  // Implement OtelLogger interface
+  const otelLoggerInterface = {
+    trace: (message, attributes = {}) => {
+      emitLog(otelLogger, 'TRACE', 1, message, attributes, serviceName);
+    },
+    debug: (message, attributes = {}) => {
+      emitLog(otelLogger, 'DEBUG', 5, message, attributes, serviceName);
+    },
+    info: (message, attributes = {}) => {
+      emitLog(otelLogger, 'INFO', 9, message, attributes, serviceName);
+    },
+    warn: (message, attributes = {}) => {
+      emitLog(otelLogger, 'WARN', 13, message, attributes, serviceName);
+    },
+    error: (message, attributes = {}) => {
+      emitLog(otelLogger, 'ERROR', 17, message, attributes, serviceName);
+    },
+    fatal: (message, attributes = {}) => {
+      emitLog(otelLogger, 'FATAL', 21, message, attributes, serviceName);
+    }
+  };
+
+  // Set global logger for service use
+  if (!logger) {
+    logger = otelLoggerInterface;
+  }
+
+  return otelLoggerInterface;
+}
+
+function emitLog(otelLogger, severityText, severityNumber, message, attributes, serviceName) {
+  // Get active span context if present
+  const activeSpan = trace.getSpan(context.active());
+  const spanContext = activeSpan ? activeSpan.spanContext() : null;
+
+  const logAttributes = {
+    'service.name': serviceName,
+    ...attributes,
+  };
+
+  // Add trace context if available
+  if (spanContext && spanContext.isValid()) {
+    logAttributes.trace_id = spanContext.traceId;
+    logAttributes.span_id = spanContext.spanId;
+    logAttributes.trace_flags = `0${spanContext.traceFlags.toString(16)}`;
+  }
+
+  otelLogger.emit({
+    severityText,
+    severityNumber,
+    body: message,
+    attributes: logAttributes,
+  });
+}
 
 // Load proto definitions
 const PROTO_PATH = path.join(__dirname, '../../pb/demo.proto');
@@ -48,7 +156,7 @@ function validateConfig() {
   
   // Check if mTLS is enabled without TLS
   if (mtlsEnabled && !tlsEnabled) {
-    console.error('CONFIGURATION_ERROR: MTLS_ENABLED requires TLS_ENABLED to be true');
+    logger.error('CONFIGURATION_ERROR: MTLS_ENABLED requires TLS_ENABLED to be true');
     process.exit(1);
   }
   
@@ -58,11 +166,11 @@ function validateConfig() {
     
     // Check required TLS paths are present
     if (!certPath || certPath.trim() === '') {
-      console.error('CONFIGURATION_ERROR: TLS_CERT_PATH is required when TLS_ENABLED is true');
+      logger.error('CONFIGURATION_ERROR: TLS_CERT_PATH is required when TLS_ENABLED is true');
       process.exit(1);
     }
     if (!keyPath || keyPath.trim() === '') {
-      console.error('CONFIGURATION_ERROR: TLS_KEY_PATH is required when TLS_ENABLED is true');
+      logger.error('CONFIGURATION_ERROR: TLS_KEY_PATH is required when TLS_ENABLED is true');
       process.exit(1);
     }
     
@@ -71,13 +179,13 @@ function validateConfig() {
       try {
         fs.accessSync(filePath, fs.constants.F_OK);
       } catch (e) {
-        console.error(`FILE_NOT_FOUND_ERROR: ${filePath} does not exist`);
+        logger.error(`FILE_NOT_FOUND_ERROR: ${filePath} does not exist`);
         process.exit(1);
       }
       try {
         fs.accessSync(filePath, fs.constants.R_OK);
       } catch (e) {
-        console.error(`PERMISSION_DENIED_ERROR: ${filePath} is not readable`);
+        logger.error(`PERMISSION_DENIED_ERROR: ${filePath} is not readable`);
         process.exit(1);
       }
     });
@@ -86,19 +194,19 @@ function validateConfig() {
     if (mtlsEnabled) {
       const caCertPath = process.env[ENV_VARS.MTLS_CA_CERT_PATH];
       if (!caCertPath || caCertPath.trim() === '') {
-        console.error('CONFIGURATION_ERROR: MTLS_CA_CERT_PATH is required when MTLS_ENABLED is true');
+        logger.error('CONFIGURATION_ERROR: MTLS_CA_CERT_PATH is required when MTLS_ENABLED is true');
         process.exit(1);
       }
       try {
         fs.accessSync(caCertPath, fs.constants.F_OK);
       } catch (e) {
-        console.error(`FILE_NOT_FOUND_ERROR: ${caCertPath} does not exist`);
+        logger.error(`FILE_NOT_FOUND_ERROR: ${caCertPath} does not exist`);
         process.exit(1);
       }
       try {
         fs.accessSync(caCertPath, fs.constants.R_OK);
       } catch (e) {
-        console.error(`PERMISSION_DENIED_ERROR: ${caCertPath} is not readable`);
+        logger.error(`PERMISSION_DENIED_ERROR: ${caCertPath} is not readable`);
         process.exit(1);
       }
     }
@@ -122,7 +230,7 @@ function createServerCredentials() {
     certChain = fs.readFileSync(certPath);
     privateKey = fs.readFileSync(keyPath);
   } catch (e) {
-    console.error(`INVALID_CERTIFICATE_ERROR: Failed to load ${e.path}`);
+    logger.error(`INVALID_CERTIFICATE_ERROR: Failed to load ${e.path}`);
     process.exit(1);
   }
   
@@ -140,7 +248,7 @@ function createServerCredentials() {
   try {
     caCert = fs.readFileSync(caCertPath);
   } catch (e) {
-    console.error(`INVALID_CERTIFICATE_ERROR: Failed to load ${e.path}`);
+    logger.error(`INVALID_CERTIFICATE_ERROR: Failed to load ${e.path}`);
     process.exit(1);
   }
   
@@ -153,6 +261,21 @@ function createServerCredentials() {
 
 // Initialize and start server
 async function main() {
+  // Initialize logger first
+  const otlpEndpoint = process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT || '';
+  const useTls = otlpEndpoint.startsWith('https://');
+  const mTLSConfig = process.env.MTLS_CERT && process.env.MTLS_KEY && process.env.MTLS_CA ? {
+    cert: process.env.MTLS_CERT,
+    key: process.env.MTLS_KEY,
+    ca: process.env.MTLS_CA
+  } : undefined;
+
+  logger = initLogger('currencyservice', {
+    endpoint: otlpEndpoint,
+    useTls: useTls,
+    mTLS: mTLSConfig
+  });
+
   validateConfig();
   
   const server = new grpc.Server();
@@ -165,15 +288,15 @@ async function main() {
   
   server.bindAsync(`0.0.0.0:${port}`, credentials, (err, boundPort) => {
     if (err) {
-      console.error(`Server failed to bind: ${err.message}`);
+      logger.error(`Server failed to bind: ${err.message}`);
       process.exit(1);
-    }
-    server.start();
-    console.log(`Currency service running on port ${boundPort}`);
-  });
-}
-
 main().catch(err => {
-  console.error(`Unexpected error: ${err.message}`);
+  if (logger) {
+    logger.error(`Unexpected error: ${err.message}`);
+  } else {
+    console.error(`Unexpected error: ${err.message}`);
+  }
   process.exit(1);
 });
+
+module.exports = { initLogger };
