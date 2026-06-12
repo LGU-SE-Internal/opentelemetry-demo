@@ -19,7 +19,20 @@ data:
             endpoint: 0.0.0.0:4318
 
     processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: ${env:OTEL_COLLECTOR_MEMORY_LIMIT_MIB}
+        spike_limit_mib: 128
+      ratelimit:
+        global:
+          spans_per_second: ${env:OTEL_COLLECTOR_GLOBAL_RATE_LIMIT_SPS}
+        per_attribute:
+          key: service.name
+          spans_per_second: ${env:OTEL_COLLECTOR_PER_SERVICE_RATE_LIMIT_SPS}
       batch:
+        send_batch_size: 1000
+        timeout: 10s
+        send_batch_max_size: 10000
 
     exporters:
       logging:
@@ -28,21 +41,23 @@ data:
     extensions:
       health_check:
         endpoint: 0.0.0.0:13133
+      zpages:
+        endpoint: 0.0.0.0:55679
 
     service:
-      extensions: [health_check]
+      extensions: [health_check, zpages]
       pipelines:
         traces:
           receivers: [otlp]
-          processors: [batch]
+          processors: [memory_limiter, ratelimit, batch]
           exporters: [logging]
         metrics:
           receivers: [otlp]
-          processors: [batch]
+          processors: [memory_limiter, ratelimit, batch]
           exporters: [logging]
         logs:
           receivers: [otlp]
-          processors: [batch]
+          processors: [memory_limiter, ratelimit, batch]
           exporters: [logging]
 ---
 apiVersion: apps/v1
@@ -76,6 +91,17 @@ spec:
           name: http
         - containerPort: 13133
           name: health
+        - containerPort: 55679
+          name: zpages
+        env:
+        - name: OTEL_COLLECTOR_MEMORY_LIMIT_MIB
+          value: "768"
+        - name: OTEL_COLLECTOR_GLOBAL_RATE_LIMIT_SPS
+          value: "10000"
+        - name: OTEL_COLLECTOR_PER_SERVICE_RATE_LIMIT_SPS
+          value: "2000"
+        - name: OTEL_COLLECTOR_QUEUE_SIZE
+          value: "1000"
         livenessProbe:
           httpGet:
             path: /
@@ -92,11 +118,11 @@ spec:
           failureThreshold: 3
         resources:
           requests:
-            cpu: 100m
-            memory: 256Mi
-          limits:
             cpu: 500m
             memory: 512Mi
+          limits:
+            cpu: 1
+            memory: 1Gi
         securityContext:
           readOnlyRootFilesystem: true
           allowPrivilegeEscalation: false
@@ -132,5 +158,8 @@ spec:
   - name: health
     port: 13133
     targetPort: health
+  - name: zpages
+    port: 55679
+    targetPort: zpages
   selector:
     app: otel-collector
