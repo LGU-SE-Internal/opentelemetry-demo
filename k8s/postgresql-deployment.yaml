@@ -21,7 +21,7 @@ spec:
         fsGroup: 1001
       containers:
         - name: postgresql
-          image: postgres:15-alpine
+          image: otel/demo-postgresql:latest
           ports:
             - name: postgres
               containerPort: 5432
@@ -70,6 +70,22 @@ spec:
               value: "4Gi"
             - name: POSTGRES_RUN_AS_USER
               value: "1001"
+            # TLS/mTLS Configuration Options
+            # Toggle for TLS encryption support. When set to true, PostgreSQL listens for TLS connections on port 5432.
+            - name: POSTGRES_TLS_ENABLED
+              value: "false"
+            # Path to server TLS certificate file
+            - name: POSTGRES_TLS_CERT_PATH
+              value: "/etc/postgresql/certs/tls.crt"
+            # Path to server TLS private key file
+            - name: POSTGRES_TLS_KEY_PATH
+              value: "/etc/postgresql/certs/tls.key"
+            # Path to CA certificate for client authentication
+            - name: POSTGRES_TLS_CA_PATH
+              value: "/etc/postgresql/certs/ca.crt"
+            # Toggle for mandatory client certificate authentication (mTLS). Requires POSTGRES_TLS_ENABLED=true to take effect.
+            - name: POSTGRES_MTLS_ENABLED
+              value: "false"
           securityContext:
             runAsNonRoot: true
             runAsUser: $(POSTGRES_RUN_AS_USER)
@@ -104,9 +120,18 @@ spec:
               mountPath: /var/lib/postgresql/data
             - name: postgresql-run
               mountPath: /var/run/postgresql
+            # Certificate volume mount path for TLS/mTLS
+            - name: postgresql-certs
+              mountPath: /etc/postgresql/certs
+              readOnly: true
       volumes:
         - name: postgresql-data
           persistentVolumeClaim:
             claimName: postgresql-pvc
         - name: postgresql-run
           emptyDir: {}
+        # TLS certificates volume (populated by cluster operators via secrets/cert-manager)
+        - name: postgresql-certs
+          secret:
+            secretName: postgresql-tls
+            optional: true
