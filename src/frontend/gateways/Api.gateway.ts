@@ -3,47 +3,49 @@
 
 import { Ad, Address, Cart, CartItem, Money, PlaceOrderRequest, Product, ProductReview } from '../protos/demo';
 import { IProductCart, IProductCartItem, IProductCheckout } from '../types/Cart';
-import request from '../utils/Request';
 import { AttributeNames } from '../utils/enums/AttributeNames';
 import SessionGateway from './Session.gateway';
 import { context, propagation } from "@opentelemetry/api";
+import { createEnhancedGatewayClient } from './EnhancedGatewayClient';
 
 const { userId } = SessionGateway.getSession();
 
 const basePath = '/api';
 
+const enhancedClient = createEnhancedGatewayClient(basePath, 'api-gateway');
+
 const Apis = () => ({
   getCart(currencyCode: string) {
-    return request<IProductCart>({
-      url: `${basePath}/cart`,
+    return enhancedClient.request<IProductCart>({
+      url: `/cart`,
       queryParams: { sessionId: userId, currencyCode },
     });
   },
   addCartItem({ currencyCode, ...item }: CartItem & { currencyCode: string }) {
-    return request<Cart>({
-      url: `${basePath}/cart`,
+    return enhancedClient.request<Cart>({
+      url: `/cart`,
       body: { item, userId },
       queryParams: { currencyCode },
       method: 'POST',
     });
   },
   emptyCart() {
-    return request<undefined>({
-      url: `${basePath}/cart`,
+    return enhancedClient.request<undefined>({
+      url: `/cart`,
       method: 'DELETE',
       body: { userId },
     });
   },
 
   getSupportedCurrencyList() {
-    return request<string[]>({
-      url: `${basePath}/currency`,
+    return enhancedClient.request<string[]>({
+      url: `/currency`,
     });
   },
 
   getShippingCost(itemList: IProductCartItem[], currencyCode: string, address: Address) {
-    return request<Money>({
-      url: `${basePath}/shipping`,
+    return enhancedClient.request<Money>({
+      url: `/shipping`,
       queryParams: {
         itemList: JSON.stringify(itemList.map(({ productId, quantity }) => ({ productId, quantity }))),
         currencyCode,
@@ -53,8 +55,8 @@ const Apis = () => ({
   },
 
   placeOrder({ currencyCode, ...order }: PlaceOrderRequest & { currencyCode: string }) {
-    return request<IProductCheckout>({
-      url: `${basePath}/checkout`,
+    return enhancedClient.request<IProductCheckout>({
+      url: `/checkout`,
       method: 'POST',
       queryParams: { currencyCode },
       body: order,
@@ -62,37 +64,37 @@ const Apis = () => ({
   },
 
   listProducts(currencyCode: string) {
-    return request<Product[]>({
-      url: `${basePath}/products`,
+    return enhancedClient.request<Product[]>({
+      url: `/products`,
       queryParams: { currencyCode },
     });
   },
   getProduct(productId: string, currencyCode: string) {
-    return request<Product>({
-      url: `${basePath}/products/${productId}`,
+    return enhancedClient.request<Product>({
+      url: `/products/${productId}`,
       queryParams: { currencyCode },
     });
   },
   getProductReviews(productId: string) {
-    return request<ProductReview[]>({
-      url: `${basePath}/product-reviews/${productId}`
+    return enhancedClient.request<ProductReview[]>({
+      url: `/product-reviews/${productId}`
     });
   },
   getAverageProductReviewScore(productId: string) {
-    return request<string>({
-      url: `${basePath}/product-reviews-avg-score/${productId}`
+    return enhancedClient.request<string>({
+      url: `/product-reviews-avg-score/${productId}`
     });
   },
   askProductAIAssistant(productId: string, question: string) {
-    return request<string>({
-      url: `${basePath}/product-ask-ai-assistant/${productId}`,
+    return enhancedClient.request<string>({
+      url: `/product-ask-ai-assistant/${productId}`,
       method: 'POST',
       body: { question },
     });
   },
   listRecommendations(productIds: string[], currencyCode: string) {
-    return request<Product[]>({
-      url: `${basePath}/recommendations`,
+    return enhancedClient.request<Product[]>({
+      url: `/recommendations`,
       queryParams: {
         productIds,
         sessionId: userId,
@@ -101,8 +103,8 @@ const Apis = () => ({
     });
   },
   listAds(contextKeys: string[]) {
-    return request<Ad[]>({
-      url: `${basePath}/data`,
+    return enhancedClient.request<Ad[]>({
+      url: `/data`,
       queryParams: {
         contextKeys,
       },
