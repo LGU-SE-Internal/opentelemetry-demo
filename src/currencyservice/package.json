@@ -15,7 +15,8 @@
     "@opentelemetry/exporter-logs-otlp-http": "^0.219.0",
     "@opentelemetry/resources": "^2.8.0",
     "@opentelemetry/sdk-logs": "^0.219.0",
-    "@opentelemetry/semantic-conventions": "^1.41.1"
+    "@opentelemetry/semantic-conventions": "^1.41.1",
+    "grpc-health-check": "^2.1.0"
   },
   "devDependencies": {
     "jest": "^29.7.0"

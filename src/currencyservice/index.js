@@ -2,6 +2,7 @@ const grpc = require('@grpc/grpc-js');
 const protoLoader = require('@grpc/proto-loader');
 const fs = require('fs');
 const path = require('path');
+const { HealthImplementation, service: healthService } = require('grpc-health-check');
 const { context, trace } = require('@opentelemetry/api');
 const { AsyncHooksContextManager } = require('@opentelemetry/context-async-hooks');
 const { logs } = require('@opentelemetry/api-logs');
@@ -9,6 +10,17 @@ const { LoggerProvider, BatchLogRecordProcessor, ConsoleLogRecordExporter } = re
 const { OTLPLogExporter } = require('@opentelemetry/exporter-logs-otlp-http');
 const { Resource } = require('@opentelemetry/resources');
 const { SemanticResourceAttributes } = require('@opentelemetry/semantic-conventions');
+
+// Health status constants
+const SERVING_STATUS = 'SERVING';
+const NOT_SERVING_STATUS = 'NOT_SERVING';
+const SERVICE_NAME = 'currencyservice';
+
+// Health check implementation
+const healthImpl = new HealthImplementation({
+  '': NOT_SERVING_STATUS,
+  [SERVICE_NAME]: NOT_SERVING_STATUS
+});
 
 // Initialize context manager for trace context propagation
 const contextManager = new AsyncHooksContextManager();
@@ -286,6 +298,9 @@ if (require.main === module) {
     // Add currency service implementation
     server.addService(oteldemo.CurrencyService.service, currencyService);
     
+    // Add gRPC health check service
+    server.addService(healthService, healthImpl);
+    
     const port = process.env.PORT || '7000';
     const credentials = createServerCredentials();
     
@@ -296,6 +311,28 @@ if (require.main === module) {
       }
       logger.info(`Currency service running on port ${boundPort}`);
       server.start();
+      
+      // Set liveness status to serving once server is running
+      healthImpl.setStatus('', SERVING_STATUS);
+      logger.info('Liveness health check endpoint now serving');
+      
+      // Simulate initialization process (loading currency data, connecting to dependencies)
+      setTimeout(() => {
+        // Once initialization is complete, set readiness status to serving
+        healthImpl.setStatus(SERVICE_NAME, SERVING_STATUS);
+        logger.info('Readiness health check endpoint now serving, service fully initialized');
+      }, 5000); // 5 second initialization time for demo
+    });
+    
+    // Handle shutdown gracefully
+    process.on('SIGTERM', () => {
+      logger.info('Received SIGTERM, shutting down gracefully');
+      healthImpl.setStatus('', NOT_SERVING_STATUS);
+      healthImpl.setStatus(SERVICE_NAME, NOT_SERVING_STATUS);
+      server.tryShutdown(() => {
+        logger.info('Server shutdown complete');
+        process.exit(0);
+      });
     });
   }
 
