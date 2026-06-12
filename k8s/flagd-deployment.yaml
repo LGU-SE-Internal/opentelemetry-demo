@@ -29,6 +29,10 @@ spec:
         env:
         - name: FLAGD_TLS_ENABLED
           value: "false"
+        - name: FLAGD_GRPC_RATE_LIMIT_ENABLED
+          value: {{ .Values.flagd.grpcRateLimit.enabled | quote }}
+        - name: FLAGD_GRPC_PER_CLIENT_RATE_LIMIT
+          value: {{ .Values.flagd.grpcRateLimit.perClientLimit | quote }}
         livenessProbe:
           httpGet:
             path: /healthz
