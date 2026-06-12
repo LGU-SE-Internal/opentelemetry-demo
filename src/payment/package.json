@@ -37,6 +37,7 @@
     "iso4217": "^0.2.0",
     "luhn": "^2.4.1",
     "opossum": "^8.5.0",
+    "p-retry": "^8.0.0",
     "pino": "^10.3.1",
     "pino-opentelemetry-transport": "^3.0.0",
     "prom-client": "^15.1.3",

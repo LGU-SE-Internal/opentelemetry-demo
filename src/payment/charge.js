@@ -3,6 +3,8 @@
 const { context, propagation, trace, metrics, SpanStatusCode } = require('@opentelemetry/api');
 const cardValidator = require('simple-card-validator');
 const { v4: uuidv4 } = require('uuid');
+const pRetry = require('p-retry');
+const CircuitBreaker = require('opossum');
 
 const { OpenFeature } = require('@openfeature/server-sdk');
 const { FlagdProvider } = require('@openfeature/flagd-provider');
@@ -14,9 +16,194 @@ const tracer = trace.getTracer('payment');
 const meter = metrics.getMeter('payment');
 const transactionsCounter = meter.createCounter('demo.payment.transactions');
 
+// Resilience metrics
+const retryAttemptsCounter = meter.createCounter('payment.processor.retry.attempts', {
+  description: 'Number of retry attempts made for payment requests'
+});
+const circuitBreakerStateTransitionsCounter = meter.createCounter('payment.processor.circuit_breaker.state_transitions', {
+  description: 'Number of circuit breaker state changes'
+});
+const fallbackCallsCounter = meter.createCounter('payment.processor.fallback.calls', {
+  description: 'Number of times fallback logic was invoked'
+});
+const callDurationHistogram = meter.createHistogram('payment.processor.call.duration', {
+  description: 'Duration of payment processor API calls including retries',
+  unit: 'ms'
+});
+
+// Configuration from environment variables with defaults
+const PAYMENT_PROCESSOR_MAX_RETRIES = parseInt(process.env.PAYMENT_PROCESSOR_MAX_RETRIES || '3', 10);
+const PAYMENT_PROCESSOR_RETRY_INITIAL_DELAY_MS = parseInt(process.env.PAYMENT_PROCESSOR_RETRY_INITIAL_DELAY_MS || '100', 10);
+const PAYMENT_PROCESSOR_CIRCUIT_BREAKER_ERROR_THRESHOLD = parseFloat(process.env.PAYMENT_PROCESSOR_CIRCUIT_BREAKER_ERROR_THRESHOLD || '0.5');
+const PAYMENT_PROCESSOR_CIRCUIT_BREAKER_SLID_WINDOW_SIZE_MS = parseInt(process.env.PAYMENT_PROCESSOR_CIRCUIT_BREAKER_SLID_WINDOW_SIZE_MS || '10000', 10);
+const PAYMENT_PROCESSOR_CIRCUIT_BREAKER_COOLDOWN_MS = parseInt(process.env.PAYMENT_PROCESSOR_CIRCUIT_BREAKER_COOLDOWN_MS || '30000', 10);
+const PAYMENT_PROCESSOR_CIRCUIT_BREAKER_MINIMUM_CALLS = parseInt(process.env.PAYMENT_PROCESSOR_CIRCUIT_BREAKER_MINIMUM_CALLS || '10', 10);
+
+// Custom error classes
+class PaymentProcessorError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'PaymentProcessorError';
+  }
+}
+
+class PaymentTransientError extends PaymentProcessorError {
+  constructor(message) {
+    super(message);
+    this.name = 'PaymentTransientError';
+  }
+}
+
+class PaymentPermanentError extends PaymentProcessorError {
+  constructor(message) {
+    super(message);
+    this.name = 'PaymentPermanentError';
+  }
+}
+
+class CircuitBreakerOpenError extends PaymentProcessorError {
+  constructor(message) {
+    super(message || 'Circuit breaker is open, payment requests are blocked');
+    this.name = 'CircuitBreakerOpenError';
+  }
+}
+
 // Retry configuration for flagd calls
 const FLAGD_RETRY_MAX_ATTEMPTS = parseInt(process.env.PAYMENT_SERVICE_FLAGD_RETRY_MAX_ATTEMPTS || '3', 10);
 const FLAGD_RETRY_INITIAL_DELAY_MS = parseInt(process.env.PAYMENT_SERVICE_FLAGD_RETRY_INITIAL_DELAY_MS || '100', 10);
+
+// Circuit breaker setup
+const circuitBreakerOptions = {
+  timeout: false, // We handle timeouts at the request level
+  errorThresholdPercentage: PAYMENT_PROCESSOR_CIRCUIT_BREAKER_ERROR_THRESHOLD * 100,
+  rollingCountTimeout: PAYMENT_PROCESSOR_CIRCUIT_BREAKER_SLID_WINDOW_SIZE_MS,
+  resetTimeout: PAYMENT_PROCESSOR_CIRCUIT_BREAKER_COOLDOWN_MS,
+  volumeThreshold: PAYMENT_PROCESSOR_CIRCUIT_BREAKER_MINIMUM_CALLS,
+  errorFilter: (err) => {
+    // Only count transient errors towards circuit breaker opening
+    return err instanceof PaymentTransientError;
+  }
+};
+
+// Payment processing function wrapped in circuit breaker
+async function processPaymentWithCircuitBreaker(request, idempotencyKey) {
+  // This simulates the external payment processor API call
+  // In production, this would make an actual HTTP/GRPC call to the payment processor
+  // with the idempotency key as a header
+  const startTime = Date.now();
+  let status = 'success';
+  let circuitState = circuitBreaker.state.name;
+
+  try {
+    // Simulate 15% chance of transient failure (5xx, network error, timeout)
+    const shouldFailTransient = Math.random() < 0.15;
+    if (shouldFailTransient) {
+      throw new PaymentTransientError('Payment processor returned 503 Service Unavailable');
+    }
+
+    // Simulate 10% chance of permanent failure (4xx, invalid payment)
+    const shouldFailPermanent = Math.random() < 0.10;
+    if (shouldFailPermanent) {
+      throw new PaymentPermanentError('Payment processor returned 400 Bad Request');
+    }
+
+    // Simulate successful payment processing
+    const transactionId = uuidv4();
+    return { transactionId, status: 'success', processorMetadata: { idempotencyKey } };
+  } catch (err) {
+    status = 'failed';
+    throw err;
+  } finally {
+    const durationMs = Date.now() - startTime;
+    callDurationHistogram.record(durationMs, { status, circuit_state: circuitState });
+  }
+}
+
+const circuitBreaker = new CircuitBreaker(processPaymentWithCircuitBreaker, circuitBreakerOptions);
+
+// Track circuit breaker state transitions
+circuitBreaker.on('open', () => {
+  circuitBreakerStateTransitionsCounter.add(1, { from_state: 'closed', to_state: 'open' });
+  logger.info('Circuit breaker opened');
+});
+
+circuitBreaker.on('halfOpen', () => {
+  circuitBreakerStateTransitionsCounter.add(1, { from_state: 'open', to_state: 'half_open' });
+  logger.info('Circuit breaker entered half-open state');
+});
+
+circuitBreaker.on('close', () => {
+  circuitBreakerStateTransitionsCounter.add(1, { from_state: 'half_open', to_state: 'closed' });
+  logger.info('Circuit breaker closed');
+});
+
+// Wrap circuit breaker calls to handle open circuit error
+async function circuitBreakerWrapper(request, idempotencyKey) {
+  try {
+    return await circuitBreaker.fire(request, idempotencyKey);
+  } catch (err) {
+    if (err.type === 'CircuitOpenError') {
+      fallbackCallsCounter.add(1, { reason: 'circuit_open' });
+      throw new CircuitBreakerOpenError();
+    }
+    throw err;
+  }
+}
+
+/**
+ * Wraps the external payment processor API call with retry and circuit breaker protection.
+ * @param {Object} request - Payment charge request object
+ * @param {string} idempotencyKey - Unique string key to ensure duplicate charges are not created on retry
+ * @returns {Promise<Object>} Successful payment charge response
+ * @throws {PaymentTransientError} For retriable errors
+ * @throws {PaymentPermanentError} For non-retriable errors
+ * @throws {CircuitBreakerOpenError} When circuit is open
+ * @throws {PaymentProcessorError} Base error class
+ */
+async function chargePayment(request, idempotencyKey) {
+  try {
+    return await pRetry(
+      async (attemptNumber) => {
+        if (attemptNumber > 1) {
+          logger.info(`Retrying payment request, attempt ${attemptNumber} of ${PAYMENT_PROCESSOR_MAX_RETRIES}`);
+        }
+
+        try {
+          const result = await circuitBreakerWrapper(request, idempotencyKey);
+          if (attemptNumber > 1) {
+            retryAttemptsCounter.add(1, { outcome: 'success' });
+          }
+          return result;
+        } catch (err) {
+          if (attemptNumber > 1) {
+            retryAttemptsCounter.add(1, { outcome: 'failed' });
+          }
+
+          // Only retry transient errors
+          if (err instanceof PaymentTransientError) {
+            throw err; // p-retry will retry
+          } else {
+            // Permanent error or circuit open, abort retries
+            throw new pRetry.AbortError(err);
+          }
+        }
+      },
+      {
+        retries: PAYMENT_PROCESSOR_MAX_RETRIES,
+        factor: 2, // Exponential backoff
+        minTimeout: PAYMENT_PROCESSOR_RETRY_INITIAL_DELAY_MS,
+        randomize: true
+      }
+    );
+  } catch (err) {
+    // If retries are exhausted
+    if (err instanceof pRetry.AbortError) {
+      throw err.originalError;
+    }
+    fallbackCallsCounter.add(1, { reason: 'retries_exhausted' });
+    throw err;
+  }
+}
 
 const LOYALTY_LEVEL = ['platinum', 'gold', 'silver', 'bronze'];
 
@@ -102,6 +289,20 @@ module.exports.isHealthy = async () => {
 
 // Export for testing purposes
 module.exports.checkPaymentProcessorConnectivity = checkPaymentProcessorConnectivity;
+module.exports.chargePayment = chargePayment;
+module.exports.PaymentProcessorError = PaymentProcessorError;
+module.exports.PaymentTransientError = PaymentTransientError;
+module.exports.PaymentPermanentError = PaymentPermanentError;
+module.exports.CircuitBreakerOpenError = CircuitBreakerOpenError;
+module.exports.circuitBreaker = circuitBreaker;
+module.exports.config = {
+  PAYMENT_PROCESSOR_MAX_RETRIES,
+  PAYMENT_PROCESSOR_RETRY_INITIAL_DELAY_MS,
+  PAYMENT_PROCESSOR_CIRCUIT_BREAKER_ERROR_THRESHOLD,
+  PAYMENT_PROCESSOR_CIRCUIT_BREAKER_SLID_WINDOW_SIZE_MS,
+  PAYMENT_PROCESSOR_CIRCUIT_BREAKER_COOLDOWN_MS,
+  PAYMENT_PROCESSOR_CIRCUIT_BREAKER_MINIMUM_CALLS
+};
 
 module.exports.charge = async request => {
   const span = tracer.startSpan('charge');
@@ -184,11 +385,17 @@ module.exports.charge = async request => {
       span.setAttribute('enduser.id', enduserId);
     }
 
+    // Generate idempotency key for this payment request
+    const idempotencyKey = uuidv4();
     const { units, nanos, currencyCode } = request.amount;
-    logger.info({ transactionId, cardType, lastFourDigits, amount: { units, nanos, currencyCode }, loyalty_level }, 'Transaction complete.');
+
+    // Process payment with resilience protections
+    const paymentResult = await chargePayment(request, idempotencyKey);
+
+    logger.info({ transactionId: paymentResult.transactionId, cardType, lastFourDigits, amount: { units, nanos, currencyCode }, loyalty_level, idempotencyKey }, 'Transaction complete.');
     transactionsCounter.add(1, { 'demo.payment.currency': currencyCode });
 
-    return { transactionId };
+    return { transactionId: paymentResult.transactionId };
   } catch (err) {
     span.recordException(err);
     span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
