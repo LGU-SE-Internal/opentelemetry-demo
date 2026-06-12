@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-collector
+  labels:
+    app: kafka-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka-collector
+  template:
+    metadata:
+      labels:
+        app: kafka-collector
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: kafka-collector
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      containers:
+      - name: kafka-collector
+        image: otel/demo-kafka-collector:latest
+        ports:
+        - containerPort: 9090
+          name: metrics
+        - containerPort: 8080
+          name: health
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          timeoutSeconds: 5
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          timeoutSeconds: 5
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        env:
+        - name: KAFKA_BROKERS
+          value: ""
+        - name: KAFKA_TOPICS
+          value: ""
+        - name: KAFKA_TLS_ENABLED
+          value: false
+        - name: KAFKA_TLS_CA_CERT_PATH
+          value: "/etc/ssl/certs/ca-certificates.crt"
+        - name: METRICS_PORT
+          value: 9090
+        - name: HEALTH_PORT
+          value: 8080
