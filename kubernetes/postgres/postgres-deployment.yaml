@@ -11,6 +11,7 @@ metadata:
 spec:
   replicas: 1
   serviceName: postgresql
+  terminationGracePeriodSeconds: 60
   selector:
     matchLabels:
       app.kubernetes.io/name: postgresql
@@ -77,6 +78,10 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 5
             failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec:
+                command: ["pg_ctl", "stop", "-m", "fast", "-D", "/var/lib/postgresql/data"]
       volumes:
         - name: postgresql-certs
           secret:
