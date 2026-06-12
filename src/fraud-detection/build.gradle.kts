@@ -33,6 +33,7 @@ repositories {
 
 
 dependencies {
+    implementation("io.quarkus:quarkus-micrometer-registry-prometheus")
     implementation("org.springframework.boot:spring-boot-starter-web")
     implementation("org.springframework.boot:spring-boot-starter-actuator")
     implementation("io.quarkus:quarkus-smallrye-health")
