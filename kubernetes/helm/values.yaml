@@ -6,6 +6,10 @@ jaeger:
       - ReadWriteOnce
   retention:
     ttl: "7d"
+  tls:
+    enabled: false
+    certSecretName: ""
+    enableClientAuth: false
 grafana:
   persistence:
     enabled: true # Defaults to true to enable persistent storage

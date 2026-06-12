@@ -32,6 +32,11 @@ spec:
         - name: jaeger-storage
           persistentVolumeClaim:
             claimName: jaeger-storage
+        {{- if .Values.jaeger.tls.enabled }}
+        - name: jaeger-tls
+          secret:
+            secretName: {{ .Values.jaeger.tls.certSecretName }}
+        {{- end }}
       containers:
         - name: jaeger
           image: quay.io/jaegertracing/jaeger:2.14.1
@@ -40,6 +45,19 @@ spec:
             - /go/bin/all-in-one-linux
             - --config
             - /etc/jaeger/jaeger.yaml
+          env:
+            {{- if .Values.jaeger.tls.enabled }}
+            - name: JAEGER_TLS_ENABLED
+              value: "true"
+            - name: JAEGER_TLS_CERT_PATH
+              value: /etc/jaeger/tls/tls.crt
+            - name: JAEGER_TLS_KEY_PATH
+              value: /etc/jaeger/tls/tls.key
+            {{- if .Values.jaeger.tls.enableClientAuth }}
+            - name: JAEGER_TLS_CA_CERT_PATH
+              value: /etc/jaeger/tls/ca.crt
+            {{- end }}
+            {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -96,3 +114,8 @@ spec:
               readOnly: true
             - name: jaeger-storage
               mountPath: /badger
+            {{- if .Values.jaeger.tls.enabled }}
+            - name: jaeger-tls
+              mountPath: /etc/jaeger/tls
+              readOnly: true
+            {{- end }}
