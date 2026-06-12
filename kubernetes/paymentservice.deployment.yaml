@@ -67,6 +67,21 @@ spec:
               drop:
                 - ALL
             privileged: false
+# TLS/mTLS Configuration for Payment Service
+# To enable TLS:
+# 1. Create a secret in the same namespace with the following structure:
+#    apiVersion: v1
+#    kind: Secret
+#    metadata:
+#      name: payment-service-tls
+#    type: Opaque
+#    data:
+#      tls.crt: <base64 encoded TLS server certificate>
+#      tls.key: <base64 encoded TLS server private key>
+#      ca.crt: <base64 encoded client CA certificate (optional, only for mTLS)>
+# 2. Uncomment the volume, volumeMount, and TLS environment variables below
+# 3. To enable mTLS, also uncomment the PAYMENT_SERVICE_TLS_CLIENT_CA_PATH environment variable
+# Note: This configuration maintains backward compatibility - no changes required for existing non-TLS deployments
           env:
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: "http://otelcol:4317"
@@ -74,17 +89,28 @@ spec:
               value: "paymentservice"
             - name: PORT
               value: "50051"
-            - name: TLS_ENABLED
-              value: "false"
-            - name: TLS_CERT_PATH
-              value: ""
-            - name: TLS_KEY_PATH
-              value: ""
+            # TLS Configuration (uncomment to enable)
+            # - name: PAYMENT_SERVICE_TLS_CERT_PATH
+            #   value: "/etc/payment-service-tls/tls.crt"
+            # - name: PAYMENT_SERVICE_TLS_KEY_PATH
+            #   value: "/etc/payment-service-tls/tls.key"
+            # Uncomment to enable mTLS (requires client CA certificate in secret)
+            # - name: PAYMENT_SERVICE_TLS_CLIENT_CA_PATH
+            #   value: "/etc/payment-service-tls/ca.crt"
             - name: RATE_LIMIT_RPS
               value: "100"
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            # Uncomment to mount TLS secret
+            # - name: payment-service-tls
+            #   mountPath: /etc/payment-service-tls
+            #   readOnly: true
       volumes:
         - name: tmp
           emptyDir: {}
+        # Optional TLS secret volume (uncomment to enable TLS/mTLS)
+        # - name: payment-service-tls
+        #   secret:
+        #     secretName: payment-service-tls
+        #     optional: true
