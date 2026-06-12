@@ -1,174 +1,110 @@
 {
-  "$schema": "https://flagd.dev/schema/v0/flags.json",
   "flags": {
-    "llmInaccurateResponse": {
-      "defaultVariant": "off",
-      "description": "LLM returns an inaccurate product summary for product ID L9ECAV7KIM",
+    "test-flag": {
       "state": "ENABLED",
+      "defaultVariant": "on",
       "variants": {
-        "off": false,
-        "on": true
+        "on": true,
+        "off": false
       }
     },
-    "llmRateLimitError": {
-      "defaultVariant": "off",
-      "description": "LLM intermittently returns a rate limit error",
+    "flag-1": {
       "state": "ENABLED",
+      "defaultVariant": "val1",
       "variants": {
-        "off": false,
-        "on": true
+        "val1": "value1"
       }
     },
-    "productCatalogFailure": {
-      "description": "Fail product catalog service on a specific product",
+    "flag-2": {
       "state": "ENABLED",
+      "defaultVariant": "val2",
       "variants": {
-        "on": true,
-        "off": false
-      },
-      "defaultVariant": "off",
-      "targeting": {
-        "if": [
-          {
-            "==": [
-              {
-                "var": "product_id"
-              },
-              "OLJCESPC7Z"
-            ]
-          },
-          "off",
-          "off"
-        ]
+        "val2": "value2"
       }
     },
-    "recommendationCacheFailure": {
-      "description": "Fail recommendation service cache",
+    "flag-3": {
       "state": "ENABLED",
+      "defaultVariant": "val3",
       "variants": {
-        "on": true,
-        "off": false
-      },
-      "defaultVariant": "off"
+        "val3": "value3"
+      }
     },
-    "adManualGc": {
-      "description": "Triggers full manual garbage collections in the ad service",
+    "flag-4": {
       "state": "ENABLED",
+      "defaultVariant": "val4",
       "variants": {
-        "on": true,
-        "off": false
-      },
-      "defaultVariant": "off"
+        "val4": "value4"
+      }
     },
-    "adHighCpu": {
-      "description": "Triggers high cpu load in the ad service",
+    "flag-5": {
       "state": "ENABLED",
+      "defaultVariant": "val5",
       "variants": {
-        "on": true,
-        "off": false
-      },
-      "defaultVariant": "off"
+        "val5": "value5"
+      }
     },
-    "adFailure": {
-      "description": "Fail ad service",
+    "flag-6": {
       "state": "ENABLED",
+      "defaultVariant": "val6",
       "variants": {
-        "on": true,
-        "off": false
-      },
-      "defaultVariant": "off"
+        "val6": "value6"
+      }
     },
-    "kafkaQueueProblems": {
-      "description": "Overloads Kafka queue while simultaneously introducing a consumer side delay leading to a lag spike",
+    "flag-7": {
       "state": "ENABLED",
+      "defaultVariant": "val7",
       "variants": {
-        "on": 100,
-        "off": 0
-      },
-      "defaultVariant": "off"
+        "val7": "value7"
+      }
     },
-    "cartFailure": {
-      "description": "Fail cart service",
+    "flag-8": {
       "state": "ENABLED",
+      "defaultVariant": "val8",
       "variants": {
-        "on": true,
-        "off": false
-      },
-      "defaultVariant": "off"
+        "val8": "value8"
+      }
     },
-    "paymentFailure": {
-      "description": "Fail payment service charge requests n%",
+    "flag-9": {
       "state": "ENABLED",
+      "defaultVariant": "val9",
       "variants": {
-        "100%": 1,
-        "90%": 0.95,
-        "75%": 0.75,
-        "50%": 0.5,
-        "25%": 0.25,
-        "10%": 0.1,
-        "off": 0
-      },
-      "defaultVariant": "off"
+        "val9": "value9"
+      }
     },
-    "paymentUnreachable": {
-      "description": "Payment service is unavailable",
+    "flag-10": {
       "state": "ENABLED",
+      "defaultVariant": "val10",
       "variants": {
-        "on": true,
-        "off": false
-      },
-      "defaultVariant": "off"
+        "val10": "value10"
+      }
     },
-    "loadGeneratorFloodHomepage": {
-      "description": "Flood the frontend with a large amount of requests.",
+    "flag-11": {
       "state": "ENABLED",
+      "defaultVariant": "val11",
       "variants": {
-        "on": 100,
-        "off": 0
-      },
-      "defaultVariant": "off"
+        "val11": "value11"
+      }
     },
-    "imageSlowLoad": {
-      "description": "slow loading images in the frontend",
+    "flag-12": {
       "state": "ENABLED",
+      "defaultVariant": "val12",
       "variants": {
-        "10sec": 10000,
-        "5sec": 5000,
-        "off": 0
-      },
-      "defaultVariant": "off"
+        "val12": "value12"
+      }
     },
-    "failedReadinessProbe": {
-      "description": "readiness probe failure for cart service",
+    "flag-13": {
       "state": "ENABLED",
+      "defaultVariant": "val13",
       "variants": {
-        "on": true,
-        "off": false
-      },
-      "defaultVariant": "off"
+        "val13": "value13"
+      }
     },
-    "emailMemoryLeak": {
-      "description": "Memory leak in the email service.",
+    "flag-14": {
       "state": "ENABLED",
+      "defaultVariant": "val14",
       "variants": {
-        "off": 0,
-        "1x": 1,
-        "10x": 10,
-        "100x": 100,
-        "1000x": 1000,
-        "10000x": 10000
-      },
-      "defaultVariant": "off"
-    },
-    "intlShippingSlowdown": {
-      "description": "Delays international shipping responses to simulate overseas shipping delay",
-      "state": "ENABLED",
-      "variants": {
-        "10sec": 10,
-        "5sec": 5,
-        "off": 0
-      },
-      "defaultVariant": "off"
+        "val14": "value14"
+      }
     }
   }
 }
