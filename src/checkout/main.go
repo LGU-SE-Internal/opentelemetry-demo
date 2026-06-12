@@ -46,6 +46,7 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 
 	sdklog "go.opentelemetry.io/otel/sdk/log"
@@ -136,6 +137,9 @@ var (
 	tracer            trace.Tracer
 	resource          *sdkresource.Resource
 	initResourcesOnce sync.Once
+	circuitBreakers   map[string]*gobreaker.CircuitBreaker
+	cbMutex           sync.RWMutex
+	meter             metric.Meter
 )
 
 func initResource() *sdkresource.Resource {
@@ -314,6 +318,7 @@ func main() {
 	}()
 
 	mp := initMeterProvider()
+	meter = mp.Meter("checkout")
 	defer func() {
 		if err := mp.Shutdown(context.Background()); err != nil {
 			logger.Error(fmt.Sprintf("Error shutting down meter provider: %v", err))
@@ -663,6 +668,30 @@ func mustCreateClient(addr string, svcName string) *grpc.ClientConn {
 	}
 
 	return c
+}
+
+func circuitBreakerUnaryInterceptor(svcName string) grpc.UnaryClientInterceptor {
+	cbMutex.Lock()
+	defer cbMutex.Unlock()
+
+	if circuitBreakers == nil {
+		circuitBreakers = make(map[string]*gobreaker.CircuitBreaker)
+	}
+
+	if _, ok := circuitBreakers[svcName]; !ok {
+		config := DefaultCircuitBreakerConfig(svcName)
+		cb, err := NewCircuitBreaker(config, meter)
+		if err != nil {
+			logger.Error(fmt.Sprintf("failed to create circuit breaker for %s: %v", svcName, err))
+			// Return no-op interceptor if circuit breaker creation fails
+			return func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+				return invoker(ctx, method, req, reply, cc, opts...)
+			}
+		}
+		circuitBreakers[svcName] = cb
+	}
+
+	return CircuitBreakerClientInterceptor(circuitBreakers[svcName])
 }
 
 func (cs *checkout) quoteShipping(ctx context.Context, address *pb.Address, items []*pb.CartItem) (*pb.Money, error) {
