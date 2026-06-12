@@ -21,6 +21,7 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         fsGroup: 1000
+      terminationGracePeriodSeconds: 60
       containers:
         - name: load-generator
           image: ghcr.io/open-telemetry/demo:latest-loadgenerator
