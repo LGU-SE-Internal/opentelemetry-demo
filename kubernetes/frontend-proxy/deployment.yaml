@@ -5,9 +5,8 @@ metadata:
   labels:
     app.kubernetes.io/name: frontend-proxy
     app.kubernetes.io/part-of: opentelemetry-demo
-    app.kubernetes.io/component: proxy
 spec:
-  replicas: {{ .Values.frontendProxy.replicas | default 2 }}
+  replicas: 2
   selector:
     matchLabels:
       app.kubernetes.io/name: frontend-proxy
@@ -16,122 +15,49 @@ spec:
       labels:
         app.kubernetes.io/name: frontend-proxy
         app.kubernetes.io/part-of: opentelemetry-demo
-        app.kubernetes.io/component: proxy
     spec:
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 1000
-        runAsGroup: 1000
-        fsGroup: 1000
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: frontend-proxy-nginx-config-${ENV}
       containers:
-        - name: frontend-proxy
-          image: "{{ .Values.images.frontendProxy.repository }}:{{ .Values.images.frontendProxy.tag | default .Chart.AppVersion }}"
-          imagePullPolicy: {{ .Values.images.frontendProxy.pullPolicy | default "IfNotPresent" }}
+        - name: nginx
+          image: nginx:stable-alpine
           ports:
             - name: http
               containerPort: 8080
               protocol: TCP
-            - name: admin
-              containerPort: 9901
-              protocol: TCP
-          livenessProbe:
-            httpGet:
-              path: /healthz
-              port: admin
-            initialDelaySeconds: 10
-            periodSeconds: 30
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /healthz
-              port: admin
-            initialDelaySeconds: 5
-            periodSeconds: 10
-            failureThreshold: 3
-          resources:
-            requests:
-              cpu: {{ .Values.frontendProxy.resources.requests.cpu | default "100m" }}
-              memory: {{ .Values.frontendProxy.resources.requests.memory | default "128Mi" }}
-            limits:
-              cpu: {{ .Values.frontendProxy.resources.limits.cpu | default "500m" }}
-              memory: {{ .Values.frontendProxy.resources.limits.memory | default "256Mi" }}
           securityContext:
-            privileged: false
+            runAsNonRoot: true
+            runAsUser: 101
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
               drop:
                 - ALL
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 1
+            failureThreshold: 2
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
           volumeMounts:
-            - name: envoy-config-template
-              mountPath: /etc/envoy/envoy.tmpl.yaml
-              subPath: envoy.tmpl.yaml
-            - name: tmp
-              mountPath: /tmp
-          env:
-            - name: ENVOY_ADDR
-              value: "0.0.0.0"
-            - name: ENVOY_PORT
-              value: "8080"
-            - name: OTEL_SERVICE_NAME
-              value: "frontend-proxy"
-            # Envoy retry configuration parameters
-            - name: ENVOY_RETRY_MAX_ATTEMPTS
-              value: {{ .Values.frontendProxy.env.ENVOY_RETRY_MAX_ATTEMPTS | default "2" | quote }}
-            - name: ENVOY_RETRY_ON
-              value: {{ .Values.frontendProxy.env.ENVOY_RETRY_ON | default "5xx,gateway-error,connect-failure,refused-stream" | quote }}
-            - name: ENVOY_CIRCUIT_BREAKER_MAX_CONNECTIONS
-              value: {{ .Values.frontendProxy.env.ENVOY_CIRCUIT_BREAKER_MAX_CONNECTIONS | default "1024" | quote }}
-            - name: ENVOY_CIRCUIT_BREAKER_MAX_PENDING_REQUESTS
-              value: {{ .Values.frontendProxy.env.ENVOY_CIRCUIT_BREAKER_MAX_PENDING_REQUESTS | default "1024" | quote }}
-            - name: ENVOY_CIRCUIT_BREAKER_MAX_RETRIES
-              value: {{ .Values.frontendProxy.env.ENVOY_CIRCUIT_BREAKER_MAX_RETRIES | default "512" | quote }}
-            - name: ENVOY_RETRY_BUDGET_FRACTION
-              value: {{ .Values.frontendProxy.env.ENVOY_RETRY_BUDGET_FRACTION | default "0.2" | quote }}
-            - name: ENVOY_RETRY_BUDGET_MIN_RETRY_CONCURRENCY
-              value: {{ .Values.frontendProxy.env.ENVOY_RETRY_BUDGET_MIN_RETRY_CONCURRENCY | default "10" | quote }}
-            # Envoy outlier detection configuration parameters
-            - name: ENVOY_OUTLIER_DETECTION_ENABLED
-              value: {{ .Values.frontendProxy.env.ENVOY_OUTLIER_DETECTION_ENABLED | default "true" | quote }}
-            - name: ENVOY_OUTLIER_DETECTION_CONSECUTIVE_5XX
-              value: {{ .Values.frontendProxy.env.ENVOY_OUTLIER_DETECTION_CONSECUTIVE_5XX | default "5" | quote }}
-            - name: ENVOY_OUTLIER_DETECTION_BASE_EJECTION_TIME
-              value: {{ .Values.frontendProxy.env.ENVOY_OUTLIER_DETECTION_BASE_EJECTION_TIME | default "30s" | quote }}
-            - name: ENVOY_OUTLIER_DETECTION_MAX_EJECTION_PERCENT
-              value: {{ .Values.frontendProxy.env.ENVOY_OUTLIER_DETECTION_MAX_EJECTION_PERCENT | default "10" | quote }}
-            - name: ENVOY_OUTLIER_DETECTION_ENFORCING_CONSECUTIVE_5XX
-              value: {{ .Values.frontendProxy.env.ENVOY_OUTLIER_DETECTION_ENFORCING_CONSECUTIVE_5XX | default "100" | quote }}
-            - name: ENVOY_OUTLIER_DETECTION_EJECTION_TIME_MS
-              value: {{ .Values.frontendProxy.env.ENVOY_OUTLIER_DETECTION_EJECTION_TIME_MS | default "30000" | quote }}
-            # Frontend proxy ingress TLS configuration
-            - name: FRONTEND_PROXY_INGRESS_TLS_ENABLED
-              value: {{ .Values.frontendProxy.env.FRONTEND_PROXY_INGRESS_TLS_ENABLED | default "false" | quote }}
-            - name: FRONTEND_PROXY_INGRESS_TLS_CERT_PATH
-              value: {{ .Values.frontendProxy.env.FRONTEND_PROXY_INGRESS_TLS_CERT_PATH | default "" | quote }}
-            - name: FRONTEND_PROXY_INGRESS_TLS_KEY_PATH
-              value: {{ .Values.frontendProxy.env.FRONTEND_PROXY_INGRESS_TLS_KEY_PATH | default "" | quote }}
-            - name: FRONTEND_PROXY_INGRESS_MTLS_ENABLED
-              value: {{ .Values.frontendProxy.env.FRONTEND_PROXY_INGRESS_MTLS_ENABLED | default "false" | quote }}
-            - name: FRONTEND_PROXY_INGRESS_MTLS_CA_CERT_PATH
-              value: {{ .Values.frontendProxy.env.FRONTEND_PROXY_INGRESS_MTLS_CA_CERT_PATH | default "" | quote }}
-            # Frontend proxy upstream TLS configuration
-            - name: FRONTEND_PROXY_UPSTREAM_TLS_ENABLED
-              value: {{ .Values.frontendProxy.env.FRONTEND_PROXY_UPSTREAM_TLS_ENABLED | default "false" | quote }}
-            - name: FRONTEND_PROXY_UPSTREAM_TLS_CA_CERT_PATH
-              value: {{ .Values.frontendProxy.env.FRONTEND_PROXY_UPSTREAM_TLS_CA_CERT_PATH | default "" | quote }}
-            - name: FRONTEND_PROXY_UPSTREAM_MTLS_ENABLED
-              value: {{ .Values.frontendProxy.env.FRONTEND_PROXY_UPSTREAM_MTLS_ENABLED | default "false" | quote }}
-            - name: FRONTEND_PROXY_UPSTREAM_TLS_CERT_PATH
-              value: {{ .Values.frontendProxy.env.FRONTEND_PROXY_UPSTREAM_TLS_CERT_PATH | default "" | quote }}
-            - name: FRONTEND_PROXY_UPSTREAM_TLS_KEY_PATH
-              value: {{ .Values.frontendProxy.env.FRONTEND_PROXY_UPSTREAM_TLS_KEY_PATH | default "" | quote }}
-            # Allow additional environment variables to be added via values
-            {{- if .Values.frontendProxy.extraEnv }}
-            {{- toYaml .Values.frontendProxy.extraEnv | nindent 12 }}
-            {{- end }}
-      volumes:
-        - name: envoy-config-template
-          configMap:
-            name: frontend-proxy-envoy-config
-        - name: tmp
-          emptyDir: {}
+            - name: nginx-config
+              mountPath: /etc/nginx/conf.d
