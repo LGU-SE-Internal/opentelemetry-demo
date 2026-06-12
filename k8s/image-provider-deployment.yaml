@@ -19,6 +19,14 @@ spec:
         runAsUser: 101
         runAsGroup: 101
         allowPrivilegeEscalation: false
+      # Uncomment to enable TLS/mTLS:
+      # volumes:
+      #   - name: tls-cert
+      #     secret:
+      #       secretName: image-provider-tls # Secret containing tls.crt and tls.key
+      #   - name: client-ca
+      #     secret:
+      #       secretName: image-provider-client-ca # Optional: Secret containing ca.crt for mTLS
       containers:
       - name: image-provider
         image: ${IMAGE_NAME}:${DEMO_VERSION}-image-provider
@@ -52,6 +60,29 @@ spec:
           capabilities:
             drop:
             - ALL
+        # Uncomment to enable TLS/mTLS:
+        # volumeMounts:
+        #   - name: tls-cert
+        #     mountPath: /etc/nginx/tls
+        #     readOnly: true
+        #   - name: client-ca
+        #     mountPath: /etc/nginx/client-ca
+        #     readOnly: true
+        env:
+          # TLS configuration (optional)
+          # - name: ENABLE_TLS
+          #   value: "true"
+          # - name: SSL_CERTIFICATE
+          #   value: /etc/nginx/tls/tls.crt
+          # - name: SSL_CERTIFICATE_KEY
+          #   value: /etc/nginx/tls/tls.key
+          # - name: SSL_PROTOCOLS
+          #   value: "TLSv1.2 TLSv1.3"
+          # Uncomment below to enable mTLS (requires client CA secret):
+          # - name: SSL_CLIENT_CERTIFICATE
+          #   value: /etc/nginx/client-ca/ca.crt
+          # - name: SSL_VERIFY_CLIENT
+          #   value: "on"
 ---
 apiVersion: v1
 kind: Service
@@ -67,3 +98,7 @@ spec:
   - port: 8080
     targetPort: http
     name: http
+  # Uncomment to expose HTTPS port when TLS is enabled:
+  # - port: 443
+  #   targetPort: 8080
+  #   name: https
