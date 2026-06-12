@@ -123,7 +123,7 @@ async function withRetry<T>(
       if (!isTransientError(error, config.retry.retryableStatusCodes)) break;
       
       const baseDelay = config.retry.initialDelayMs * Math.pow(config.retry.backoffFactor, attempt - 1);
-      const jitteredDelay = baseDelay * (0.5 + Math.random());
+      const jitteredDelay = baseDelay * (0.8 + Math.random() * 0.4);
       const backoffMs = Math.min(jitteredDelay, config.retry.maxDelayMs);
       
       // Log retry event
