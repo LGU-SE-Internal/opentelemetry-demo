@@ -458,6 +458,7 @@ func readinessHandler(db *sql.DB) http.HandlerFunc {
 	}
 }
 
+func main() {
 	// Load configuration
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -467,34 +468,6 @@ func readinessHandler(db *sql.DB) http.HandlerFunc {
 		})
 		os.Exit(1)
 	}
-
-	// Register Prometheus metrics
-	prometheus.MustRegister(requestsTotal)
-	prometheus.MustRegister(retrievalLatency)
-	prometheus.MustRegister(dbQueriesTotal)
-	prometheus.MustRegister(adsServedPerRequest)
-
-	// Start metrics server
-	metricsMux := http.NewServeMux()
-	metricsMux.Handle("/metrics", promhttp.Handler())
-	metricsServer := &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.MetricsPort),
-		Handler: metricsMux,
-	}
-
-	go func() {
-		otelLogger.Emit(context.Background(), log.Record{
-			Severity: log.SeverityInfo,
-			Body:     log.StringValue(fmt.Sprintf("Metrics endpoint starting on :%d", cfg.MetricsPort)),
-		})
-		if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			otelLogger.Emit(context.Background(), log.Record{
-				Severity: log.SeverityError,
-				Body:     log.StringValue(fmt.Sprintf("Failed to start metrics server: %v", err)),
-			})
-			os.Exit(1)
-		}
-	}()
 
 	// Initialize rate limit metric
 	meter := global.MeterProvider().Meter("adservice")
