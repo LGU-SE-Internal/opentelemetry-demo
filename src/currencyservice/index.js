@@ -10,6 +10,9 @@ const { LoggerProvider, BatchLogRecordProcessor, ConsoleLogRecordExporter } = re
 const { OTLPLogExporter } = require('@opentelemetry/exporter-logs-otlp-http');
 const { Resource } = require('@opentelemetry/resources');
 const { SemanticResourceAttributes } = require('@opentelemetry/semantic-conventions');
+const { NodeTracerProvider } = require('@opentelemetry/sdk-trace-node');
+const { registerInstrumentations } = require('@opentelemetry/instrumentation');
+const { GrpcInstrumentation } = require('@opentelemetry/instrumentation-grpc');
 
 // Health status constants
 const SERVING_STATUS = 'SERVING';
@@ -22,13 +25,62 @@ const healthImpl = new HealthImplementation({
   [SERVICE_NAME]: NOT_SERVING_STATUS
 });
 
+// Dependency health flag (modifiable for testing)
+let areDependenciesHealthy = true;
+
 // Initialize context manager for trace context propagation
 const contextManager = new AsyncHooksContextManager();
 contextManager.enable();
 context.setGlobalContextManager(contextManager);
 
+// Initialize OpenTelemetry tracing
+const traceProvider = new NodeTracerProvider({
+  resource: new Resource({
+    [SemanticResourceAttributes.SERVICE_NAME]: SERVICE_NAME,
+  }),
+});
+traceProvider.register();
+
+// Register gRPC instrumentation to automatically generate spans for gRPC calls
+registerInstrumentations({
+  instrumentations: [
+    new GrpcInstrumentation(),
+  ],
+});
+
 // Initialize logger instance to be used throughout the service
 let logger;
+
+/**
+ * Set dependency health status (for testing and dependency monitoring)
+ * @param {boolean} isHealthy Whether dependencies are healthy
+ */
+function setDependencyHealth(isHealthy) {
+  areDependenciesHealthy = isHealthy;
+  updateReadinessStatus();
+}
+
+/**
+ * Update readiness status based on current service state
+ */
+function updateReadinessStatus() {
+  if (areDependenciesHealthy) {
+    healthImpl.setStatus(SERVICE_NAME, SERVING_STATUS);
+  } else {
+    healthImpl.setStatus(SERVICE_NAME, NOT_SERVING_STATUS);
+  }
+}
+
+/**
+ * Monitor dependency health and update status periodically
+ */
+function startDependencyHealthMonitor() {
+  // Check dependency health every 2 seconds
+  setInterval(() => {
+    // In a real implementation, this would check actual dependencies like databases, APIs, etc.
+    updateReadinessStatus();
+  }, 2000);
+}
 
 /**
  * Reset logger instance (for testing purposes only)
@@ -316,10 +368,13 @@ if (require.main === module) {
       healthImpl.setStatus('', SERVING_STATUS);
       logger.info('Liveness health check endpoint now serving');
       
+      // Start dependency health monitor
+      startDependencyHealthMonitor();
+      
       // Simulate initialization process (loading currency data, connecting to dependencies)
       setTimeout(() => {
         // Once initialization is complete, set readiness status to serving
-        healthImpl.setStatus(SERVICE_NAME, SERVING_STATUS);
+        updateReadinessStatus();
         logger.info('Readiness health check endpoint now serving, service fully initialized');
       }, 5000); // 5 second initialization time for demo
     });
@@ -347,4 +402,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { initLogger, resetLogger, healthImpl, SERVING_STATUS, NOT_SERVING_STATUS, SERVICE_NAME };
+module.exports = { initLogger, resetLogger, healthImpl, SERVING_STATUS, NOT_SERVING_STATUS, SERVICE_NAME, setDependencyHealth, updateReadinessStatus };
