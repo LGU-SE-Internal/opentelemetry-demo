@@ -1,0 +1,102 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: load-generator
+  labels:
+    app.kubernetes.io/name: load-generator
+    app.kubernetes.io/component: load-testing
+    app.kubernetes.io/part-of: opentelemetry-demo
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8089"
+    prometheus.io/path: "/metrics"
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: load-generator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: load-generator
+        app.kubernetes.io/component: load-testing
+        app.kubernetes.io/part-of: opentelemetry-demo
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8089"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+      containers:
+      - name: load-generator
+        image: ghcr.io/lgu-se-internal/opentelemetry-demo/load-generator:latest
+        ports:
+        - name: health
+          containerPort: 8080
+          protocol: TCP
+        - name: locust-web
+          containerPort: 8089
+          protocol: TCP
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        livenessProbe:
+          httpGet:
+            path: /health/liveness
+            port: health
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 1
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health/readiness
+            port: health
+          initialDelaySeconds: 2
+          periodSeconds: 5
+          timeoutSeconds: 1
+          failureThreshold: 3
+        securityContext:
+          capabilities:
+            drop:
+            - ALL
+        env:
+        - name: HEALTH_CHECK_PORT
+          value: "8080"
+        - name: LOAD_TEST_DURATION
+          value: "1h"
+        - name: TARGET_ENDPOINTS
+          value: ""
+        - name: LOCUST_WEB_PORT
+          value: "8089"
+        - name: LOCUST_USERS
+          value: "100"
+        - name: LOCUST_SPAWN_RATE
+          value: "10"
+        - name: OTEL_SERVICE_NAME
+          value: "load-generator"
+        - name: OTEL_RESOURCE_ATTRIBUTES
+          value: "service.name=load-generator,service.namespace=opentelemetry-demo"
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://otelcol:4317"
+        - name: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+          value: "http://otelcol:4317"
+        - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+          value: "http://otelcol:4317"
+        - name: OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
+          value: "http://otelcol:4317"
+        - name: OTEL_TRACES_EXPORTER
+          value: "otlp"
+        - name: OTEL_METRICS_EXPORTER
+          value: "otlp"
+        - name: OTEL_LOGS_EXPORTER
+          value: "otlp"
+        - name: OTEL_PROPAGATORS
+          value: "tracecontext,baggage"
