@@ -17,7 +17,7 @@ using System.Threading;
 
 using cart.cartstore;
 using cart.services;
-using cart.healthcheck;
+using CartService.HealthChecks;
 using cart.Interceptors;
 
 using Microsoft.AspNetCore.Builder;
@@ -255,6 +255,12 @@ builder.Services.AddSingleton<readinessCheck>();
 builder.Services.AddGrpcHealthChecks()
     .AddCheck<readinessCheck>("oteldemo.CartService");
 
+builder.Services.AddSingleton<IConnectionMultiplexer>(x =>
+{
+    var valkeyStore = x.GetRequiredService<ValkeyCartStore>();
+    return valkeyStore.GetConnection();
+});
+
 // Add HTTP health checks
 builder.Services.AddHealthChecks()
     .AddCheck<readinessCheck>("readiness")
@@ -273,7 +279,8 @@ builder.Services.AddHealthChecks()
         {
             return HealthCheckResult.Unhealthy($"Connection to Redis failed: {ex.Message}");
         }
-    }, tags: new[] { "health", "ready" });
+    }, tags: new[] { "health", "ready" })
+    .AddCheck<CartStorageHealthCheck>("cart-storage-operations", tags: new[] { "health", "ready" });
 
 builder.Services.AddSingleton<HealthServiceImpl>();
 
@@ -478,8 +485,16 @@ app.MapHealthChecks("/health", new HealthCheckOptions
         context.Response.ContentType = "application/json";
         var response = new
         {
-            status = report.Status == HealthStatus.Healthy ? "Healthy" : "Unhealthy",
-            errors = report.Entries.SelectMany(e => e.Value.Errors.Select(err => err.Message)).ToList()
+            status = report.Status.ToString(),
+            totalDuration = report.TotalDuration.ToString("c"),
+            entries = report.Entries.ToDictionary(
+                e => e.Key,
+                e => new
+                {
+                    status = e.Value.Status.ToString(),
+                    description = e.Value.Description ?? string.Empty
+                }
+            )
         };
         await context.Response.WriteAsJsonAsync(response);
     }
