@@ -55,6 +55,8 @@ dependencies {
     implementation("com.google.protobuf:protobuf-kotlin:${protobufVersion}")
     implementation("dev.openfeature:sdk:1.20.2")
     implementation("dev.openfeature.contrib.providers:flagd:0.13.3")
+    implementation("io.smallrye:smallrye-fault-tolerance:6.2.6")
+    implementation("io.smallrye.reactive:smallrye-mutiny:2.6.0")
 
     if (JavaVersion.current().isJava9Compatible) {
         // Workaround for @javax.annotation.Generated
