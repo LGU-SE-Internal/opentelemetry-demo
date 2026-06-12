@@ -14,7 +14,7 @@ import (
 	"log/slog"
 )
 
-var ErrCircuitOpen = errors.New("circuit breaker is open")
+var ErrCircuitOpen = status.Error(codes.Unavailable, "circuit breaker is open")
 
 type CircuitBreakerConfig struct {
 	ServiceName             string
