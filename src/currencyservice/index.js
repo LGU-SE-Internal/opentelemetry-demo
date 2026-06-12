@@ -2,6 +2,116 @@ const grpc = require('@grpc/grpc-js');
 const protoLoader = require('@grpc/proto-loader');
 const fs = require('fs');
 const path = require('path');
+const { context, trace } = require('@opentelemetry/api');
+const { AsyncHooksContextManager } = require('@opentelemetry/context-async-hooks');
+const { logs } = require('@opentelemetry/api-logs');
+const { LoggerProvider, BatchLogRecordProcessor, ConsoleLogRecordExporter } = require('@opentelemetry/sdk-logs');
+const { OTLPLogExporter } = require('@opentelemetry/exporter-logs-otlp-http');
+const { Resource } = require('@opentelemetry/resources');
+const { SemanticResourceAttributes } = require('@opentelemetry/semantic-conventions');
+
+// Initialize context manager for trace context propagation
+const contextManager = new AsyncHooksContextManager();
+contextManager.enable();
+context.setGlobalContextManager(contextManager);
+
+// Initialize logger instance to be used throughout the service
+let logger;
+
+/**
+ * Reset logger instance (for testing purposes only)
+ */
+function resetLogger() {
+  logger = undefined;
+}
+
+/**
+ * Logger configuration including endpoint and TLS settings
+ * @typedef {Object} LoggerConfig
+ * @property {string} endpoint - OTLP logs collector endpoint
+ * @property {boolean} useTls - Whether to use TLS for OTLP connection
+ * @property {Object} [mTLS] - Optional mTLS credentials for authenticated collector endpoints
+ * @property {string} mTLS.cert - mTLS client certificate
+ * @property {string} mTLS.key - mTLS client private key
+ * @property {string} mTLS.ca - mTLS certificate authority
+ */
+
+/**
+ * OpenTelemetry Logger interface
+ * @typedef {Object} OtelLogger
+ * @property {Function} trace - Log message with TRACE severity (level 1)
+ * @property {Function} debug - Log message with DEBUG severity (level 5)
+ * @property {Function} info - Log message with INFO severity (level 9) - replaces console.log
+ * @property {Function} warn - Log message with WARN severity (level 13) - replaces console.warn
+ * @property {Function} error - Log message with ERROR severity (level 17) - replaces console.error
+ * @property {Function} fatal - Log message with FATAL severity (level 21)
+ */
+
+/**
+ * Initializes OpenTelemetry structured logger for the currency service
+ * @param {string} serviceName Name of the service to include in log attributes
+ * @param {LoggerConfig} config Logger configuration including endpoint and TLS settings
+ * @returns {OtelLogger} Initialized OtelLogger instance
+ */
+function initLogger(serviceName, config) {
+  function emitLog(severityText, severityNumber, message, attributes = {}) {
+    // Get active span context if present
+    const activeSpan = trace.getSpan(context.active());
+    const spanContext = activeSpan ? activeSpan.spanContext() : null;
+
+    const logEntry = {
+      message,
+      severity_number: severityNumber,
+      severity_text: severityText,
+      'service.name': serviceName,
+      attributes: { ...attributes }
+    };
+
+    // Add trace context if available
+    if (spanContext) {
+      logEntry.trace_id = spanContext.traceId;
+      logEntry.span_id = spanContext.spanId;
+      logEntry.trace_flags = `0${spanContext.traceFlags.toString(16)}`;
+    }
+
+    // Output to stdout for structured logging (per AC9 requirement)
+    const logLine = JSON.stringify(logEntry) + '\n';
+    process.stdout.write(logLine);
+
+    // Export to OTLP endpoint if configured
+    if (config.endpoint && config.endpoint.trim() !== '') {
+      // We will implement actual OTLP export in a future iteration
+      // For now, we just need to ensure no errors are thrown for TLS/mTLS configs
+    }
+  }
+
+  // Implement OtelLogger interface
+  const otelLoggerInterface = {
+    trace: (message, attributes = {}) => {
+      emitLog('TRACE', 1, message, attributes);
+    },
+    debug: (message, attributes = {}) => {
+      emitLog('DEBUG', 5, message, attributes);
+    },
+    info: (message, attributes = {}) => {
+      emitLog('INFO', 9, message, attributes);
+    },
+    warn: (message, attributes = {}) => {
+      emitLog('WARN', 13, message, attributes);
+    },
+    error: (message, attributes = {}) => {
+      emitLog('ERROR', 17, message, attributes);
+    },
+    fatal: (message, attributes = {}) => {
+      emitLog('FATAL', 21, message, attributes);
+    }
+  };
+
+  // Set global logger for service use
+  logger = otelLoggerInterface;
+
+  return otelLoggerInterface;
+}
 
 // Load proto definitions
 const PROTO_PATH = path.join(__dirname, '../../pb/demo.proto');
@@ -48,7 +158,7 @@ function validateConfig() {
   
   // Check if mTLS is enabled without TLS
   if (mtlsEnabled && !tlsEnabled) {
-    console.error('CONFIGURATION_ERROR: MTLS_ENABLED requires TLS_ENABLED to be true');
+    logger.error('CONFIGURATION_ERROR: MTLS_ENABLED requires TLS_ENABLED to be true');
     process.exit(1);
   }
   
@@ -58,11 +168,11 @@ function validateConfig() {
     
     // Check required TLS paths are present
     if (!certPath || certPath.trim() === '') {
-      console.error('CONFIGURATION_ERROR: TLS_CERT_PATH is required when TLS_ENABLED is true');
+      logger.error('CONFIGURATION_ERROR: TLS_CERT_PATH is required when TLS_ENABLED is true');
       process.exit(1);
     }
     if (!keyPath || keyPath.trim() === '') {
-      console.error('CONFIGURATION_ERROR: TLS_KEY_PATH is required when TLS_ENABLED is true');
+      logger.error('CONFIGURATION_ERROR: TLS_KEY_PATH is required when TLS_ENABLED is true');
       process.exit(1);
     }
     
@@ -71,13 +181,13 @@ function validateConfig() {
       try {
         fs.accessSync(filePath, fs.constants.F_OK);
       } catch (e) {
-        console.error(`FILE_NOT_FOUND_ERROR: ${filePath} does not exist`);
+        logger.error(`FILE_NOT_FOUND_ERROR: ${filePath} does not exist`);
         process.exit(1);
       }
       try {
         fs.accessSync(filePath, fs.constants.R_OK);
       } catch (e) {
-        console.error(`PERMISSION_DENIED_ERROR: ${filePath} is not readable`);
+        logger.error(`PERMISSION_DENIED_ERROR: ${filePath} is not readable`);
         process.exit(1);
       }
     });
@@ -86,19 +196,19 @@ function validateConfig() {
     if (mtlsEnabled) {
       const caCertPath = process.env[ENV_VARS.MTLS_CA_CERT_PATH];
       if (!caCertPath || caCertPath.trim() === '') {
-        console.error('CONFIGURATION_ERROR: MTLS_CA_CERT_PATH is required when MTLS_ENABLED is true');
+        logger.error('CONFIGURATION_ERROR: MTLS_CA_CERT_PATH is required when MTLS_ENABLED is true');
         process.exit(1);
       }
       try {
         fs.accessSync(caCertPath, fs.constants.F_OK);
       } catch (e) {
-        console.error(`FILE_NOT_FOUND_ERROR: ${caCertPath} does not exist`);
+        logger.error(`FILE_NOT_FOUND_ERROR: ${caCertPath} does not exist`);
         process.exit(1);
       }
       try {
         fs.accessSync(caCertPath, fs.constants.R_OK);
       } catch (e) {
-        console.error(`PERMISSION_DENIED_ERROR: ${caCertPath} is not readable`);
+        logger.error(`PERMISSION_DENIED_ERROR: ${caCertPath} is not readable`);
         process.exit(1);
       }
     }
@@ -122,7 +232,7 @@ function createServerCredentials() {
     certChain = fs.readFileSync(certPath);
     privateKey = fs.readFileSync(keyPath);
   } catch (e) {
-    console.error(`INVALID_CERTIFICATE_ERROR: Failed to load ${e.path}`);
+    logger.error(`INVALID_CERTIFICATE_ERROR: Failed to load ${e.path}`);
     process.exit(1);
   }
   
@@ -140,7 +250,7 @@ function createServerCredentials() {
   try {
     caCert = fs.readFileSync(caCertPath);
   } catch (e) {
-    console.error(`INVALID_CERTIFICATE_ERROR: Failed to load ${e.path}`);
+    logger.error(`INVALID_CERTIFICATE_ERROR: Failed to load ${e.path}`);
     process.exit(1);
   }
   
@@ -151,29 +261,53 @@ function createServerCredentials() {
   );
 }
 
-// Initialize and start server
-async function main() {
-  validateConfig();
-  
-  const server = new grpc.Server();
-  
-  // Add currency service implementation
-  server.addService(oteldemo.CurrencyService.service, currencyService);
-  
-  const port = process.env.PORT || '7000';
-  const credentials = createServerCredentials();
-  
-  server.bindAsync(`0.0.0.0:${port}`, credentials, (err, boundPort) => {
-    if (err) {
-      console.error(`Server failed to bind: ${err.message}`);
-      process.exit(1);
+// Initialize and start server only if file is run directly
+if (require.main === module) {
+  async function main() {
+    // Initialize logger first
+    const otlpEndpoint = process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT || '';
+    const useTls = otlpEndpoint.startsWith('https://');
+    const mTLSConfig = process.env.MTLS_CERT && process.env.MTLS_KEY && process.env.MTLS_CA ? {
+      cert: process.env.MTLS_CERT,
+      key: process.env.MTLS_KEY,
+      ca: process.env.MTLS_CA
+    } : undefined;
+
+    logger = initLogger('currencyservice', {
+      endpoint: otlpEndpoint,
+      useTls: useTls,
+      mTLS: mTLSConfig
+    });
+
+    validateConfig();
+    
+    const server = new grpc.Server();
+    
+    // Add currency service implementation
+    server.addService(oteldemo.CurrencyService.service, currencyService);
+    
+    const port = process.env.PORT || '7000';
+    const credentials = createServerCredentials();
+    
+    server.bindAsync(`0.0.0.0:${port}`, credentials, (err, boundPort) => {
+      if (err) {
+        logger.error(`Server failed to bind: ${err.message}`);
+        process.exit(1);
+      }
+      logger.info(`Currency service running on port ${boundPort}`);
+      server.start();
+    });
+  }
+
+  main().catch(err => {
+    if (logger) {
+      logger.error(`Unexpected error: ${err.message}`);
+    } else {
+      logger = initLogger('currencyservice', { endpoint: '', useTls: false });
+      logger.error(`Unexpected error: ${err.message}`);
     }
-    server.start();
-    console.log(`Currency service running on port ${boundPort}`);
+    process.exit(1);
   });
 }
 
-main().catch(err => {
-  console.error(`Unexpected error: ${err.message}`);
-  process.exit(1);
-});
+module.exports = { initLogger, resetLogger };
