@@ -127,22 +127,22 @@ func CircuitBreakerClientInterceptor(cb *gobreaker.CircuitBreaker) grpc.UnaryCli
 		invoker grpc.UnaryInvoker,
 		opts ...grpc.CallOption,
 	) error {
-		_, err := cb.Execute(func() (interface{}, error) {
-			invErr := invoker(ctx, method, req, reply, cc, opts...)
-			if invErr != nil {
-				// Check if error is a gRPC error we should count as failure
-				st, ok := status.FromError(invErr)
-				if ok {
-					switch st.Code() {
-					case codes.DeadlineExceeded, codes.Unavailable, codes.Internal, codes.ResourceExhausted:
-						return nil, invErr
+			_, err := cb.Execute(func() (interface{}, error) {
+				invErr := invoker(ctx, method, req, reply, cc, opts...)
+				if invErr != nil {
+					// Check if error is a gRPC error we should count as failure
+					st, ok := status.FromError(invErr)
+					if ok {
+						switch st.Code() {
+						case codes.DeadlineExceeded, codes.Unavailable, codes.Internal, codes.ResourceExhausted:
+							return nil, invErr
+						}
 					}
+					// Don't count other errors (like invalid argument, not found, etc.) as failures, but return them to the caller
+					return nil, invErr
 				}
-				// Don't count other errors (like invalid argument, not found, etc.) as failures
 				return nil, nil
-			}
-			return nil, nil
-		})
+			})
 
 		if errors.Is(err, gobreaker.ErrOpenState) {
 			circuitBreakerEvents.Add(ctx, 1, metric.WithAttributes(
