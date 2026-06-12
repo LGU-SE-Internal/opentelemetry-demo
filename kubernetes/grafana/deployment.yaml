@@ -15,10 +15,10 @@ spec:
         app: grafana
     spec:
       securityContext:
-        runAsNonRoot: true
-        runAsUser: 472
-        runAsGroup: 472
-        fsGroup: 472
+        runAsNonRoot: ${GRAFANA_RUN_AS_NON_ROOT:-true}
+        runAsUser: ${GRAFANA_RUN_AS_USER:-472}
+        runAsGroup: ${GRAFANA_RUN_AS_USER:-472}
+        fsGroup: ${GRAFANA_RUN_AS_USER:-472}
       containers:
         - name: grafana
           image: grafana/grafana:10.4.0
@@ -29,26 +29,31 @@ spec:
             httpGet:
               path: /api/health
               port: 3000
-            initialDelaySeconds: 30
-            periodSeconds: 10
+              scheme: HTTP
+            initialDelaySeconds: ${GRAFANA_LIVENESS_PROBE_INITIAL_DELAY:-30}
+            periodSeconds: ${GRAFANA_LIVENESS_PROBE_PERIOD:-10}
             failureThreshold: 3
+            successThreshold: 1
           readinessProbe:
             httpGet:
               path: /api/health
               port: 3000
-            initialDelaySeconds: 10
-            periodSeconds: 5
+              scheme: HTTP
+            initialDelaySeconds: ${GRAFANA_READINESS_PROBE_INITIAL_DELAY:-5}
+            periodSeconds: ${GRAFANA_READINESS_PROBE_PERIOD:-5}
             failureThreshold: 3
+            successThreshold: 1
           resources:
             requests:
-              cpu: "100m"
-              memory: "256Mi"
+              cpu: "${GRAFANA_CPU_REQUEST:-100m}"
+              memory: "${GRAFANA_MEMORY_REQUEST:-256Mi}"
             limits:
-              cpu: "500m"
-              memory: "512Mi"
+              cpu: "${GRAFANA_CPU_LIMIT:-500m}"
+              memory: "${GRAFANA_MEMORY_LIMIT:-1Gi}"
           securityContext:
-            allowPrivilegeEscalation: false
+            allowPrivilegeEscalation: ${GRAFANA_ALLOW_PRIVILEGE_ESCALATION:-false}
             privileged: false
+            readOnlyRootFilesystem: true
           volumeMounts:
             - name: grafana-storage
               mountPath: /var/lib/grafana
