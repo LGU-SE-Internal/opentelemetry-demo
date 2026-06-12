@@ -16,6 +16,10 @@ spec:
         app.kubernetes.io/name: frontend-proxy
         app.kubernetes.io/part-of: opentelemetry-demo
     spec:
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: frontend-proxy-nginx-config-${ENV}
       containers:
         - name: nginx
           image: nginx:stable-alpine
@@ -57,8 +61,3 @@ spec:
           volumeMounts:
             - name: nginx-config
               mountPath: /etc/nginx/conf.d
-      volumes:
-        - name: nginx-config
-          configMap:
-            # Replace "dev" with actual environment identifier (staging/prod) during deployment
-            name: frontend-proxy-nginx-config-dev
