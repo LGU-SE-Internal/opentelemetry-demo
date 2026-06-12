@@ -48,6 +48,7 @@ tower = "0.5.3"
 tower-retry = "0.3.0"
 tower-circuit-breaker = "0.2.3"
 lazy_static = "1.4.0"
+reqwest-retry = "0.5.0"
 
 [dependencies.uuid]
 version = "1.23.1"
