@@ -302,6 +302,116 @@ return function (App $app) {
         }
     })->add(\App\Application\Middleware\QuoteRequestValidationMiddleware::class);
     
+    $app->post('/get-quote', function (Request $request, Response $response, LoggerInterface $logger) {
+        $span = Span::getCurrent();
+        $span->addEvent('Received get quote request, processing it');
+
+        $body = $request->getParsedBody() ?? [];
+        
+        // Validate numberOfItems
+        if (!isset($body['numberOfItems'])) {
+            $payload = json_encode([
+                'error' => 'Invalid input: numberOfItems is required',
+                'code' => 'INVALID_ARGUMENT'
+            ]);
+            $response->getBody()->write($payload);
+            return $response
+                ->withHeader('Content-Type', 'application/json')
+                ->withStatus(400);
+        }
+        
+        if (!is_int($body['numberOfItems'])) {
+            $payload = json_encode([
+                'error' => 'Invalid input: numberOfItems must be an integer',
+                'code' => 'INVALID_ARGUMENT'
+            ]);
+            $response->getBody()->write($payload);
+            return $response
+                ->withHeader('Content-Type', 'application/json')
+                ->withStatus(400);
+        }
+        
+        if ($body['numberOfItems'] < 1) {
+            $payload = json_encode([
+                'error' => 'Invalid input: numberOfItems must be at least 1',
+                'code' => 'INVALID_ARGUMENT'
+            ]);
+            $response->getBody()->write($payload);
+            return $response
+                ->withHeader('Content-Type', 'application/json')
+                ->withStatus(400);
+        }
+        
+        // Validate weight
+        if (!isset($body['weight'])) {
+            $payload = json_encode([
+                'error' => 'Invalid input: weight is required',
+                'code' => 'INVALID_ARGUMENT'
+            ]);
+            $response->getBody()->write($payload);
+            return $response
+                ->withHeader('Content-Type', 'application/json')
+                ->withStatus(400);
+        }
+        
+        if (!is_numeric($body['weight'])) {
+            $payload = json_encode([
+                'error' => 'Invalid input: weight must be a number',
+                'code' => 'INVALID_ARGUMENT'
+            ]);
+            $response->getBody()->write($payload);
+            return $response
+                ->withHeader('Content-Type', 'application/json')
+                ->withStatus(400);
+        }
+        
+        $weight = (float)$body['weight'];
+        if ($weight < 0) {
+            $payload = json_encode([
+                'error' => 'Invalid input: weight must be greater than or equal to 0',
+                'code' => 'INVALID_ARGUMENT'
+            ]);
+            $response->getBody()->write($payload);
+            return $response
+                ->withHeader('Content-Type', 'application/json')
+                ->withStatus(400);
+        }
+
+        try {
+            $quoteService = new \App\Service\QuoteService($logger);
+            $cost = $quoteService->calculateQuote($body['numberOfItems'], $weight);
+
+            $payload = json_encode(['costUsd' => $cost]);
+            $response->getBody()->write($payload);
+
+            $span->addEvent('Quote processed, response sent back', [
+                'demo.shipping.quote.cost.total' => $cost
+            ]);
+            $logger->info('Calculated quote', [
+                'total' => $cost,
+                'numberOfItems' => $body['numberOfItems'],
+                'weight' => $weight
+            ]);
+
+            return $response
+                ->withHeader('Content-Type', 'application/json');
+        } catch (\App\Exception\QuoteCalculationException $e) {
+            $span->setStatus(\OpenTelemetry\API\Trace\StatusCode::STATUS_ERROR, 'Quote calculation failed');
+            $span->recordException($e);
+            
+            $traceId = $span->getContext()->getTraceId();
+            $payload = json_encode([
+                'error' => 'Quote calculation failed',
+                'traceId' => $traceId
+            ]);
+            $response->getBody()->write($payload);
+            
+            return $response
+                ->withHeader('Content-Type', 'application/json')
+                ->withStatus(500);
+        }
+    });
+    
     $app->post('/calculate', function (Request $request, Response $response, LoggerInterface $logger) {
         $span = Span::getCurrent();
         $span->addEvent('Received calculate quote request, processing it');
