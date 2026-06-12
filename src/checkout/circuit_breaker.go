@@ -29,27 +29,31 @@ var (
 	circuitBreakerEvents     metric.Int64Counter
 )
 
-func initMetrics(meter metric.Meter) error {
+func initMetrics(meter metric.Meter) {
+	if meter == nil {
+		return
+	}
 	var err error
 	circuitBreakerStateGauge, err = meter.Int64Gauge(
 		"otelcheckout_circuit_breaker_state",
 		metric.WithDescription("Current state of the circuit breaker: 0 = Closed, 1 = Open, 2 = Half-Open"),
 	)
 	if err != nil {
-		return err
+		slog.Error("failed to create circuit breaker state gauge", "error", err)
+		return
 	}
 
 	circuitBreakerEvents, err = meter.Int64Counter(
 		"otelcheckout_circuit_breaker_events_total",
 		metric.WithDescription("Total count of circuit breaker state transition events"),
 	)
-	return err
+	if err != nil {
+		slog.Error("failed to create circuit breaker events counter", "error", err)
+	}
 }
 
-func NewCircuitBreaker(config CircuitBreakerConfig, meter metric.Meter) (*gobreaker.CircuitBreaker, error) {
-	if err := initMetrics(meter); err != nil {
-		return nil, err
-	}
+func NewCircuitBreaker(config CircuitBreakerConfig, meter metric.Meter) *gobreaker.CircuitBreaker {
+	initMetrics(meter)
 
 	var cb *gobreaker.CircuitBreaker
 
@@ -76,34 +80,38 @@ func NewCircuitBreaker(config CircuitBreakerConfig, meter metric.Meter) (*gobrea
 				slog.Time("timestamp", time.Now()),
 			)
 
-			// Update metrics
-			stateVal := int64(0)
-			eventType := ""
-			switch to {
-			case gobreaker.StateClosed:
-				stateVal = 0
-				eventType = "closed"
-			case gobreaker.StateOpen:
-				stateVal = 1
-				eventType = "open"
-			case gobreaker.StateHalfOpen:
-				stateVal = 2
-				eventType = "half_open"
+			// Update metrics if they are initialized
+			if circuitBreakerStateGauge != nil {
+				stateVal := int64(0)
+				eventType := ""
+				switch to {
+				case gobreaker.StateClosed:
+					stateVal = 0
+					eventType = "closed"
+				case gobreaker.StateOpen:
+					stateVal = 1
+					eventType = "open"
+				case gobreaker.StateHalfOpen:
+					stateVal = 2
+					eventType = "half_open"
+				}
+
+				circuitBreakerStateGauge.Record(context.Background(), stateVal, metric.WithAttributes(
+					attribute.String("service", name),
+				))
+
+				if circuitBreakerEvents != nil {
+					circuitBreakerEvents.Add(context.Background(), 1, metric.WithAttributes(
+						attribute.String("service", name),
+						attribute.String("event_type", eventType),
+					))
+				}
 			}
-
-			circuitBreakerStateGauge.Record(context.Background(), stateVal, metric.WithAttributes(
-				attribute.String("service", name),
-			))
-
-			circuitBreakerEvents.Add(context.Background(), 1, metric.WithAttributes(
-				attribute.String("service", name),
-				attribute.String("event_type", eventType),
-			))
 		},
 	}
 
 	cb = gobreaker.NewCircuitBreaker(settings)
-	return cb, nil
+	return cb
 }
 
 func CircuitBreakerClientInterceptor(cb *gobreaker.CircuitBreaker) grpc.UnaryClientInterceptor {
