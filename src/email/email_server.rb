@@ -777,7 +777,10 @@ post "/send" do
         order_id_provided: order_id_provided
       }
     }
-    $stderr.puts log_entry.to_json
+    $logger.error(log_entry[:message], log_entry.merge({
+      trace_id: OpenTelemetry::Trace.current_trace_id,
+      span_id: OpenTelemetry::Trace.current_span_id
+    }))
 
     content_type :json
     status 400
@@ -835,11 +838,11 @@ def retry_smtp_delivery(&block)
         timestamp: Time.now.utc.iso8601,
         message: "Email delivery failed permanently",
         recipient: recipient,
-        smtp_code: smtp_code,
-        total_retries: retries,
-        failure_type: failure_type
       }
-      $stderr.puts log_entry.to_json
+      $logger.error(log_entry[:message], log_entry.merge({
+        trace_id: OpenTelemetry::Trace.current_trace_id,
+        span_id: OpenTelemetry::Trace.current_span_id
+      }))
 
       $email_delivery_failed_total.add(1, labels: { failure_type: failure_type })
 
@@ -858,11 +861,12 @@ def retry_smtp_delivery(&block)
       message: "Retrying email delivery",
       recipient: recipient,
       smtp_code: smtp_code,
-      retry_count: retries + 1,
-      max_retries: max_retries,
       next_retry_delay: delay
     }
-    $stderr.puts log_entry.to_json
+    $logger.warn(log_entry[:message], log_entry.merge({
+      trace_id: OpenTelemetry::Trace.current_trace_id,
+      span_id: OpenTelemetry::Trace.current_span_id
+    }))
 
     $email_delivery_retry_total.add(1, labels: { retry_attempt: retries + 1 })
 
