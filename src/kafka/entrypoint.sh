@@ -77,5 +77,18 @@ export KAFKA_ADVERTISED_LISTENERS
 export KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
 export KAFKA_CONTROLLER_LISTENER_NAMES
 
-# Execute the original Kafka entrypoint
-exec /etc/kafka/docker/run "$@"
+# SIGTERM/SIGINT handler for graceful shutdown
+handle_shutdown() {
+    echo "Received shutdown signal, triggering controlled Kafka broker shutdown..."
+    /opt/kafka/bin/kafka-server-stop.sh
+    wait $KAFKA_PID
+    exit 0
+}
+
+# Register signal handlers
+trap handle_shutdown SIGTERM SIGINT
+
+# Start Kafka in background so we can catch signals
+/etc/kafka/docker/run "$@" &
+KAFKA_PID=$!
+wait $KAFKA_PID
