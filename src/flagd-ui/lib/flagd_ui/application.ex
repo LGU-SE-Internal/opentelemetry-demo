@@ -16,6 +16,7 @@ defmodule FlagdUi.Application do
     children = [
       FlagdUI.GracefulShutdown,
       FlagdUiWeb.Telemetry,
+      FlagdUI.PromEx,
       {DNSCluster, query: Application.get_env(:flagd_ui, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: FlagdUi.PubSub},
       Hammer,

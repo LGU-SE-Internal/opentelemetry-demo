@@ -24,6 +24,11 @@ defmodule FlagdUiWeb.Router do
     plug FlagdUI.Plugs.RateLimiter, type: :http_health
   end
 
+  # Metrics endpoint, unauthenticated, no rate limiting
+  scope "/" do
+    forward "/metrics", PromEx.Plug, prom_ex_module: FlagdUI.PromEx
+  end
+
   # Health check endpoints, no authentication required
   scope "/health", FlagdUiWeb do
     pipe_through :health_api

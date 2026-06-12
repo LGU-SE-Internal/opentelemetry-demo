@@ -65,10 +65,23 @@ config :logger, :default_formatter,
   format: "$time $metadata[$level] $message\n",
   metadata: [:request_id]
 
+# PromEx metrics configuration
+config :flagd_ui, FlagdUI.PromEx,
+  disabled: false,
+  manual_metrics_start_delay: :no_delay,
+  drop_metrics_groups: [],
+  grafana: :disabled,
+  metrics_server: :disabled
+
 # Use Jason for JSON parsing in Phoenix
 config :phoenix, :json_library, Jason
+
+# Configure Hammer rate limiter
+config :hammer,
+  backend: {Hammer.Backend.ETS, [expiry_ms: 60_000 * 60,
+                                 cleanup_interval_ms: 60_000 * 10]}
 
 # Import environment specific config. This must remain at the bottom
 # of this file so it overrides the configuration defined above.
 import_config "#{config_env()}.exs"
-\n# Configure Hammer rate limiter\nconfig :hammer,\n  backend: {Hammer.Backend.ETS, [expiry_ms: 60_000 * 60,\n                                 cleanup_interval_ms: 60_000 * 10]}
+
