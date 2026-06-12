@@ -11,8 +11,11 @@ import (
 	"syscall"
 	"time"
 
-	"go.opentelemetry.io/otel/exporters/prometheus"
-	"go.opentelemetry.io/otel/sdk/metric"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	otelprometheus "go.opentelemetry.io/otel/exporters/prometheus"
+	"go.opentelemetry.io/otel/metric"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 )
@@ -29,14 +32,14 @@ func main() {
 		log.Fatalf("failed to create resource: %v", err)
 	}
 
-	exporter, err := prometheus.New()
+	exporter, err := otelprometheus.New()
 	if err != nil {
 		log.Fatalf("failed to create prometheus exporter: %v", err)
 	}
 
-	provider := metric.NewMeterProvider(
-		metric.WithResource(res),
-		metric.WithReader(exporter),
+	provider := sdkmetric.NewMeterProvider(
+		sdkmetric.WithResource(res),
+		sdkmetric.WithReader(exporter),
 	)
 	defer func() {
 		if err := provider.Shutdown(context.Background()); err != nil {
@@ -56,7 +59,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to load flag config: %v", err)
 	}
-	metrics.ActiveConfigsGauge.Set(context.Background(), int64(len(config.Flags)))
+	// Set active configs gauge
+	metrics.ActiveConfigsGauge.Record(context.Background(), int64(len(config.Flags)))
 
 	// Create evaluation service
 	evalService := NewEvaluationService(metrics, config)
@@ -73,7 +77,7 @@ func main() {
 
 	// Create metrics server (port 8016)
 	metricsMux := http.NewServeMux()
-	metricsMux.Handle("/metrics", exporter)
+	metricsMux.HandleFunc("/metrics", exporter.ServeHTTP)
 	// Apply metrics middleware to metrics server as well
 	metricsServer := &http.Server{
 		Addr:    ":8016",
