@@ -17,7 +17,7 @@ using System.Threading;
 
 using cart.cartstore;
 using cart.services;
-using cart.healthcheck;
+using CartService.HealthChecks;
 using cart.Interceptors;
 
 using Microsoft.AspNetCore.Builder;
