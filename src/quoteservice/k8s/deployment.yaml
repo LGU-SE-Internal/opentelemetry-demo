@@ -44,6 +44,15 @@ spec:
                 values:
                 - quoteservice
             topologyKey: kubernetes.io/hostname
+      volumes:
+        - name: tls-certs
+          secret:
+            secretName: quoteservice-tls
+            optional: true
+        - name: client-ca
+          secret:
+            secretName: quoteservice-client-ca
+            optional: true
       containers:
       - name: quoteservice
         image: ${QUOTE_SERVICE_IMAGE}:${QUOTE_SERVICE_TAG}
@@ -52,18 +61,27 @@ spec:
           name: http
         - containerPort: 8081
           name: grpc
+        volumeMounts:
+          - name: tls-certs
+            mountPath: /etc/quoteservice/tls/
+            readOnly: true
+          - name: client-ca
+            mountPath: /etc/quoteservice/client-ca/
+            readOnly: true
         livenessProbe:
           httpGet:
-            path: /health
+            path: /health/live
             port: 8080
+            scheme: {{ if eq .Values.quoteservice.http.tls.enabled "true" }}HTTPS{{ else }}HTTP{{ end }}
           initialDelaySeconds: 5
           periodSeconds: 10
           timeoutSeconds: 1
           failureThreshold: 3
         readinessProbe:
           httpGet:
-            path: /health
+            path: /health/ready
             port: 8080
+            scheme: {{ if eq .Values.quoteservice.http.tls.enabled "true" }}HTTPS{{ else }}HTTP{{ end }}
           initialDelaySeconds: 5
           periodSeconds: 10
           timeoutSeconds: 1
@@ -91,3 +109,19 @@ spec:
             value: "http/protobuf"
           - name: OTEL_RESOURCE_ATTRIBUTES
             value: "service.namespace=opentelemetry-demo"
+          - name: QUOTESERVICE_HTTP_TLS_ENABLED
+            value: {{ .Values.quoteservice.http.tls.enabled | default "false" | quote }}
+          - name: QUOTESERVICE_HTTP_TLS_CERT_PATH
+            value: {{ .Values.quoteservice.http.tls.certPath | default "/etc/quoteservice/tls/tls.crt" | quote }}
+          - name: QUOTESERVICE_HTTP_TLS_KEY_PATH
+            value: {{ .Values.quoteservice.http.tls.keyPath | default "/etc/quoteservice/tls/tls.key" | quote }}
+          - name: QUOTESERVICE_HTTP_TLS_CLIENT_CA_PATH
+            value: {{ .Values.quoteservice.http.tls.clientCAPath | default "/etc/quoteservice/client-ca/ca.crt" | quote }}
+          - name: QUOTESERVICE_GRPC_TLS_ENABLED
+            value: {{ .Values.quoteservice.grpc.tls.enabled | default "false" | quote }}
+          - name: QUOTESERVICE_GRPC_TLS_CERT_PATH
+            value: {{ .Values.quoteservice.grpc.tls.certPath | default "/etc/quoteservice/tls/tls.crt" | quote }}
+          - name: QUOTESERVICE_GRPC_TLS_KEY_PATH
+            value: {{ .Values.quoteservice.grpc.tls.keyPath | default "/etc/quoteservice/tls/tls.key" | quote }}
+          - name: QUOTESERVICE_GRPC_TLS_CLIENT_CA_PATH
+            value: {{ .Values.quoteservice.grpc.tls.clientCAPath | default "/etc/quoteservice/client-ca/ca.crt" | quote }}
