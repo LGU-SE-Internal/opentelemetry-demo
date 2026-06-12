@@ -9,3 +9,4 @@ pybreaker>=1.0.0
 structlog>=24.2.0
 opentelemetry-sdk~=1.25
 opentelemetry-api~=1.25
+prometheus-client>=0.20.0
