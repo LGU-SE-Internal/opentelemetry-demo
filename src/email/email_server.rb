@@ -1117,3 +1117,144 @@ end
 
 # Register health servicer with the gRPC server
 server.handle(health_checker)
+
+# Graceful Shutdown Implementation
+$shutting_down = false
+$in_flight_operations = Concurrent::AtomicFixnum.new(0)
+$shutdown_lock = Mutex.new
+$logger = Logger.new(STDOUT)
+$logger.level = Logger::INFO
+
+def log_shutdown_event(level, event, extra_fields = {})
+  base_fields = {
+    service: "email",
+    component: "graceful_shutdown",
+    level: level.upcase,
+    event: event
+  }
+  log_entry = base_fields.merge(extra_fields).map { |k, v| "#{k}=#{v}" }.join(" ")
+  $logger.send(level.downcase, log_entry)
+end
+
+def graceful_shutdown(signal)
+  exit_code = 0
+  $shutdown_lock.synchronize do
+    return if $shutting_down
+    $shutting_down = true
+
+    log_shutdown_event("info", "graceful_shutdown_start", signal: signal, timeout_seconds: 30)
+
+    # Stop accepting new HTTP requests
+    if defined?(Sinatra::Application)
+      Sinatra::Application.quit!
+    end
+
+    # Stop worker pool from accepting new jobs
+    @@worker_pool.shutdown if defined?(@@worker_pool)
+
+    start_time = Time.now
+    last_progress_log = start_time
+
+    loop do
+      elapsed = (Time.now - start_time).to_i
+      pending = $in_flight_operations.value
+
+      break if pending <= 0
+      break if elapsed >= 30
+
+      # Log progress every 5 seconds
+      if (Time.now - last_progress_log) >= 5
+        log_shutdown_event("info", "graceful_shutdown_in_progress", pending_operations: pending, elapsed_seconds: elapsed)
+        last_progress_log = Time.now
+      end
+
+      sleep 0.5
+    end
+
+    total_elapsed = (Time.now - start_time).to_i
+    final_pending = $in_flight_operations.value
+
+    if final_pending > 0
+      log_shutdown_event("error", "graceful_shutdown_timeout", elapsed_seconds: 30, pending_operations: final_pending)
+      @@worker_pool.kill if defined?(@@worker_pool)
+      exit_code = 1
+    else
+      log_shutdown_event("info", "graceful_shutdown_complete", total_elapsed_seconds: total_elapsed, completed_operations: $in_flight_operations.value)
+      @@worker_pool.wait_for_termination(1) if defined?(@@worker_pool)
+      exit_code = 0
+    end
+  end
+
+  exit exit_code
+end
+
+# Register signal handlers
+Signal.trap("SIGINT") do
+  Thread.new { graceful_shutdown("SIGINT") }
+end
+
+Signal.trap("SIGTERM") do
+  Thread.new { graceful_shutdown("SIGTERM") }
+end
+
+# Modify Sinatra to return 503 when shutting down
+before do
+  if $shutting_down
+    halt 503, { "Content-Type" => "text/plain" }, "Service Unavailable: shutting down"
+  end
+end
+
+# Track in-flight operations for email delivery
+class EmailService
+  class << self
+    alias_method :original_send, :send
+
+    def send(to:, subject:, body:, **options)
+      return false if $shutting_down
+      
+      $in_flight_operations.increment
+      begin
+        original_send(to: to, subject: subject, body: body, **options)
+      ensure
+        $in_flight_operations.decrement
+      end
+    end
+  end
+end
+
+# Track in-flight operations for DLQ writes
+module DLQBackend
+  module FilesystemBackendPatch
+    def write(entry)
+      return false if $shutting_down
+      
+      $in_flight_operations.increment
+      begin
+        super(entry)
+      ensure
+        $in_flight_operations.decrement
+      end
+    end
+  end
+
+  class FilesystemBackend
+    prepend FilesystemBackendPatch
+  end
+
+  module RedisBackendPatch
+    def write(entry)
+      return false if $shutting_down
+      
+      $in_flight_operations.increment
+      begin
+        super(entry)
+      ensure
+        $in_flight_operations.decrement
+      end
+    end
+  end
+
+  class RedisBackend
+    prepend RedisBackendPatch
+  end
+end
