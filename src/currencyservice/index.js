@@ -68,13 +68,9 @@ function initLogger(serviceName, config) {
       logEntry.trace_flags = `0${spanContext.traceFlags.toString(16)}`;
     }
 
-    // Output to appropriate stream
+    // Output to stdout for structured logging (per AC9 requirement)
     const logLine = JSON.stringify(logEntry) + '\n';
-    if (severityNumber >= 17) {
-      process.stderr.write(logLine);
-    } else {
-      process.stdout.write(logLine);
-    }
+    process.stdout.write(logLine);
 
     // In real implementation, we would batch and send to OTLP endpoint here
     if (config.endpoint && config.endpoint.trim() !== '') {

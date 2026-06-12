@@ -1,4 +1,4 @@
-const { initLogger } = require('../index');
+const { initLogger, resetLogger } = require('../index');
 const { context, trace } = require('@opentelemetry/api');
 
 describe('Currency Service Structured Logging Acceptance Criteria', () => {
@@ -10,6 +10,12 @@ describe('Currency Service Structured Logging Acceptance Criteria', () => {
     key: 'test-key-data',
     ca: 'test-ca-data'
   };
+
+  // Reset logger and clear all mocks between tests
+  beforeEach(() => {
+    resetLogger();
+    jest.clearAllMocks();
+  });
 
   // AC-1: Logger initializes successfully with OTLP logs endpoint set
   test('test_ac1_logger_initializes_successfully_with_otlp_endpoint', () => {
@@ -69,7 +75,7 @@ describe('Currency Service Structured Logging Acceptance Criteria', () => {
 
     const testErrorMessage = 'Test original console.error message';
     const testErrorAttributes = { errorCode: 500, errorStack: 'test stack trace' };
-    const logOutput = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const logOutput = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
     
     logger.error(testErrorMessage, testErrorAttributes);
     const logEntry = JSON.parse(logOutput.mock.calls[0][0]);
