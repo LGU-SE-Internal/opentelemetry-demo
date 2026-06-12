@@ -347,4 +347,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { initLogger, resetLogger };
+module.exports = { initLogger, resetLogger, healthImpl, SERVING_STATUS, NOT_SERVING_STATUS, SERVICE_NAME };
