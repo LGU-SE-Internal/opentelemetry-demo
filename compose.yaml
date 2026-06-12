@@ -837,6 +837,7 @@ services:
       - "${OTEL_COLLECTOR_PORT_GRPC}"
       - "${OTEL_COLLECTOR_PORT_HTTP}"
       - "13133:13133"
+      - "55679:55679"
     logging: *logging
     environment:
       - AD_PROMETHEUS_PORT
@@ -850,7 +851,11 @@ services:
       - POSTGRES_HOST
       - POSTGRES_PORT
       - POSTGRES_MONITORING_PASSWORD
-      - GOMEMLIMIT=160MiB
+      - GOMEMLIMIT=800MiB
+      - OTEL_COLLECTOR_MEMORY_LIMIT_MIB
+      - OTEL_COLLECTOR_GLOBAL_RATE_LIMIT_SPS
+      - OTEL_COLLECTOR_PER_SERVICE_RATE_LIMIT_SPS
+      - OTEL_COLLECTOR_QUEUE_SIZE
 
 volumes:
   astronomy-db-data:

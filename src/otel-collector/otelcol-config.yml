@@ -165,13 +165,24 @@ exporters:
 
 processors:
   # Memory Limiter Processor: Prevents OOM crashes by rejecting incoming data when memory exceeds limits
-  # OTEL_COLLECTOR_MEMORY_LIMIT_MIB: Maximum allowed memory usage (default 512MiB for dev, recommended 80% of allocated container memory in production)
-  # OTEL_COLLECTOR_MEMORY_SPIKE_LIMIT_MIB: Maximum allowed sudden memory spike (default 256MiB for dev, recommended 20-30% of memory limit in production)
+  # OTEL_COLLECTOR_MEMORY_LIMIT_MIB: Maximum allowed memory usage (default 768MiB, 75% of 1Gi container limit for production)
+  # OTEL_COLLECTOR_MEMORY_SPIKE_LIMIT_MIB: Maximum allowed sudden memory spike (default 256MiB, 20% of memory limit)
   # OTEL_COLLECTOR_MEMORY_CHECK_INTERVAL: How often to check memory usage (default 1s, valid Go duration format)
   memory_limiter:
-    limit_mib: ${env:OTEL_COLLECTOR_MEMORY_LIMIT_MIB:-512}
+    limit_mib: ${env:OTEL_COLLECTOR_MEMORY_LIMIT_MIB:-768}
     spike_limit_mib: ${env:OTEL_COLLECTOR_MEMORY_SPIKE_LIMIT_MIB:-256}
     check_interval: ${env:OTEL_COLLECTOR_MEMORY_CHECK_INTERVAL:-1s}
+  # Rate Limiter Processor: Enforces per-service and global rate limits for incoming telemetry
+  # OTEL_COLLECTOR_GLOBAL_RATE_LIMIT_SPS: Global maximum spans per second across all services (default 10000)
+  # OTEL_COLLECTOR_PER_SERVICE_RATE_LIMIT_SPS: Maximum spans per second allowed per service (default 2000)
+  # OTEL_COLLECTOR_QUEUE_SIZE: Number of telemetry batches to queue when limits are temporarily exceeded (default 1000)
+  ratelimit:
+    traces:
+      rate: ${env:OTEL_COLLECTOR_GLOBAL_RATE_LIMIT_SPS:-10000}
+      per_attribute_rate:
+        - key: "service.name"
+          rate: ${env:OTEL_COLLECTOR_PER_SERVICE_RATE_LIMIT_SPS:-2000}
+    queue_size: ${env:OTEL_COLLECTOR_QUEUE_SIZE:-1000}
   # Batch Processor: Batches telemetry data before exporting to reduce overhead
   # OTEL_COLLECTOR_BATCH_PROCESSOR_QUEUE_SIZE: Maximum number of batches held in memory (default 1000 for dev, increase for high throughput production environments)
   batch:
@@ -270,23 +281,23 @@ connectors:
   span_metrics:
 
 service:
-  extensions: [health_check]
+  extensions: [health_check, zpages]
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [resourcedetection, memory_limiter, transform/sanitize_spans, batch]
+      processors: [memory_limiter, ratelimit, resourcedetection, transform/sanitize_spans, batch]
       exporters: [debug, span_metrics]
     metrics:
       receivers: [docker_stats, http_check/frontend-proxy, host_metrics, nginx, otlp, redis, postgresql, prometheus/ad, span_metrics]
-      processors: [resourcedetection, memory_limiter, batch]
+      processors: [memory_limiter, ratelimit, resourcedetection, batch]
       exporters: [debug]
     logs:
       receivers: [otlp]
-      processors: [resourcedetection, memory_limiter, transform/sanitize_logs, batch]
+      processors: [memory_limiter, ratelimit, resourcedetection, transform/sanitize_logs, batch]
       exporters: [debug]
     profiles:
       receivers: [otlp]
-      processors: [filter/sanitize_profiles, memory_limiter, batch]
+      processors: [memory_limiter, ratelimit, filter/sanitize_profiles, batch]
       exporters: [debug]
   telemetry:
     metrics:
