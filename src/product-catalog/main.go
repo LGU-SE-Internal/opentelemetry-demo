@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -27,6 +28,11 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/otel/exporters/prometheus"
 
 	lru "github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/cenkalti/backoff/v4"
@@ -42,6 +48,7 @@ import (
 	otelcodes "go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/log/global"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/sdk/metric"
 	semconv "go.opentelemetry.io/otel/semconv/v1.38.0"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/time/rate"
@@ -67,6 +74,10 @@ var (
 	logger *slog.Logger
 	db     *sql.DB
 	reg    metric.Registration
+	promRegistry *prometheus.Registry
+	productSearchRequestsTotal *prometheus.CounterVec
+	productViewRequestsTotal *prometheus.CounterVec
+	catalogLoadOperationsTotal *prometheus.CounterVec
 	alphanumericRegex = regexp.MustCompile(`^[a-zA-Z0-9]*$`)
 	shutdownInProgress atomic.Bool
 	catalogLoaded atomic.Bool
@@ -789,6 +800,7 @@ func init() {
 func initDatabase() error {
 	connStr := os.Getenv("DB_CONNECTION_STRING")
 	if connStr == "" {
+		catalogLoadOperationsTotal.WithLabelValues("failure").Inc()
 		return fmt.Errorf("DB_CONNECTION_STRING environment variable not set")
 	}
 
@@ -804,20 +816,87 @@ func initDatabase() error {
 			OmitRows:             true,
 		}))
 	if err != nil {
+		catalogLoadOperationsTotal.WithLabelValues("failure").Inc()
 		return fmt.Errorf("failed to open database connection: %w", err)
 	}
 
 	reg, err = otelsql.RegisterDBStatsMetrics(db, dbAttrs)
 	if err != nil {
+		catalogLoadOperationsTotal.WithLabelValues("failure").Inc()
 		return fmt.Errorf("failed to register database metrics: %w", err)
 	}
 
 	// Test the connection
 	if err := db.Ping(); err != nil {
+		catalogLoadOperationsTotal.WithLabelValues("failure").Inc()
 		return fmt.Errorf("failed to ping database: %w", err)
 	}
 
 	logger.Info("Database connection established")
+	catalogLoadOperationsTotal.WithLabelValues("success").Inc()
+	return nil
+}
+
+// StartMetricsServer starts an HTTP server on the given port that exposes the /metrics endpoint.
+// Runs in a separate goroutine, returns immediately after server starts listening.
+// Returns an error if the port is already in use or server fails to start.
+func StartMetricsServer(port int) error {
+	// Create Prometheus exporter
+	exporter, err := prometheus.New(
+		prometheus.WithRegisterer(promRegistry),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create prometheus exporter: %w", err)
+	}
+
+	// Create meter provider with the prometheus exporter
+	provider := metric.NewMeterProvider(
+		metric.WithReader(exporter),
+		metric.WithResource(
+			otel.GetMeterProvider().(*metric.MeterProvider).Resource(),
+		),
+	)
+	otel.SetMeterProvider(provider)
+
+	// Set up HTTP server
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.HandlerFor(promRegistry, promhttp.HandlerOpts{
+		EnableOpenMetrics: false,
+	}))
+
+	server := &http.Server{
+		Addr:    fmt.Sprintf(":%d", port),
+		Handler: mux,
+	}
+
+	// Test binding to the port first
+	ln, err := net.Listen("tcp", server.Addr)
+	if err != nil {
+		return err
+	}
+
+	// Start server in goroutine
+	go func() {
+		if err := server.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error(fmt.Sprintf("Metrics server failed: %v", err))
+			os.Exit(1)
+		}
+	}()
+
+	// Handle graceful shutdown
+	go func() {
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
+		<-sigChan
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Shutdown(ctx); err != nil {
+			logger.Error(fmt.Sprintf("Metrics server shutdown failed: %v", err))
+		}
+	}()
+
+	logger.Info(fmt.Sprintf("Metrics server started on port %d", port))
 	return nil
 }
 
@@ -865,6 +944,66 @@ func main() {
 			}
 		}
 	}()
+
+	// Initialize Prometheus metrics
+	promRegistry = prometheus.NewRegistry()
+	// Add Go runtime metrics
+	promRegistry.MustRegister(collectors.NewGoCollector())
+	promRegistry.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+
+	// Initialize business metrics
+	productSearchRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "product_search_requests_total",
+			Help: "Total number of product search requests",
+			ConstLabels: prometheus.Labels{
+				"service_name": "product-catalog",
+			},
+		},
+		[]string{"result_count_bucket"},
+	)
+	promRegistry.MustRegister(productSearchRequestsTotal)
+
+	productViewRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "product_view_requests_total",
+			Help: "Total number of product view requests",
+			ConstLabels: prometheus.Labels{
+				"service_name": "product-catalog",
+			},
+		},
+		[]string{"product_id"},
+	)
+	promRegistry.MustRegister(productViewRequestsTotal)
+
+	catalogLoadOperationsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "catalog_load_operations_total",
+			Help: "Total number of catalog load operations",
+			ConstLabels: prometheus.Labels{
+				"service_name": "product-catalog",
+			},
+		},
+		[]string{"status"},
+	)
+	promRegistry.MustRegister(catalogLoadOperationsTotal)
+
+	// Get metrics port from env
+	metricsPortStr := os.Getenv("PRODUCT_CATALOG_METRICS_PORT")
+	if metricsPortStr == "" {
+		metricsPortStr = "9464"
+	}
+	metricsPort, err := strconv.Atoi(metricsPortStr)
+	if err != nil || metricsPort < 1 || metricsPort > 65535 {
+		logger.Error(fmt.Sprintf("Invalid metrics port: %s", metricsPortStr))
+		os.Exit(1)
+	}
+
+	// Start metrics server
+	if err := StartMetricsServer(metricsPort); err != nil {
+		logger.Error(fmt.Sprintf("Failed to start metrics server: %v", err))
+		os.Exit(1)
+	}
 
 	openfeature.AddHooks(otelhooks.NewTracesHook())
 	provider, err := flagd.NewProvider()
@@ -1293,6 +1432,9 @@ func (p *productCatalog) GetProduct(ctx context.Context, req *pb.GetProductReque
 		slog.String("demo.product.id", req.Id),
 	)
 
+	// Increment product view counter
+	productViewRequestsTotal.WithLabelValues(req.Id).Inc()
+
 	return found, nil
 }
 
@@ -1317,6 +1459,21 @@ func (p *productCatalog) SearchProducts(ctx context.Context, req *pb.SearchProdu
 	span.SetAttributes(
 		attribute.Int("demo.product.search.count", len(result)),
 	)
+
+	// Increment search request counter
+	var bucket string
+	switch {
+	case len(result) == 0:
+		bucket = "0"
+	case len(result) <= 10:
+		bucket = "1-10"
+	case len(result) <= 100:
+		bucket = "11-100"
+	default:
+		bucket = "100+"
+	}
+	productSearchRequestsTotal.WithLabelValues(bucket).Inc()
+
 	return &pb.SearchProductsResponse{Results: result, NextPageToken: 0}, nil
 }
 
